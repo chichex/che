@@ -68,3 +68,13 @@ func New(t *testing.T) *Env {
 		ScriptDir: scriptDir,
 	}
 }
+
+// RemoveFake deletes the symlink for the given identity so the binary is no
+// longer on PATH. Used by tests that simulate a missing external tool.
+func (e *Env) RemoveFake(identity string) {
+	e.t.Helper()
+	link := filepath.Join(e.FakeBin, identity)
+	if err := os.Remove(link); err != nil {
+		e.t.Fatalf("harness: remove fake %s: %v", identity, err)
+	}
+}
