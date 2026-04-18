@@ -33,38 +33,18 @@ const (
 	screenResult
 )
 
-// validatorPreset agrupa una lista de validators bajo un nombre mostrable
-// en la TUI. Mantiene simple la selección: el usuario elige un preset en
-// vez de armar la lista manualmente.
-type validatorPreset struct {
-	label      string
-	validators []explore.Validator
-}
+// maxValidatorsPerAgent define cuántas instancias del mismo agente se
+// pueden seleccionar. El design permite repetir tipo (ej: codex×2); le
+// ponemos tope 2 para mantener la suma razonable (2-3 validadores en total).
+const maxValidatorsPerAgent = 2
 
-var validatorPresets = []validatorPreset{
-	{label: "Codex + Gemini (default — diversidad)", validators: []explore.Validator{
-		{Agent: explore.AgentCodex, Instance: 1},
-		{Agent: explore.AgentGemini, Instance: 1},
-	}},
-	{label: "Opus + Codex", validators: []explore.Validator{
-		{Agent: explore.AgentOpus, Instance: 1},
-		{Agent: explore.AgentCodex, Instance: 1},
-	}},
-	{label: "Opus + Gemini", validators: []explore.Validator{
-		{Agent: explore.AgentOpus, Instance: 1},
-		{Agent: explore.AgentGemini, Instance: 1},
-	}},
-	{label: "Codex × 2 + Gemini (más profundidad en código)", validators: []explore.Validator{
-		{Agent: explore.AgentCodex, Instance: 1},
-		{Agent: explore.AgentCodex, Instance: 2},
-		{Agent: explore.AgentGemini, Instance: 1},
-	}},
-	{label: "Opus + Codex + Gemini (los 3)", validators: []explore.Validator{
-		{Agent: explore.AgentOpus, Instance: 1},
-		{Agent: explore.AgentCodex, Instance: 1},
-		{Agent: explore.AgentGemini, Instance: 1},
-	}},
-	{label: "Sin validadores (CI/debug)", validators: nil},
+// validatorAgentDescriptions son los textos cortos que se muestran al lado
+// de cada checkbox. Orden pensado para diversidad: Opus primero (mismo
+// ejecutor por default), después los otros dos.
+var validatorAgentDescriptions = map[explore.Agent]string{
+	explore.AgentOpus:   "Claude Opus — si ya es tu ejecutor, sumarlo da menos diversidad",
+	explore.AgentCodex:  "Codex CLI — segunda mirada técnica, criterio distinto",
+	explore.AgentGemini: "Gemini CLI — tercera mirada, útil para diversidad",
 }
 
 type menuItem struct {
@@ -106,11 +86,12 @@ type Model struct {
 	exploreCursor     int
 	exploreLoadErr    error
 
-	// selector de agente ejecutor + preset de validadores
-	exploreChosenRef     string
-	exploreAgentIdx      int
-	exploreChosenAgent   explore.Agent
-	exploreValidatorsIdx int
+	// selector de agente ejecutor + checkbox de validadores
+	exploreChosenRef       string
+	exploreAgentIdx        int
+	exploreChosenAgent     explore.Agent
+	exploreValidatorCursor int
+	exploreValidatorCount  map[explore.Agent]int
 
 	// resultado final
 	resultLines []string
@@ -360,20 +341,29 @@ func (m Model) handleExploreAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		m.exploreChosenAgent = explore.ValidAgents[m.exploreAgentIdx]
-		m.exploreValidatorsIdx = 0
-		m.screen = screenExploreValidators
-		return m, nil
+		return m.enterValidatorsScreen(), nil
 	}
 	// Atajos numéricos 1..N para selección rápida del ejecutor.
 	for i := range explore.ValidAgents {
 		if k == fmt.Sprint(i+1) {
 			m.exploreChosenAgent = explore.ValidAgents[i]
-			m.exploreValidatorsIdx = 0
-			m.screen = screenExploreValidators
-			return m, nil
+			return m.enterValidatorsScreen(), nil
 		}
 	}
 	return m, nil
+}
+
+// enterValidatorsScreen inicializa el estado de la pantalla de validadores
+// con el default (codex + gemini, 1 cada uno) cada vez que se entra. El
+// usuario puede ajustar con space antes de mandar.
+func (m Model) enterValidatorsScreen() Model {
+	m.exploreValidatorCursor = 0
+	m.exploreValidatorCount = map[explore.Agent]int{
+		explore.AgentCodex:  1,
+		explore.AgentGemini: 1,
+	}
+	m.screen = screenExploreValidators
+	return m
 }
 
 func (m Model) handleExploreValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -385,23 +375,39 @@ func (m Model) handleExploreValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "up", "k":
-		m.exploreValidatorsIdx = (m.exploreValidatorsIdx - 1 + len(validatorPresets)) % len(validatorPresets)
+		m.exploreValidatorCursor = (m.exploreValidatorCursor - 1 + len(explore.ValidAgents)) % len(explore.ValidAgents)
 		return m, nil
 	case "down", "j":
-		m.exploreValidatorsIdx = (m.exploreValidatorsIdx + 1) % len(validatorPresets)
+		m.exploreValidatorCursor = (m.exploreValidatorCursor + 1) % len(explore.ValidAgents)
+		return m, nil
+	case " ", "space", "x":
+		// Cycle 0 → 1 → 2 → 0 sobre el agente bajo el cursor.
+		a := explore.ValidAgents[m.exploreValidatorCursor]
+		m.exploreValidatorCount[a] = (m.exploreValidatorCount[a] + 1) % (maxValidatorsPerAgent + 1)
 		return m, nil
 	case "enter":
-		preset := validatorPresets[m.exploreValidatorsIdx]
-		return m.startExploreFlow(m.exploreChosenRef, m.exploreChosenAgent, preset.validators)
-	}
-	// Atajos numéricos 1..N
-	for i := range validatorPresets {
-		if k == fmt.Sprint(i+1) {
-			preset := validatorPresets[i]
-			return m.startExploreFlow(m.exploreChosenRef, m.exploreChosenAgent, preset.validators)
+		validators := validatorsFromCounts(m.exploreValidatorCount)
+		total := len(validators)
+		// Reglas: 0 (skip), 2 o 3 son válidos; 1 y 4+ no.
+		if total != 0 && (total < 2 || total > 3) {
+			return m, nil
 		}
+		return m.startExploreFlow(m.exploreChosenRef, m.exploreChosenAgent, validators)
 	}
 	return m, nil
+}
+
+// validatorsFromCounts traduce el mapa de counts a una lista de Validators
+// con instance correcto (1, 2, ...) en el orden canónico de ValidAgents.
+func validatorsFromCounts(counts map[explore.Agent]int) []explore.Validator {
+	var out []explore.Validator
+	for _, a := range explore.ValidAgents {
+		n := counts[a]
+		for i := 1; i <= n; i++ {
+			out = append(out, explore.Validator{Agent: a, Instance: i})
+		}
+	}
+	return out
 }
 
 func (m Model) handleIdeaInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -685,26 +691,68 @@ func renderExploreValidators(m Model) string {
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("Elegí validadores"))
 	sb.WriteString("\n")
-	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("Issue #%s · ejecutor: %s — ¿qué agentes revisan el plan?",
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("Issue #%s · ejecutor: %s — marcá con space (0/1/2 de cada)",
 		m.exploreChosenRef, m.exploreChosenAgent)))
 	sb.WriteString("\n\n")
 
-	for i, p := range validatorPresets {
+	total := 0
+	for i, a := range explore.ValidAgents {
+		count := m.exploreValidatorCount[a]
+		total += count
+		box := renderCheckbox(count)
 		prefix := "  "
 		style := menuItemStyle
-		if i == m.exploreValidatorsIdx {
+		if i == m.exploreValidatorCursor {
 			prefix = "▸ "
 			style = menuSelectedStyle
 		}
-		num := menuNumberStyle.Render(fmt.Sprintf("%d.", i+1))
-		line := prefix + num + " " + p.label
+		name := strings.ToUpper(string(a)[:1]) + string(a)[1:]
+		line := prefix + box + "  " + name
+		if desc, ok := validatorAgentDescriptions[a]; ok {
+			line += "  " + comingSoonStyle.Render("— "+desc)
+		}
 		sb.WriteString(style.Render(line) + "\n")
 	}
 
 	sb.WriteString("\n")
-	sb.WriteString(hintStyle.Render("↑/↓ navega · 1-6 atajo · Enter elige · Esc vuelve · Ctrl+C sale"))
+	sb.WriteString("  " + renderValidatorTotal(total) + "\n")
+
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("↑/↓ navega · Space cycle 0/1/2 · Enter manda · Esc vuelve · Ctrl+C sale"))
 	sb.WriteString("\n")
 	return sb.String()
+}
+
+// renderCheckbox genera la caja visible según el count: 0=vacía, 1=×, 2=××.
+func renderCheckbox(count int) string {
+	switch count {
+	case 0:
+		return "[  ]"
+	case 1:
+		return "[x ]"
+	case 2:
+		return "[xx]"
+	}
+	return fmt.Sprintf("[%d]", count)
+}
+
+// renderValidatorTotal imprime el total con un marcador que indica si el
+// count es aceptable (0, 2 o 3) o inválido (1, 4+).
+func renderValidatorTotal(total int) string {
+	mark := "✓"
+	note := ""
+	valid := total == 0 || total == 2 || total == 3
+	if !valid {
+		mark = "✗"
+		note = "  (necesitás 0 para skipear, o 2-3 para validar)"
+	} else if total == 0 {
+		note = "  (sin validadores — solo ejecutor)"
+	}
+	style := successStyle
+	if !valid {
+		style = errorStyle
+	}
+	return style.Render(fmt.Sprintf("Total: %d %s", total, mark)) + comingSoonStyle.Render(note)
 }
 
 func renderExploreSelect(m Model) string {
