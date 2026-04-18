@@ -419,7 +419,7 @@ func runNew(issueRef string, issue *Issue, opts Opts, progress func(string), std
 	}
 
 	if hasHumanGaps(validationResults) {
-		return pauseForHuman(issueRef, issue, validationResults, 1, progress, stdout, stderr)
+		return pauseForHuman(issueRef, issue, resp, validationResults, 1, progress, stdout, stderr)
 	}
 
 	return finalizeToPlan(issueRef, issue, resp, validationResults, agent, opts.Validators, commentURL, progress, stdout, stderr)
@@ -479,7 +479,7 @@ func runResume(issueRef string, issue *Issue, opts Opts, progress func(string), 
 			fmt.Fprintln(stdout, renderValidationReport(results, true))
 			return ExitRetry
 		}
-		return pauseForHuman(issueRef, issue, results, nextIter, progress, stdout, stderr)
+		return pauseForHuman(issueRef, issue, state.ExecutorPlan, results, nextIter, progress, stdout, stderr)
 	}
 
 	// Convergencia: llamamos al executor en modo consolidación para armar el
@@ -521,9 +521,9 @@ func runResume(issueRef string, issue *Issue, opts Opts, progress func(string), 
 
 // pauseForHuman centraliza lo que hacen new y resume cuando detectan human
 // gaps: postean human-request, aseguran status:awaiting-human y salen.
-func pauseForHuman(issueRef string, issue *Issue, results []validatorResult, iter int, progress func(string), stdout, stderr io.Writer) ExitCode {
+func pauseForHuman(issueRef string, issue *Issue, plan *Response, results []validatorResult, iter int, progress func(string), stdout, stderr io.Writer) ExitCode {
 	progress("validadores pidieron input humano; posteando request…")
-	humanReq := renderHumanRequest(results, iter)
+	humanReq := renderHumanRequest(issue.Number, plan, results, iter)
 	if _, err := postComment(issueRef, humanReq); err != nil {
 		fmt.Fprintf(stderr, "error: posting human-request comment: %v\n", err)
 		return ExitRetry
@@ -1236,36 +1236,170 @@ func renderValidatorComment(r validatorResult, iter int) string {
 }
 
 // renderHumanRequest genera el comment que se postea cuando el flow queda en
-// pausa esperando input humano. Lista las preguntas que los validadores
-// marcaron con needs_human=true.
-func renderHumanRequest(results []validatorResult, iter int) string {
+// pausa esperando input humano. Formato pensado para que el humano pueda
+// leer la lista numerada, contestar directo (ej: "1: X. 2: Y.") y que el
+// modelo en iter siguiente mapee respuestas con preguntas sin ambigüedad.
+//
+// Prioriza preguntas del plan marcadas como blocker=true (esas son las que
+// el ejecutor identificó como bloqueantes); complementa con findings
+// needs_human=true de los validadores que no dupliquen preguntas del plan.
+func renderHumanRequest(issueNumber int, plan *Response, results []validatorResult, iter int) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("<!-- claude-cli: flow=explore iter=%d role=human-request -->\n", iter))
-	sb.WriteString("## 🧑 Input humano requerido\n\n")
-	sb.WriteString("Los validadores marcaron preguntas que requieren decisión de producto — no técnicas — y no pueden contestarlas por sí solos. Contestalas en un comment nuevo en este issue (lenguaje libre, una o varias respuestas cubriendo todo). Al re-correr `che explore`, el flow va a leer tus respuestas y continuar desde donde quedó.\n\n")
-	sb.WriteString("### Preguntas\n")
+	sb.WriteString("## 🧑 Necesito tu input para seguir\n\n")
+
+	planQs := collectPlanBlockers(plan)
+	extraQs := collectValidatorQuestions(results, planQs)
+
+	if len(planQs) == 0 && len(extraQs) == 0 {
+		sb.WriteString("_No se identificaron preguntas específicas; revisá los comments de validadores arriba y contestá lo que corresponda._\n")
+		return sb.String()
+	}
+
+	sb.WriteString(fmt.Sprintf("Quedaron %d pregunta(s) abiertas que necesito que resuelvas antes de cerrar el plan. Están numeradas para que puedas contestarlas directo.\n\n", len(planQs)+len(extraQs)))
+
+	n := 1
+	if len(planQs) > 0 {
+		sb.WriteString("### Preguntas del plan\n\n")
+		sb.WriteString("_Las que el ejecutor marcó como bloqueantes para el diseño._\n\n")
+		for _, q := range planQs {
+			sb.WriteString(fmt.Sprintf("**%d. %s**\n\n", n, q.Q))
+			if strings.TrimSpace(q.Why) != "" {
+				sb.WriteString("> " + q.Why + "\n\n")
+			}
+			n++
+		}
+	}
+
+	if len(extraQs) > 0 {
+		sb.WriteString("### Observaciones adicionales de los validadores\n\n")
+		sb.WriteString("_Cosas que aparecieron en la validación y también requieren decisión tuya._\n\n")
+		for _, e := range extraQs {
+			sb.WriteString(fmt.Sprintf("**%d. %s** _(vía %s)_\n\n", n, e.text, e.source))
+			if strings.TrimSpace(e.context) != "" {
+				sb.WriteString("> " + e.context + "\n\n")
+			}
+			n++
+		}
+	}
+
+	sb.WriteString("---\n\n")
+	sb.WriteString("### Cómo contestar\n\n")
+	sb.WriteString("Dejá un comment nuevo en este issue en cualquiera de estos formatos:\n\n")
+	sb.WriteString("- **Numerado** (recomendado): `1: mi respuesta. 2: mi otra respuesta. 3: ...`\n")
+	sb.WriteString("- **Prosa libre**: \"Para la 1 vamos con A porque X. Para la 2 preferimos B. La 3 la descartamos...\"\n")
+	sb.WriteString("- **Varios comments**: uno por pregunta, como prefieras.\n\n")
+	sb.WriteString(fmt.Sprintf("Cuando termines, corré `che explore %d` — el flow detecta tu respuesta, re-valida con los mismos agentes y, si queda sin ambigüedades, consolida el plan final en el body del issue.\n", issueNumber))
+
+	return sb.String()
+}
+
+// collectPlanBlockers devuelve las preguntas del plan marcadas como
+// blocker=true; son las principales a contestar.
+func collectPlanBlockers(plan *Response) []Question {
+	if plan == nil {
+		return nil
+	}
+	var out []Question
+	for _, q := range plan.Questions {
+		if q.Blocker && strings.TrimSpace(q.Q) != "" {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// extraQuestion es un finding needs_human de un validador que no está
+// cubierto por ninguna pregunta del plan.
+type extraQuestion struct {
+	text    string
+	context string
+	source  string
+}
+
+// collectValidatorQuestions junta los findings con needs_human=true de los
+// validadores y descarta los que ya aparecen cubiertos por las preguntas del
+// plan (heurística: substring en cualquier dirección tras normalizar).
+// También filtra findings que son meta-descripciones ("las 3 preguntas
+// bloqueantes definen...") identificables porque no mencionan conceptos
+// concretos del dominio.
+func collectValidatorQuestions(results []validatorResult, planQs []Question) []extraQuestion {
+	normPlan := make([]string, 0, len(planQs))
+	for _, q := range planQs {
+		normPlan = append(normPlan, normalizeQuestion(q.Q))
+	}
+	seen := map[string]bool{}
+	var out []extraQuestion
 	for _, r := range results {
 		if r.Response == nil {
 			continue
 		}
-		wrote := false
+		label := fmt.Sprintf("%s#%d", r.Validator.Agent, r.Validator.Instance)
 		for _, f := range r.Response.Findings {
 			if !f.NeedsHuman {
 				continue
 			}
-			sb.WriteString(fmt.Sprintf("- **[%s#%d · %s]** %s\n",
-				r.Validator.Agent, r.Validator.Instance, f.Area, f.Issue))
-			if f.Suggestion != "" {
-				sb.WriteString("  - contexto: " + f.Suggestion + "\n")
+			if isMetaFinding(f.Issue) {
+				continue
 			}
-			wrote = true
-		}
-		if !wrote && r.Response.Verdict == "needs_human" {
-			sb.WriteString(fmt.Sprintf("- **[%s#%d]** %s\n",
-				r.Validator.Agent, r.Validator.Instance, r.Response.Summary))
+			norm := normalizeQuestion(f.Issue)
+			if norm == "" || seen[norm] {
+				continue
+			}
+			// Dedupe vs plan: si el texto contiene o está contenido en alguna
+			// pregunta del plan, lo consideramos duplicado.
+			covered := false
+			for _, p := range normPlan {
+				if p != "" && (strings.Contains(p, norm) || strings.Contains(norm, p)) {
+					covered = true
+					break
+				}
+			}
+			if covered {
+				continue
+			}
+			seen[norm] = true
+			out = append(out, extraQuestion{text: f.Issue, context: f.Suggestion, source: label})
 		}
 	}
-	return sb.String()
+	return out
+}
+
+// normalizeQuestion baja a lowercase, quita signos de puntuación y colapsa
+// espacios para comparar textos parecidos.
+var punctRe = regexp.MustCompile(`[^\p{L}\p{N}\s]+`)
+var wsRe = regexp.MustCompile(`\s+`)
+
+func normalizeQuestion(s string) string {
+	s = strings.ToLower(s)
+	s = punctRe.ReplaceAllString(s, " ")
+	s = wsRe.ReplaceAllString(s, " ")
+	return strings.TrimSpace(s)
+}
+
+// isMetaFinding detecta cuando un finding del validador es una
+// meta-descripción ("las 3 preguntas bloqueantes...") en lugar de una
+// pregunta concreta de producto. Heurística liviana: empieza con
+// demostrativos o habla genéricamente de preguntas.
+func isMetaFinding(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	prefixes := []string{
+		"las preguntas ",
+		"estas preguntas ",
+		"los puntos ",
+		"escalar ",
+	}
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	// También descartamos frases muy largas que mencionen "preguntas" como
+	// tema en vez de plantear una (típico: "las N preguntas definen...").
+	if strings.Contains(s, "preguntas bloqueantes") || strings.Contains(s, "preguntas que definen") {
+		return true
+	}
+	return false
 }
 
 // renderValidationReport arma el bloque de texto que se imprime en stdout
