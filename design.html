@@ -1,0 +1,1923 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude CLI — Flujos a cerrar</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --bg-card: #161a22;
+    --bg-card-hover: #1c2130;
+    --border: #262b38;
+    --text: #e4e7ec;
+    --text-dim: #8b93a7;
+    --text-subtle: #5e6577;
+    --accent: #d98757;
+    --accent-dim: #8a5537;
+    --ai-yes-bg: rgba(217, 135, 87, 0.12);
+    --ai-yes-fg: #d98757;
+    --ai-yes-border: rgba(217, 135, 87, 0.35);
+    --ai-no-bg: rgba(76, 175, 120, 0.08);
+    --ai-no-fg: #6ab085;
+    --ai-no-border: rgba(106, 176, 133, 0.3);
+    --pending: #6b7280;
+    --code-bg: #0a0c11;
+    --shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 48px 32px;
+    min-height: 100vh;
+  }
+
+  .container {
+    max-width: 960px;
+    margin: 0 auto;
+  }
+
+  header {
+    margin-bottom: 48px;
+    padding-bottom: 32px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  h1 {
+    font-size: 2.25rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin-bottom: 12px;
+  }
+
+  h1 .accent {
+    color: var(--accent);
+  }
+
+  .subtitle {
+    color: var(--text-dim);
+    font-size: 1.05rem;
+    max-width: 680px;
+  }
+
+  .principles {
+    margin-top: 24px;
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .principle {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: 999px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  .legend {
+    display: flex;
+    gap: 16px;
+    margin-top: 20px;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+    align-items: center;
+    flex-wrap: wrap;
+  }
+
+  .legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+
+  .legend-dot.yes { background: var(--ai-yes-fg); }
+  .legend-dot.no { background: var(--ai-no-fg); }
+
+  .section-label {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--text-subtle);
+    margin-bottom: 16px;
+    font-weight: 600;
+  }
+
+  .flow-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .flow {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    transition: all 0.15s ease;
+    display: grid;
+    grid-template-columns: 48px 1fr auto;
+    gap: 20px;
+    align-items: start;
+  }
+
+  .flow:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--accent-dim);
+  }
+
+  .flow.ai-no {
+    border-left: 3px solid var(--ai-no-border);
+  }
+
+  .flow.ai-yes {
+    border-left: 3px solid var(--ai-yes-border);
+  }
+
+  .flow-num {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.85rem;
+    color: var(--text-subtle);
+    padding-top: 2px;
+  }
+
+  .flow-body h2 {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 6px;
+    letter-spacing: -0.01em;
+  }
+
+  .flow-body p {
+    color: var(--text);
+    margin-bottom: 10px;
+    font-size: 0.95rem;
+  }
+
+  .flow-body .questions {
+    margin-top: 10px;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+  }
+
+  .flow-body .questions-label {
+    color: var(--text-subtle);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 4px;
+    font-weight: 600;
+  }
+
+  .flow-body ul {
+    list-style: none;
+    padding-left: 0;
+  }
+
+  .flow-body ul li {
+    padding: 2px 0;
+    padding-left: 14px;
+    position: relative;
+  }
+
+  .flow-body ul li::before {
+    content: "·";
+    position: absolute;
+    left: 4px;
+    color: var(--text-subtle);
+  }
+
+  .meta {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: flex-end;
+  }
+
+  .badge {
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 4px 10px;
+    border-radius: 4px;
+    white-space: nowrap;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  .status-pending {
+    background: rgba(107, 114, 128, 0.15);
+    color: var(--pending);
+    border: 1px solid rgba(107, 114, 128, 0.3);
+  }
+
+  .ai-yes {
+    background: var(--ai-yes-bg);
+    color: var(--ai-yes-fg);
+    border: 1px solid var(--ai-yes-border);
+  }
+
+  .ai-no {
+    background: var(--ai-no-bg);
+    color: var(--ai-no-fg);
+    border: 1px solid var(--ai-no-border);
+  }
+
+  .diagram {
+    margin-top: 18px;
+    padding: 18px;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+
+  .diagram-label {
+    color: var(--text-subtle);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 14px;
+    font-weight: 600;
+  }
+
+  .diagram-steps {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+  }
+
+  .step {
+    display: grid;
+    grid-template-columns: 72px 1fr;
+    gap: 14px;
+    align-items: center;
+    padding: 10px 12px;
+    border-radius: 6px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+  }
+
+  .step-actor {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 4px;
+    text-align: center;
+  }
+
+  .step-actor.user {
+    background: rgba(139, 147, 167, 0.12);
+    color: var(--text-dim);
+    border: 1px solid rgba(139, 147, 167, 0.25);
+  }
+
+  .step-actor.ai {
+    background: var(--ai-yes-bg);
+    color: var(--ai-yes-fg);
+    border: 1px solid var(--ai-yes-border);
+  }
+
+  .step-actor.sys {
+    background: var(--ai-no-bg);
+    color: var(--ai-no-fg);
+    border: 1px solid var(--ai-no-border);
+  }
+
+  .step-text {
+    font-size: 0.88rem;
+    color: var(--text);
+    line-height: 1.45;
+  }
+
+  .step-text .hint {
+    color: var(--text-subtle);
+    font-size: 0.8rem;
+    display: block;
+    margin-top: 2px;
+  }
+
+  .arrow {
+    text-align: center;
+    color: var(--text-subtle);
+    font-size: 1rem;
+    line-height: 1;
+    padding: 4px 0;
+    margin-left: 36px;
+  }
+
+  .decisions {
+    margin-top: 14px;
+    font-size: 0.85rem;
+    color: var(--text-dim);
+  }
+
+  .decisions-label {
+    color: var(--ai-no-fg);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 6px;
+    font-weight: 600;
+  }
+
+  .decisions ul {
+    list-style: none;
+    padding-left: 0;
+  }
+
+  .decisions ul li {
+    padding: 3px 0;
+    padding-left: 20px;
+    position: relative;
+    color: var(--text);
+  }
+
+  .decisions ul li::before {
+    content: "✓";
+    position: absolute;
+    left: 2px;
+    color: var(--ai-no-fg);
+    font-weight: 700;
+  }
+
+  .decisions ul li strong {
+    color: var(--text-dim);
+    font-weight: 500;
+  }
+
+  .template-preview {
+    margin-top: 14px;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.82rem;
+    line-height: 1.6;
+    color: var(--text-dim);
+    overflow-x: auto;
+  }
+
+  .template-preview .tmpl-h {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  .template-preview .tmpl-var {
+    color: var(--ai-no-fg);
+  }
+
+  .template-preview .tmpl-label {
+    color: var(--text-subtle);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 8px;
+    display: block;
+    font-family: -apple-system, sans-serif;
+    font-weight: 600;
+  }
+
+  .branches {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 10px;
+    padding-left: 4px;
+    border-left: 2px solid var(--ai-yes-border);
+    padding: 8px 0 8px 14px;
+  }
+
+  .branch {
+    display: grid;
+    grid-template-columns: 22px 1fr;
+    gap: 8px;
+    align-items: start;
+    font-size: 0.82rem;
+    color: var(--text-dim);
+  }
+
+  .branch-num {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-weight: 700;
+    color: var(--accent);
+    text-align: center;
+    background: var(--ai-yes-bg);
+    border-radius: 4px;
+    padding: 1px 0;
+    font-size: 0.78rem;
+  }
+
+  .branch-text strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .obs-section {
+    margin-top: 48px;
+    padding-top: 32px;
+    border-top: 1px solid var(--border);
+  }
+
+  .obs-intro {
+    color: var(--text-dim);
+    font-size: 0.95rem;
+    margin-bottom: 24px;
+    max-width: 720px;
+  }
+
+  .obs-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent-dim);
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin-bottom: 12px;
+    display: grid;
+    grid-template-columns: 40px 1fr auto;
+    gap: 18px;
+    align-items: start;
+  }
+
+  .obs-card.v2 {
+    border-left-color: var(--text-subtle);
+    opacity: 0.85;
+  }
+
+  .obs-num {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--accent);
+    padding-top: 2px;
+  }
+
+  .obs-card.v2 .obs-num {
+    color: var(--text-subtle);
+  }
+
+  .obs-body h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 4px;
+  }
+
+  .obs-body p {
+    font-size: 0.88rem;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+  }
+
+  .obs-example {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.78rem;
+    line-height: 1.6;
+    color: var(--text-dim);
+    white-space: pre-wrap;
+    word-break: break-all;
+    overflow-x: auto;
+  }
+
+  .obs-example .comment { color: var(--text-subtle); }
+  .obs-example .ok { color: var(--ai-no-fg); }
+  .obs-example .warn { color: var(--accent); }
+  .obs-example .key { color: var(--ai-yes-fg); }
+
+  .badge-v1 {
+    background: var(--ai-yes-bg);
+    color: var(--ai-yes-fg);
+    border: 1px solid var(--ai-yes-border);
+  }
+
+  .badge-v2 {
+    background: rgba(107, 114, 128, 0.15);
+    color: var(--text-subtle);
+    border: 1px solid rgba(107, 114, 128, 0.3);
+  }
+
+  @media (max-width: 600px) {
+    .obs-card { grid-template-columns: 1fr; gap: 8px; }
+    .obs-num { display: none; }
+  }
+
+  .walkthrough-section {
+    margin-top: 48px;
+    padding-top: 32px;
+    border-top: 1px solid var(--border);
+  }
+
+  .walkthrough-intro {
+    color: var(--text-dim);
+    font-size: 0.95rem;
+    margin-bottom: 24px;
+    max-width: 720px;
+  }
+
+  .scene {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 22px 26px;
+    margin-bottom: 14px;
+  }
+
+  .scene-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 18px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .scene-num {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--accent);
+    padding: 4px 10px;
+    background: var(--ai-yes-bg);
+    border: 1px solid var(--ai-yes-border);
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+
+  .scene-title {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .scene-title .quote {
+    color: var(--text-dim);
+    font-style: italic;
+    font-weight: 400;
+  }
+
+  .scene-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-bottom: 14px;
+  }
+
+  .scene-step {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 14px;
+    font-size: 0.87rem;
+    padding: 4px 0;
+    align-items: start;
+    color: var(--text);
+  }
+
+  .scene-step .actor {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 4px;
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  .scene-step .actor.user {
+    background: rgba(139, 147, 167, 0.12);
+    color: var(--text-dim);
+    border: 1px solid rgba(139, 147, 167, 0.25);
+  }
+
+  .scene-step .actor.ai {
+    background: var(--ai-yes-bg);
+    color: var(--ai-yes-fg);
+    border: 1px solid var(--ai-yes-border);
+  }
+
+  .scene-step .actor.sys {
+    background: var(--ai-no-bg);
+    color: var(--ai-no-fg);
+    border: 1px solid var(--ai-no-border);
+  }
+
+  .scene-step .action code {
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 0.82rem;
+  }
+
+  .scene-result {
+    margin-top: 12px;
+    padding: 14px 16px;
+    background: var(--code-bg);
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    font-size: 0.85rem;
+  }
+
+  .result-label {
+    color: var(--text-subtle);
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    font-weight: 600;
+    margin-bottom: 8px;
+    display: block;
+  }
+
+  .scene-result ul {
+    list-style: none;
+    padding-left: 0;
+    color: var(--text-dim);
+  }
+
+  .scene-result ul li {
+    padding: 2px 0;
+    padding-left: 18px;
+    position: relative;
+  }
+
+  .scene-result ul li::before {
+    content: "→";
+    position: absolute;
+    left: 0;
+    color: var(--ai-no-fg);
+    font-weight: 600;
+  }
+
+  .scene-result ul li strong {
+    color: var(--text);
+    font-weight: 500;
+  }
+
+  @media (max-width: 600px) {
+    .scene-step { grid-template-columns: 1fr; gap: 2px; }
+  }
+
+  footer {
+    margin-top: 48px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border);
+    color: var(--text-subtle);
+    font-size: 0.85rem;
+    text-align: center;
+  }
+
+  footer code {
+    background: var(--code-bg);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.8rem;
+    color: var(--accent);
+  }
+
+  @media (max-width: 600px) {
+    body { padding: 24px 16px; }
+    h1 { font-size: 1.6rem; }
+    .flow { grid-template-columns: 1fr; gap: 8px; }
+    .flow-num { display: none; }
+    .meta { align-items: flex-start; margin-top: 4px; flex-direction: row; }
+  }
+</style>
+</head>
+<body>
+  <div class="container">
+
+    <header>
+      <h1>Claude CLI <span class="accent">— flujos a cerrar</span></h1>
+      <p class="subtitle">
+        Un CLI en Go que estandariza el ciclo de trabajo con IA sobre issues de GitHub,
+        para poder medir en mismas condiciones y detectar qué funciona y qué no.
+      </p>
+      <div class="principles">
+        <span class="principle">stack: go + gh + CLIs de agentes</span>
+        <span class="principle">github como backbone</span>
+        <span class="principle">sin API keys: subprocess a claude/codex/gemini</span>
+        <span class="principle">stateless: github como único estado</span>
+        <span class="principle">cada agente comenta en github (issue o PR)</span>
+        <span class="principle">comments con header iter/agent/role para tracking</span>
+        <span class="principle">complejidad la asigna la IA</span>
+        <span class="principle">veredicto final 100% humano</span>
+      </div>
+      <div class="legend">
+        <span class="legend-item"><span class="legend-dot yes"></span>con IA = hace al menos un call a modelo</span>
+        <span class="legend-item"><span class="legend-dot no"></span>sin IA = pura lógica local (gh, sqlite, input)</span>
+      </div>
+    </header>
+
+    <div class="section-label">Flujos del CLI · 3 con IA · 2 sin IA</div>
+
+    <div class="flow-list">
+
+      <div class="flow ai-yes">
+        <div class="flow-num">01</div>
+        <div class="flow-body">
+          <h2>x idea</h2>
+          <p>Anotar una idea como issue en GitHub. Claude Sonnet explora el codebase con tools (Read/Grep/Glob), <strong>decide si la idea es una sola unidad o si en realidad son varias ideas independientes y autocontenidas</strong>, y clasifica por <strong>tipo</strong> (feature / fix / mejora / ux) y <strong>size</strong> (XS/S/M/L/XL) cada una. Si splittea, crea N issues separados e independientes — sin jerarquía padre/hijo, sin referencias cruzadas. Un solo call estructurado con tools, baja temperatura. El CLI requiere estar parado en un repo con remote de GitHub; si no, aborta.</p>
+
+          <div class="diagram">
+            <div class="diagram-label">Diagrama de flujo</div>
+            <div class="diagram-steps">
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Pre-checks: <code>git remote</code> de GitHub · <code>gh auth status</code> · CLI <code>claude</code> disponible en el PATH
+                  <span class="hint">si alguno falla → aborta. Los CLIs de codex/gemini se chequean cuando los seleccionás en explore/execute</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Menu principal
+                  <span class="hint">1. idea &nbsp;·&nbsp; 2. explore &nbsp;·&nbsp; 3. execute &nbsp;·&nbsp; 4. close &nbsp;·&nbsp; 5. eliminar</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Elige <code>1</code> → idea · escribe el texto de la idea
+                  <span class="hint">input libre, multilínea, tipo git commit</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor ai">Claude Sonnet</span>
+                <div class="step-text">
+                  Explora el codebase con tools para entender alcance
+                  <span class="hint">Read / Grep / Glob sobre archivos relevantes a la idea</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor ai">Claude Sonnet</span>
+                <div class="step-text">
+                  Call estructurado único: decide si es 1 idea o N independientes, clasifica tipo y size de cada una, completa template(s)
+                  <span class="hint">output JSON: { items: [{ type, size, title, body, justificación }, ...] } · si items.length === 1 no hay split, si ≥ 2 son ideas autocontenidas</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">gh</span>
+                <div class="step-text">
+                  Crea N issues, uno por cada <code>item</code> del output
+                  <div class="branches">
+                    <div class="branch">
+                      <span class="branch-num">·</span>
+                      <span class="branch-text">Todos los issues usan el <strong>mismo template completo</strong> (idea, contexto, criterios, notas, clasificación)</span>
+                    </div>
+                    <div class="branch">
+                      <span class="branch-num">·</span>
+                      <span class="branch-text">Cada uno con sus labels: <code>type:*</code>, <code>size:*</code>, <code>status:idea</code></span>
+                    </div>
+                    <div class="branch">
+                      <span class="branch-num">·</span>
+                      <span class="branch-text">Si son N &gt; 1, los issues son <strong>hermanos independientes</strong> sin referencias cruzadas</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Devuelve URL(s) de los issues creados y vuelve al menú
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <div class="template-preview">
+            <span class="tmpl-label">Template del issue (el mismo para todos los casos)</span>
+<span class="tmpl-h">## Idea</span>
+<span class="tmpl-var">{idea parafraseada con claridad accionable, autocontenida}</span>
+
+<span class="tmpl-h">## Contexto detectado</span>
+- Archivos/módulos relevantes: <span class="tmpl-var">{paths que Claude identificó}</span>
+- Área afectada: <span class="tmpl-var">{feature o dominio}</span>
+- Dependencias visibles: <span class="tmpl-var">{libs, otros módulos, APIs externas}</span>
+
+<span class="tmpl-h">## Criterios de éxito iniciales</span>
+- [ ] <span class="tmpl-var">{criterio 1}</span>
+- [ ] <span class="tmpl-var">{criterio 2}</span>
+
+<span class="tmpl-h">## Notas / warnings</span>
+<span class="tmpl-var">{complicaciones, edge cases o dudas que Claude detectó}</span>
+
+<span class="tmpl-h">## Clasificación</span>
+- Type: <span class="tmpl-var">feature</span> &nbsp;·&nbsp; uno de: feature · fix · mejora · ux
+- Size: <span class="tmpl-var">M</span> — <span class="tmpl-var">{justificación corta}</span>
+
+<span class="tmpl-label" style="margin-top:16px">Si Claude splittea la entrada en N ideas, se crean N issues con este mismo template, cada uno autocontenido. No hay links entre ellos.</span>
+          </div>
+
+          <div class="decisions">
+            <div class="decisions-label">Decisiones</div>
+            <ul>
+              <li><strong>Modelo:</strong> Claude Sonnet (4.6 o el más reciente)</li>
+              <li><strong>Criterios de size:</strong> Claude lee el codebase con tools y estima por archivos tocados, lógica nueva, dependencias e impacto</li>
+              <li><strong>Clasificación de tipo:</strong> feature · fix · mejora · ux — Claude la infiere del texto + contexto del codebase en el mismo call que el size</li>
+              <li><strong>Decisión de split integrada:</strong> Claude decide en el mismo call si la entrada es una idea o son N ideas <em>independientes y autocontenidas</em>. Si son varias, crea N issues sin jerarquía ni referencias cruzadas. No hay comando <code>split</code> separado</li>
+              <li><strong>Template único:</strong> Idea · Contexto · Criterios de éxito · Notas · Clasificación. Se usa el mismo para todos los issues creados, sin variantes para padre/hijo</li>
+              <li><strong>Criterio de split:</strong> solo splittea si las ideas son verdaderamente independientes (pueden trabajarse por separado, tener sus propios PRs, cerrarse sin depender unas de otras). Si hay dependencia, es una sola idea</li>
+              <li><strong>Repo destino:</strong> autodetect del remote en el <code>pwd</code>. Sin GitHub → el CLI aborta</li>
+            </ul>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge ai-yes">con IA</span>
+          <span class="badge ai-no">definido</span>
+        </div>
+      </div>
+
+      <div class="flow ai-yes">
+        <div class="flow-num">02</div>
+        <div class="flow-body">
+          <h2>x explore</h2>
+          <p>Convertir un issue en estado <code>status:idea</code> en un plan ejecutable. El usuario elige un agente <strong>ejecutor</strong> (Opus / Codex / Gemini) que genera el plan, y entre 2 y 3 <strong>validadores</strong> (pueden repetir tipo, incluso los 3 iguales) que lo revisan en paralelo. Al terminar, el CLI le muestra al usuario el reporte completo y le ofrece 3 opciones: mandarlo, corregir y re-validar, o solo corregir. El plan final queda persistido en el issue y el label pasa a <code>status:plan</code>.</p>
+
+          <div class="diagram">
+            <div class="diagram-label">Diagrama de flujo</div>
+            <div class="diagram-steps">
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Pre-checks: GitHub remote · <code>gh auth</code> · <code>claude</code> CLI
+                  <span class="hint">si alguno falla → aborta</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Menu principal
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Elige <code>2</code> → explore
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI + gh</span>
+                <div class="step-text">
+                  Lista issues con label <code>status:idea</code> del repo actual
+                  <span class="hint">muestra: #id · título · type · size</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Selecciona un issue de la lista
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Pregunta: <em>¿con qué agente querés hacerlo?</em>
+                  <span class="hint">opciones: Opus · Codex · Gemini</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Elige un ejecutor
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Pregunta: <em>¿con qué agentes validar? (2 o 3, pueden repetir tipo)</em>
+                  <span class="hint">ej: [Codex, Codex] · [Opus, Gemini] · [Opus, Opus, Opus]</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Selecciona 2 o 3 validadores
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor ai">Ejecutor</span>
+                <div class="step-text">
+                  Lee el issue + explora codebase con tools · genera plan estructurado
+                  <span class="hint">output: markdown con steps, archivos, criterios de éxito refinados, riesgos</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor ai">Validadores · paralelo</span>
+                <div class="step-text">
+                  Cada validador lee plan + codebase y comenta (goroutines)
+                  <span class="hint">si alguno falla (rate limit / API caída), el flujo sigue con los que sí respondieron</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Reporte al usuario: plan completo · comentarios de cada validador · <strong>conflictos explícitos</strong> entre validadores
+                  <span class="hint">ej: "Codex#1 aprueba, Codex#2 dice falta manejo de X" — no se intenta resolver automático</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Decide qué hacer con el plan:
+                  <div class="branches">
+                    <div class="branch">
+                      <span class="branch-num">1</span>
+                      <span class="branch-text"><strong>Mandalo como está</strong> — continúa a persistir</span>
+                    </div>
+                    <div class="branch">
+                      <span class="branch-num">2</span>
+                      <span class="branch-text"><strong>Corregilo y volvé a validar</strong> — ejecutor corrige leyendo feedback · validadores revisan de nuevo · loop al reporte</span>
+                    </div>
+                    <div class="branch">
+                      <span class="branch-num">3</span>
+                      <span class="branch-text"><strong>Sólo corregilo y mandalo</strong> — ejecutor corrige y continúa a persistir sin re-validar</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">gh</span>
+                <div class="step-text">
+                  Edita el <strong>body del issue</strong> con el plan final · postea los comentarios de los validadores como <strong>comments</strong>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">gh</span>
+                <div class="step-text">
+                  Cambia label: <code>status:idea</code> → <code>status:plan</code>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Muestra resumen (URL del issue + preview del plan) y vuelve al menú
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <div class="template-preview">
+            <span class="tmpl-label">Template del plan (propuesto)</span>
+<span class="tmpl-h">## Plan</span>
+Generado por: <span class="tmpl-var">{ejecutor}</span> · Validado por: <span class="tmpl-var">{validador1, validador2, ...}</span>
+
+<span class="tmpl-h">## Steps</span>
+1. <span class="tmpl-var">{step 1 — qué hacer + archivos a tocar}</span>
+2. <span class="tmpl-var">{step 2}</span>
+3. <span class="tmpl-var">...</span>
+
+<span class="tmpl-h">## Criterios de éxito (refinados)</span>
+- [ ] <span class="tmpl-var">{criterio 1}</span>
+- [ ] <span class="tmpl-var">{criterio 2}</span>
+
+<span class="tmpl-h">## Tests</span>
+- <span class="tmpl-var">{tests a agregar o modificar}</span>
+
+<span class="tmpl-h">## Riesgos / consideraciones</span>
+- <span class="tmpl-var">{riesgo + mitigación propuesta}</span>
+          </div>
+
+          <div class="template-preview">
+            <span class="tmpl-label">Formato de comments (validadores y correcciones)</span>
+<span class="comment">&lt;!-- claude-cli: flow=explore iter=1 agent=codex instance=1 role=validator --&gt;</span>
+<span class="tmpl-h">## [validator:codex#1 · iter:1]</span>
+
+Issues encontrados:
+- [A] <span class="tmpl-var">{issue detectado, accionable}</span>
+- [B] <span class="tmpl-var">{otro issue}</span>
+
+<span class="tmpl-label" style="margin-top:14px">Correcciones del ejecutor (iter=2):</span>
+<span class="comment">&lt;!-- claude-cli: flow=explore iter=2 agent=opus role=executor --&gt;</span>
+<span class="tmpl-h">## [executor:opus · iter:2 · correcciones]</span>
+
+Atiende:
+- [A] <span class="tmpl-var">{cómo se resolvió}</span>
+- [B] <span class="tmpl-var">{cómo se resolvió}</span>
+
+<span class="tmpl-label" style="margin-top:14px">Verificación scope-lock (iter=2):</span>
+<span class="comment">&lt;!-- claude-cli: flow=explore iter=2 agent=codex instance=1 role=validator --&gt;</span>
+<span class="tmpl-h">## [validator:codex#1 · iter:2 · verificación]</span>
+
+Checklist original:
+- [A] ✓ resuelto
+- [B] ✓ resuelto
+          </div>
+
+          <div class="decisions">
+            <div class="decisions-label">Decisiones</div>
+            <ul>
+              <li><strong>Fuente de issues:</strong> se listan los que tengan <code>status:idea</code> en el repo del <code>pwd</code></li>
+              <li><strong>Ejecutores disponibles:</strong> Opus · Codex · Gemini (el usuario elige 1)</li>
+              <li><strong>Validadores:</strong> entre 2 y 3, pueden repetir tipo (ej. 3 Opus, o 2 Codex). Corren en paralelo con goroutines</li>
+              <li><strong>Ejecutor y validador pueden ser del mismo tipo:</strong> sí — ej. Opus ejecuta y Opus valida</li>
+              <li><strong>Validador que falla:</strong> se ignora, el flujo sigue con los que respondieron (no aborta)</li>
+              <li><strong>Conflictos entre validadores:</strong> se reportan explícitamente al usuario, no hay resolución automática</li>
+              <li><strong>Iteración del plan:</strong> el usuario no se entera del nombre "iterate" — post-validación el CLI le ofrece 3 opciones inline (mandar / corregir y re-validar / sólo corregir)</li>
+              <li><strong>Comments con header estructurado:</strong> cada comment de agente arranca con <code>&lt;!-- claude-cli: flow=explore iter=N agent=X role=executor|validator --&gt;</code> para que el CLI pueda parsear y pasar a la iteración siguiente solo lo relevante</li>
+              <li><strong>Estado implícito por iter:</strong> el <code>iter</code> más alto de <code>role=executor</code> marca sincronización · validadores de iters anteriores se consideran <em>addressed</em>, los del último <em>open</em> · comments sin header se ignoran (pueden ser humanos)</li>
+              <li><strong>Persistencia:</strong> plan en el <em>body</em> del issue (lo edita), comentarios de validadores como <em>comments</em></li>
+              <li><strong>Cambio de estado:</strong> <code>status:idea</code> → <code>status:plan</code> al terminar</li>
+            </ul>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge ai-yes">con IA</span>
+          <span class="badge ai-no">definido</span>
+        </div>
+      </div>
+
+      <div class="flow ai-yes">
+        <div class="flow-num">03</div>
+        <div class="flow-body">
+          <h2>x execute</h2>
+          <p>Ejecutar un issue en estado <code>status:plan</code>. Trabaja <strong>siempre en un git worktree aislado</strong> y abre un <strong>PR draft</strong>. Los validadores leen el <strong>diff del PR</strong> (no el plan) y comentan en el PR. Al final se ofrecen las mismas 3 opciones que en explore. Incluye un mecanismo anti-loop-infinito para que las correcciones no generen nuevos bugs en cadena.</p>
+
+          <div class="diagram">
+            <div class="diagram-label">Diagrama de flujo</div>
+            <div class="diagram-steps">
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Pre-checks: GitHub remote · <code>gh auth</code> · <code>claude</code> CLI
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Menu principal
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Elige <code>3</code> → execute
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI + gh</span>
+                <div class="step-text">
+                  Lista issues con label <code>status:plan</code>
+                  <span class="hint">muestra: #id · título · type · size</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Selecciona issue · elige ejecutor (Opus/Codex/Gemini) · elige 2-3 validadores
+                  <span class="hint">mismas reglas que explore: pueden repetir tipo</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">git</span>
+                <div class="step-text">
+                  Crea worktree aislado: <code>.worktrees/issue-{id}</code> · branch nuevo <code>exec/{id}-{slug}</code>
+                  <span class="hint">nunca toca el branch donde estás parado</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor ai">Ejecutor</span>
+                <div class="step-text">
+                  Lee issue (plan en body) + codebase del worktree · implementa los steps · corre tests si existen
+                  <span class="hint">commits incrementales con mensajes derivados de los steps del plan</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">gh</span>
+                <div class="step-text">
+                  Push del branch · abre <strong>PR draft</strong> linkeado al issue (<code>Closes #{id}</code>)
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">gh</span>
+                <div class="step-text">
+                  Cambia label: <code>status:plan</code> → <code>status:executing</code>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor ai">Ejecutor</span>
+                <div class="step-text">
+                  Espera al CI/CD del PR. Si falla, corrige y re-pushea hasta que quede verde
+                  <span class="hint">gate obligatorio: sin CI verde no se pasa a validadores · no se corren tests local, se usa el runner de GitHub</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor ai">Validadores · paralelo</span>
+                <div class="step-text">
+                  Primera pasada: cada validador lee <strong>diff del PR + codebase</strong> y comenta en el PR
+                  <span class="hint">output estructurado: lista de "issues detectados" que se guarda como checklist fijo</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Reporte: URL del PR · checklist unificado de issues detectados · conflictos entre validadores · iteración #N / 3
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Decide:
+                  <div class="branches">
+                    <div class="branch">
+                      <span class="branch-num">1</span>
+                      <span class="branch-text"><strong>Mandalo como está</strong> — continúa al cierre</span>
+                    </div>
+                    <div class="branch">
+                      <span class="branch-num">2</span>
+                      <span class="branch-text"><strong>Corregilo y volvé a validar</strong> — ejecutor aplica <em>patch mínimo</em> sobre el checklist fijado · validadores solo verifican ese checklist (no buscan nuevos bugs) · loop al reporte</span>
+                    </div>
+                    <div class="branch">
+                      <span class="branch-num">3</span>
+                      <span class="branch-text"><strong>Sólo corregilo y mandalo</strong> — ejecutor aplica patch mínimo y continúa al cierre sin re-validar</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">gh</span>
+                <div class="step-text">
+                  PR queda listo (sigue draft o pasa a ready según config) · label: <code>status:executing</code> → <code>status:ready-to-close</code>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Resumen: URL del PR + URL del issue + iteraciones usadas · vuelve al menú
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <div class="template-preview">
+            <span class="tmpl-label">Anti-loop-infinito: 3 mecanismos combinados</span>
+<span class="tmpl-h">1. Scope lock</span>
+Los validadores reportan problemas <span class="tmpl-var">solo en la primera pasada</span>.
+Ese output se congela como <span class="tmpl-var">checklist fijo</span>. En iteraciones
+siguientes los validadores reciben el prompt:
+
+  "estos son los issues originales que vos reportaste.
+   verificá uno por uno si se resolvió o no.
+   NO busques problemas nuevos ni refactors sugeridos."
+
+<span class="tmpl-h">2. Patch mínimo en el ejecutor</span>
+En cada iteración, el ejecutor recibe:
+
+  "aplicá SOLO estos fixes del checklist.
+   no refactorees código no relacionado.
+   no agregues features nuevos.
+   si un fix requiere cambios colaterales, documentá por qué."
+
+<span class="tmpl-h">3. Hard cap de iteraciones</span>
+Máximo <span class="tmpl-var">3 iteraciones</span> por run de execute.
+Al llegar a la 3ra, se <span class="tmpl-var">manda igual</span>:
+el PR queda listo para cerrar con los issues que no alcanzaron a resolverse.
+Si algo quedó pendiente, el veredicto humano en <code>close</code> lo captura.
+          </div>
+
+          <div class="decisions">
+            <div class="decisions-label">Decisiones</div>
+            <ul>
+              <li><strong>Fuente de issues:</strong> se listan los que tengan <code>status:plan</code> en el repo actual</li>
+              <li><strong>Ejecutor + validadores:</strong> misma selección que en explore (Opus/Codex/Gemini, 1 ejecutor + 2-3 validadores, pueden repetir tipo)</li>
+              <li><strong>Worktree obligatorio:</strong> siempre en <code>.worktrees/issue-{id}</code>, branch <code>exec/{id}-{slug}</code>. No se toca el branch del <code>pwd</code></li>
+              <li><strong>PR draft automático:</strong> se abre al primer push, linkeado al issue con <code>Closes #{id}</code></li>
+              <li><strong>CI/CD como gate:</strong> el ejecutor no corre tests local. Después de pushear espera al CI de GitHub; si falla, corrige y re-pushea hasta que quede verde. Sin CI verde no se pasa a validadores</li>
+              <li><strong>Validadores leen diff:</strong> no el plan completo. El contexto es el diff del PR + codebase del worktree</li>
+              <li><strong>Comentarios en el PR:</strong> no en el issue — mantiene separado "qué discutimos del plan" vs "qué comentamos del código"</li>
+              <li><strong>Comments con header estructurado:</strong> mismo formato que explore (<code>&lt;!-- claude-cli: flow=execute iter=N agent=X role=... --&gt;</code>). Se usa para que Opus sepa qué atender en iter+1 y los validadores hagan scope-lock sobre el checklist</li>
+              <li><strong>Resolved conversations nativas:</strong> cuando Opus atiende un PR review comment, el CLI lo marca como <em>resolved</em> via API de GitHub. Dos mecanismos en paralelo — header para el CLI, resolved para que vos lo veas claro en la UI del PR</li>
+              <li><strong>Post-validación:</strong> mismas 3 ramas que explore (mandar / corregir y re-validar / sólo corregir)</li>
+              <li><strong>Anti-loop-infinito:</strong> scope lock del checklist + patch mínimo + hard cap 3 iteraciones. Al llegar a la 3ra se manda igual</li>
+              <li><strong>Worktree al cerrar:</strong> se limpia durante el flujo <code>close</code>, no antes</li>
+              <li><strong>Cambio de estado:</strong> <code>status:plan</code> → <code>status:executing</code> al iniciar, → <code>status:ready-to-close</code> al terminar</li>
+            </ul>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge ai-yes">con IA</span>
+          <span class="badge ai-no">definido</span>
+        </div>
+      </div>
+
+      <div class="flow ai-no">
+        <div class="flow-num">04</div>
+        <div class="flow-body">
+          <h2>x close</h2>
+          <p>Cerrar una idea ejecutada. El CLI lista los issues con <code>status:ready-to-close</code>, el usuario elige uno, puntúa del 1 al 10 en cada eje (completitud, fidelidad, alineación), escribe una nota libre. El CLI mergea el PR (lo que cierra el issue automáticamente por el <code>Closes #{id}</code>) y limpia el worktree. No interviene ningún modelo.</p>
+
+          <div class="diagram">
+            <div class="diagram-label">Diagrama de flujo</div>
+            <div class="diagram-steps">
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Pre-checks: GitHub remote · <code>gh auth</code> · <code>claude</code> CLI
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Menu principal
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Elige <code>4</code> → close
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI + gh</span>
+                <div class="step-text">
+                  Lista issues con label <code>status:ready-to-close</code>
+                  <span class="hint">muestra: #id · título · type · size · PR linkeado</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Selecciona el issue a cerrar
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Pide puntuación 1-10 en cada eje
+                  <div class="branches">
+                    <div class="branch">
+                      <span class="branch-num">A</span>
+                      <span class="branch-text"><strong>Completitud</strong> — ¿cubrió todo lo pedido?</span>
+                    </div>
+                    <div class="branch">
+                      <span class="branch-num">B</span>
+                      <span class="branch-text"><strong>Fidelidad</strong> — ¿no inventó nada?</span>
+                    </div>
+                    <div class="branch">
+                      <span class="branch-num">C</span>
+                      <span class="branch-text"><strong>Alineación</strong> — ¿hizo lo que querías o se desvió?</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Ingresa los 3 números (1-10 cada uno)
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Pide nota libre (opcional)
+                  <span class="hint">texto libre: qué salió bien, qué faltó, qué aprendiste</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">gh</span>
+                <div class="step-text">
+                  Postea comment final en el issue con los 3 scores + nota + metadata (ejecutor, validadores, iteraciones)
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">gh</span>
+                <div class="step-text">
+                  Mergea el PR (<code>gh pr merge --squash</code>) → el issue se cierra automáticamente por el <code>Closes #{id}</code>
+                  <span class="hint">si hay conflicts el merge falla y el CLI corta acá — resolver a mano y reintentar</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">gh</span>
+                <div class="step-text">
+                  Cambia label: <code>status:ready-to-close</code> → <code>status:closed</code>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">git</span>
+                <div class="step-text">
+                  Limpia el worktree: <code>git worktree remove .worktrees/issue-{id}</code>
+                  <span class="hint">borra también el branch local; el remote branch ya fue mergeado al main</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Resumen en pantalla: scores + confirmación de merge + issue cerrado · vuelve al menú
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <div class="template-preview">
+            <span class="tmpl-label">Comment final en el issue (formato)</span>
+<span class="tmpl-h">## Cierre</span>
+- Completitud: <span class="tmpl-var">8</span>/10
+- Fidelidad: <span class="tmpl-var">7</span>/10
+- Alineación: <span class="tmpl-var">9</span>/10
+
+<span class="tmpl-h">## Nota</span>
+<span class="tmpl-var">{texto libre del usuario}</span>
+
+<span class="tmpl-h">## Metadata</span>
+- Ejecutor: <span class="tmpl-var">Opus</span>
+- Validadores: <span class="tmpl-var">Codex, Gemini</span>
+- Iteraciones: <span class="tmpl-var">2 / 3</span>
+- PR: <span class="tmpl-var">#{pr}</span>
+          </div>
+
+          <div class="decisions">
+            <div class="decisions-label">Decisiones</div>
+            <ul>
+              <li><strong>Fuente de issues:</strong> se listan los que tengan <code>status:ready-to-close</code></li>
+              <li><strong>Rúbrica:</strong> 3 ejes (completitud · fidelidad · alineación), <strong>1 a 10</strong> cada uno</li>
+              <li><strong>Nota libre:</strong> sí, opcional, al final</li>
+              <li><strong>Persistencia:</strong> comment final en el issue con scores + nota + metadata — GitHub como única fuente de verdad, sin SQLite</li>
+              <li><strong>Merge del PR:</strong> el CLI lo mergea (<code>gh pr merge --squash</code>), lo que cierra el issue vía <code>Closes #{id}</code></li>
+              <li><strong>Conflicts en el merge:</strong> el CLI corta y avisa; el usuario resuelve a mano y reintenta <code>close</code></li>
+              <li><strong>Worktree:</strong> se limpia después del merge con <code>git worktree remove</code></li>
+              <li><strong>Label final:</strong> <code>status:ready-to-close</code> → <code>status:closed</code></li>
+            </ul>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge ai-no">sin IA</span>
+          <span class="badge ai-no">definido</span>
+        </div>
+      </div>
+
+      <div class="flow ai-no">
+        <div class="flow-num">05</div>
+        <div class="flow-body">
+          <h2>x eliminar</h2>
+          <p>Descartar una idea en cualquier estado. Cierra el issue sin scoring, cierra el PR si hay (sin merge), borra el branch del remote si hay, y limpia el worktree si existe. Pide confirmación una vez. No interviene ningún modelo.</p>
+
+          <div class="diagram">
+            <div class="diagram-label">Diagrama de flujo</div>
+            <div class="diagram-steps">
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Pre-checks: GitHub remote · <code>gh auth</code>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Menu principal
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Elige <code>5</code> → eliminar
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI + gh</span>
+                <div class="step-text">
+                  Lista todos los issues del CLI en estados abiertos
+                  <span class="hint">cualquier <code>status:*</code> excepto <code>status:closed</code></span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor user">Usuario</span>
+                <div class="step-text">
+                  Selecciona el issue a eliminar
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Confirmación única: <em>"¿seguro? esto borra todo (PR, branch, worktree). y/N"</em>
+                  <span class="hint">sin "--force" previo ni 3 confirmaciones. Una y chau</span>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">gh + git</span>
+                <div class="step-text">
+                  Acción en cadena según lo que exista:
+                  <div class="branches">
+                    <div class="branch">
+                      <span class="branch-num">·</span>
+                      <span class="branch-text">Si hay PR abierto → <code>gh pr close</code> sin merge</span>
+                    </div>
+                    <div class="branch">
+                      <span class="branch-num">·</span>
+                      <span class="branch-text">Si hay branch remote → <code>git push origin --delete</code></span>
+                    </div>
+                    <div class="branch">
+                      <span class="branch-num">·</span>
+                      <span class="branch-text">Si hay worktree → <code>git worktree remove</code></span>
+                    </div>
+                    <div class="branch">
+                      <span class="branch-num">·</span>
+                      <span class="branch-text">Issue → comment "eliminado" + close + label <code>status:deleted</code></span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="arrow">↓</div>
+
+              <div class="step">
+                <span class="step-actor sys">CLI</span>
+                <div class="step-text">
+                  Resumen de lo borrado · vuelve al menú
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <div class="decisions">
+            <div class="decisions-label">Decisiones</div>
+            <ul>
+              <li><strong>Alcance:</strong> cualquier issue en estado no-cerrado. Incluye los que nunca pasaron de <code>status:idea</code></li>
+              <li><strong>Confirmación:</strong> una sola vez con <code>y/N</code>. No hay flag <code>--force</code> porque el comando ya es destructivo por definición</li>
+              <li><strong>Cleanup idempotente:</strong> si algo ya no existe (ej. worktree ya borrado), se skippea esa subacción sin error</li>
+              <li><strong>Label final:</strong> <code>status:deleted</code> para diferenciar de <code>status:closed</code> (que pasó por el flujo completo y tiene scoring)</li>
+              <li><strong>Sin scoring:</strong> no se pide rúbrica — el issue se descarta sin evaluarlo</li>
+            </ul>
+          </div>
+        </div>
+        <div class="meta">
+          <span class="badge ai-no">sin IA</span>
+          <span class="badge ai-no">definido</span>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="obs-section">
+      <div class="section-label">Observabilidad</div>
+      <p class="obs-intro">
+        Cada flow corre varios subprocess a CLIs externos que pueden tardar minutos. Sin visibilidad en vivo el usuario cree que el CLI se colgó, y sin logs estructurados no se puede medir ni debuggear. Tres capas obligatorias.
+      </p>
+
+      <div class="obs-card">
+        <div class="obs-num">01</div>
+        <div class="obs-body">
+          <h3>Feedback en vivo en terminal</h3>
+          <p>Cada subprocess emite líneas con timestamp + agente + estado. Permite ver qué está haciendo cada agente en tiempo real y detectar cuelgues o rate-limits sin abrir logs. Los validadores paralelos se muestran intercalados pero identificados por nombre y sufijo numérico.</p>
+          <div class="obs-example"><span class="comment">[14:23:01 opus      ]</span> leyendo codebase (3 archivos)
+<span class="comment">[14:23:15 opus      ]</span> generando plan...
+<span class="comment">[14:23:42 codex#1   ]</span> <span class="ok">✓</span> OK (2.1s)
+<span class="comment">[14:23:48 gemini    ]</span> <span class="ok">✓</span> OK (2.7s)
+<span class="comment">[14:24:01 codex#2   ]</span> <span class="warn">⚠</span> rate limit · skippeado</div>
+        </div>
+        <span class="badge badge-v1">v1</span>
+      </div>
+
+      <div class="obs-card">
+        <div class="obs-num">02</div>
+        <div class="obs-body">
+          <h3>Logs estructurados por run (JSONL) + blobs de prompts y outputs</h3>
+          <p>Por cada call se guardan <strong>tres cosas</strong>: una línea en el JSONL del flow (metadata chico y grep-eable), el prompt completo en un blob, y el output completo del agente en otro blob. Los blobs se indexan por hash del contenido, así que si dos calls tuvieron el mismo prompt/output se dedupea automático. Todo vive en <code>.claude-cli/logs/</code>, gitignoreado. Con esto podés reconstruir cualquier call a posteriori para analizar si el agente alucinó, missió completitud, o se desvió — cruzás el output con los scores humanos de <code>close</code> y ahí está tu dataset de miss/hit.</p>
+
+          <div class="obs-example"><span class="comment"># JSONL metadata (.claude-cli/logs/42/explore-2026-04-18T14-23-00.jsonl)</span>
+{<span class="key">"ts"</span>:"2026-04-18T14:23:42Z",<span class="key">"issue"</span>:42,<span class="key">"flow"</span>:"explore",
+ <span class="key">"agent"</span>:"codex",<span class="key">"instance"</span>:1,<span class="key">"role"</span>:"validator",
+ <span class="key">"prompt_hash"</span>:"a1f2...",<span class="key">"output_hash"</span>:"b3e4...",
+ <span class="key">"tokens_in"</span>:1200,<span class="key">"tokens_out"</span>:450,
+ <span class="key">"duration_ms"</span>:23100,<span class="key">"exit_code"</span>:0}</div>
+
+          <div class="obs-example" style="margin-top:8px"><span class="comment"># Estructura de carpetas</span>
+.claude-cli/logs/
+├── <span class="key">42</span>/                                   <span class="comment"># issue 42</span>
+│   ├── idea-2026-04-18T10-12-00.jsonl      <span class="comment"># metadata</span>
+│   ├── explore-2026-04-18T14-23-00.jsonl
+│   ├── execute-2026-04-18T15-01-00.jsonl
+│   └── blobs/
+│       ├── <span class="ok">a1f2...prompt.txt</span>           <span class="comment"># prompt completo</span>
+│       ├── <span class="ok">b3e4...output.txt</span>           <span class="comment"># output completo del agente</span>
+│       └── ...
+└── <span class="key">43</span>/
+    └── ...</div>
+        </div>
+        <span class="badge badge-v1">v1</span>
+      </div>
+
+      <div class="obs-card">
+        <div class="obs-num">03</div>
+        <div class="obs-body">
+          <h3>Summary al finalizar cada flow</h3>
+          <p>Línea compacta en pantalla al terminar cada comando. Te da el total de tiempo, calls, tokens por input/output y (si la info del CLI del agente lo expone) costo estimado. No requiere abrir logs.</p>
+          <div class="obs-example"><span class="ok">✓</span> explore completo · 2m18s · 4 calls
+   agentes: opus×1 codex×2 gemini×1
+   tokens:  42,150 in · 12,800 out
+   costo:   ~$0.18</div>
+        </div>
+        <span class="badge badge-v1">v1</span>
+      </div>
+
+    </div>
+
+    <div class="walkthrough-section">
+      <div class="section-label">Walkthrough punta a punta</div>
+      <p class="walkthrough-intro">
+        Ejemplo concreto para chequear que estamos alineados. Idea: <em>"agregar login con GitHub OAuth a la app"</em>. Veamos qué pasa en cada flow y qué queda escrito en GitHub al final de cada uno.
+      </p>
+
+      <div class="scene">
+        <div class="scene-header">
+          <span class="scene-num">01 · x idea</span>
+          <span class="scene-title"><span class="quote">"agregar login con GitHub OAuth"</span></span>
+        </div>
+        <div class="scene-steps">
+          <div class="scene-step">
+            <span class="actor user">Usuario</span>
+            <span class="action">arranca el CLI en un repo con GitHub remote</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">CLI</span>
+            <span class="action">muestra menú principal: <code>1.idea · 2.explore · 3.execute · 4.close · 5.eliminar</code></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor user">Usuario</span>
+            <span class="action">elige <strong>1</strong> → idea · tipea: <em>"agregar login con GitHub OAuth"</em></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor ai">Sonnet</span>
+            <span class="action">con Read/Grep/Glob lee <code>src/auth/middleware.go</code>, <code>src/routes/auth.go</code>, <code>web/login.tsx</code>, <code>go.mod</code></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor ai">Sonnet</span>
+            <span class="action">call estructurado → JSON: <code>{split:false, type:"feature", size:"M", title:..., body:...}</code></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">gh</span>
+            <span class="action">crea issue <strong>#47</strong> con template completo + labels</span>
+          </div>
+        </div>
+        <div class="scene-result">
+          <span class="result-label">Estado en GitHub</span>
+          <ul>
+            <li>Issue <strong>#47</strong> abierto · título: "Agregar autenticación con GitHub OAuth"</li>
+            <li>Body con secciones: <strong>Idea · Contexto detectado · Criterios de éxito · Notas · Clasificación</strong></li>
+            <li>Labels: <code>type:feature</code> · <code>size:M</code> · <code>status:idea</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="scene">
+        <div class="scene-header">
+          <span class="scene-num">02 · x explore</span>
+          <span class="scene-title">issue <strong>#47</strong> → plan</span>
+        </div>
+        <div class="scene-steps">
+          <div class="scene-step">
+            <span class="actor sys">CLI</span>
+            <span class="action">muestra menú principal</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor user">Usuario</span>
+            <span class="action">elige <strong>2</strong> → explore</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">CLI + gh</span>
+            <span class="action">lista issues con <code>status:idea</code> en el repo actual</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor user">Usuario</span>
+            <span class="action">selecciona #47 · ejecutor: <strong>Opus</strong> · validadores: <strong>[Codex, Gemini]</strong></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor ai">Opus</span>
+            <span class="action">lee body de #47 + codebase · genera plan con 5 steps (dependencias, ruta callback, middleware, refresh, UI)</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor ai">Codex + Gemini</span>
+            <span class="action">paralelo: leen plan + codebase · cada uno postea comment con header <code>iter=1 role=validator</code> — Codex: <em>falta error en callback</em> · Gemini: <em>falta refresh token</em></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">CLI</span>
+            <span class="action">reporte: 2 issues · sin conflictos · iter 1/∞</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor user">Usuario</span>
+            <span class="action">elige opción <strong>2</strong>: corregir + re-validar</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor ai">Opus</span>
+            <span class="action">lee los 2 comments <code>iter=1</code> · aplica patch mínimo al plan · postea comment <code>iter=2 role=executor</code> con <em>"atiende A, atiende B"</em></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor ai">Codex + Gemini</span>
+            <span class="action">scope-lock · leen checklist original + correcciones iter=2 + plan actualizado · postean comment <code>iter=2 role=validator</code> con verificación ✓ ✓</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor user">Usuario</span>
+            <span class="action">elige opción <strong>1</strong>: mandalo</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">gh</span>
+            <span class="action">edita body de #47 con append de la sección <strong>## Plan</strong> (los comments ya fueron posteados durante el flujo)</span>
+          </div>
+        </div>
+        <div class="scene-result">
+          <span class="result-label">Estado en GitHub</span>
+          <ul>
+            <li>Issue <strong>#47</strong> body ampliado con sección <strong>## Plan</strong> (5 steps, archivos, tests, riesgos)</li>
+            <li><strong>5 comments con header estructurado</strong> en #47:
+              <br>· Codex <code>iter=1 validator</code> + Gemini <code>iter=1 validator</code> (issues encontrados)
+              <br>· Opus <code>iter=2 executor</code> (correcciones)
+              <br>· Codex <code>iter=2 validator</code> + Gemini <code>iter=2 validator</code> (verificación)</li>
+            <li>Labels: <code>status:idea</code> → <code>status:plan</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="scene">
+        <div class="scene-header">
+          <span class="scene-num">03 · x execute</span>
+          <span class="scene-title">issue <strong>#47</strong> → PR <strong>#48</strong></span>
+        </div>
+        <div class="scene-steps">
+          <div class="scene-step">
+            <span class="actor sys">CLI</span>
+            <span class="action">muestra menú principal</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor user">Usuario</span>
+            <span class="action">elige <strong>3</strong> → execute</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">CLI + gh</span>
+            <span class="action">lista issues con <code>status:plan</code></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor user">Usuario</span>
+            <span class="action">selecciona #47 · ejecutor: <strong>Opus</strong> · validadores: <strong>[Codex, Codex, Gemini]</strong></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">git</span>
+            <span class="action">crea worktree <code>.worktrees/issue-47</code> · branch <code>exec/47-github-oauth</code></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor ai">Opus</span>
+            <span class="action">lee el plan del body de #47 · implementa los 5 steps con commits incrementales</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">gh</span>
+            <span class="action">push + abre <strong>PR draft #48</strong> linkeado a #47 (<code>Closes #47</code>)</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor ai">Opus</span>
+            <span class="action">espera CI · falla test de auth · corrige · re-pushea · CI verde</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor ai">Codex#1 + Codex#2 + Gemini</span>
+            <span class="action">paralelo: leen diff del PR · cada uno postea PR review comment con header <code>iter=1 role=validator</code> · issues: timeout, test faltante, nonce/CSRF</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">CLI</span>
+            <span class="action">reporte: 3 issues · iter 1/3</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor user">Usuario</span>
+            <span class="action">elige opción <strong>2</strong>: corregir + re-validar</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor ai">Opus</span>
+            <span class="action">lee comments <code>iter=1</code> · patch mínimo sobre los 3 issues · re-pushea · CI verde · postea comment <code>iter=2 role=executor</code></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">CLI + gh</span>
+            <span class="action">marca las 3 PR conversations originales como <strong>resolved</strong> (API de GitHub)</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor ai">Codex + Gemini</span>
+            <span class="action">scope-lock · postean comments <code>iter=2 role=validator</code> con verificación ✓ ✓ ✓</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor user">Usuario</span>
+            <span class="action">elige opción <strong>1</strong>: mandalo</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">gh</span>
+            <span class="action">label de #47: <code>status:plan</code> → <code>status:executing</code> → <code>status:ready-to-close</code></span>
+          </div>
+        </div>
+        <div class="scene-result">
+          <span class="result-label">Estado en GitHub</span>
+          <ul>
+            <li>PR <strong>#48</strong> abierto (draft), linkeado a #47</li>
+            <li><strong>7 comments con header estructurado</strong> en #48:
+              <br>· 3 de validadores (Codex×2 + Gemini) <code>iter=1</code> — con conversaciones marcadas <em>resolved</em>
+              <br>· 1 de Opus <code>iter=2 executor</code> (correcciones)
+              <br>· 3 de validadores <code>iter=2</code> (verificación)</li>
+            <li>Branch <code>exec/47-github-oauth</code> en remote</li>
+            <li>Worktree local <code>.worktrees/issue-47</code> todavía presente</li>
+            <li>CI verde en el último commit del PR</li>
+            <li>Label de #47: <code>status:ready-to-close</code></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="scene">
+        <div class="scene-header">
+          <span class="scene-num">04 · x close</span>
+          <span class="scene-title">veredicto humano y cierre</span>
+        </div>
+        <div class="scene-steps">
+          <div class="scene-step">
+            <span class="actor sys">CLI</span>
+            <span class="action">muestra menú principal</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor user">Usuario</span>
+            <span class="action">elige <strong>4</strong> → close</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">CLI + gh</span>
+            <span class="action">lista issues con <code>status:ready-to-close</code></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor user">Usuario</span>
+            <span class="action">selecciona #47 · ingresa: completitud <strong>9</strong>, fidelidad <strong>8</strong>, alineación <strong>9</strong></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor user">Usuario</span>
+            <span class="action">nota libre: <em>"salió bien, pero le faltó cubrir el edge case de token expirado"</em></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">gh</span>
+            <span class="action">postea comment final en #47 con scores + nota + metadata (Opus, Codex×2+Gemini, iter 2/3, PR #48)</span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">gh</span>
+            <span class="action"><code>gh pr merge --squash #48</code> → issue #47 se auto-cierra por <code>Closes #47</code></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">gh</span>
+            <span class="action">label de #47: <code>status:ready-to-close</code> → <code>status:closed</code></span>
+          </div>
+          <div class="scene-step">
+            <span class="actor sys">git</span>
+            <span class="action"><code>git worktree remove .worktrees/issue-47</code></span>
+          </div>
+        </div>
+        <div class="scene-result">
+          <span class="result-label">Estado final</span>
+          <ul>
+            <li>Issue <strong>#47</strong> cerrado con <strong>comment de cierre</strong> (scores 9/8/9 + nota + metadata)</li>
+            <li>PR <strong>#48</strong> mergeado (squash)</li>
+            <li>Worktree local limpio</li>
+            <li>Label: <code>status:closed</code></li>
+            <li>Toda la historia del trabajo <strong>reconstructible leyendo el issue + PR</strong></li>
+          </ul>
+        </div>
+      </div>
+
+    </div>
+
+    <footer>
+      Diseño completo: 5 flujos · observabilidad · walkthrough. Siguiente: scaffolding del proyecto Go.
+    </footer>
+
+  </div>
+</body>
+</html>
