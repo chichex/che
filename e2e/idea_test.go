@@ -70,7 +70,8 @@ func TestIdea_GoldenPath_Single(t *testing.T) {
 	creates[0].AssertArgsContain(t,
 		"--label", "type:feature",
 		"--label", "size:m",
-		"--label", "status:idea")
+		"--label", "status:idea",
+		"--label", "ct:plan")
 }
 
 // TestIdea_GoldenPath_SplitIntoTwo: two issues created in order, labels

@@ -288,6 +288,7 @@ func ensureLabels(items []Item, progress func(string)) error {
 			"type:" + it.Type,
 			"size:" + strings.ToLower(it.Size),
 			"status:idea",
+			"ct:plan",
 		} {
 			if !seen[l] {
 				seen[l] = true
@@ -326,6 +327,7 @@ func createIssue(item Item) (string, error) {
 		"--label", "type:" + item.Type,
 		"--label", "size:" + strings.ToLower(item.Size),
 		"--label", "status:idea",
+		"--label", "ct:plan",
 	}
 	cmd := exec.Command("gh", args...)
 	out, err := cmd.Output()
