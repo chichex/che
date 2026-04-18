@@ -21,15 +21,59 @@ type ExitCode int
 const (
 	ExitOK       ExitCode = 0
 	ExitRetry    ExitCode = 2 // error remediable (red, gh/git falla)
-	ExitSemantic ExitCode = 3 // ref vacío, issue sin ct:plan, cerrado, ya explorado, claude inválido
+	ExitSemantic ExitCode = 3 // ref vacío, issue sin ct:plan, cerrado, ya explorado, agente inválido
 )
 
-// Opts agrupa los writers y la callback de progreso. Si OnProgress es nil,
-// el flow corre silencioso (modo CI).
+// Agent identifica qué ejecutor usar para producir el análisis. Cada agente
+// corresponde a un binario distinto en el PATH; el mapeo vive en Binary().
+type Agent string
+
+const (
+	AgentOpus   Agent = "opus"
+	AgentCodex  Agent = "codex"
+	AgentGemini Agent = "gemini"
+)
+
+// DefaultAgent es el ejecutor que usa explore si el caller no elige uno.
+const DefaultAgent = AgentOpus
+
+// ValidAgents lista todos los agentes soportados (orden preservado para UI).
+var ValidAgents = []Agent{AgentOpus, AgentCodex, AgentGemini}
+
+// Binary devuelve el nombre del ejecutable que se invoca para este agente.
+// Opus se mapea a `claude` porque el CLI oficial se llama así; Codex y Gemini
+// usan su nombre directo.
+func (a Agent) Binary() string {
+	switch a {
+	case AgentOpus:
+		return "claude"
+	case AgentCodex:
+		return "codex"
+	case AgentGemini:
+		return "gemini"
+	}
+	return ""
+}
+
+// ParseAgent normaliza un string a Agent, o error si no matchea ningún enum.
+func ParseAgent(s string) (Agent, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	for _, a := range ValidAgents {
+		if string(a) == s {
+			return a, nil
+		}
+	}
+	return "", fmt.Errorf("unknown agent %q; valid: opus, codex, gemini", s)
+}
+
+// Opts agrupa los writers, la callback de progreso y el agente ejecutor. Si
+// OnProgress es nil, el flow corre silencioso. Si Agent es "", se usa
+// DefaultAgent.
 type Opts struct {
 	Stdout     io.Writer
 	Stderr     io.Writer
 	OnProgress func(string)
+	Agent      Agent
 }
 
 // Issue modela el subset del output de `gh issue view --json ...` que
@@ -112,6 +156,14 @@ func Run(issueRef string, opts Opts) ExitCode {
 	if progress == nil {
 		progress = func(string) {}
 	}
+	agent := opts.Agent
+	if agent == "" {
+		agent = DefaultAgent
+	}
+	if agent.Binary() == "" {
+		fmt.Fprintf(stderr, "error: unknown agent %q\n", agent)
+		return ExitSemantic
+	}
 
 	issueRef = strings.TrimSpace(issueRef)
 	if issueRef == "" {
@@ -141,34 +193,34 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitSemantic
 	}
 
-	progress("consultando a claude…")
-	resp, err := callClaude(issue, progress)
+	progress("consultando a " + string(agent) + "…")
+	resp, err := callAgent(agent, issue, progress)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: calling claude: %v\n", err)
+		fmt.Fprintf(stderr, "error: calling %s: %v\n", agent, err)
 		return ExitRetry
 	}
 
 	if err := validate(resp); err != nil {
-		fmt.Fprintf(stderr, "error: claude response: %v\n", err)
+		fmt.Fprintf(stderr, "error: %s response: %v\n", agent, err)
 		return ExitSemantic
 	}
 
 	progress("posteando comentario con el análisis…")
-	comment := renderComment(resp)
+	comment := renderComment(resp, agent, 1)
 	commentURL, err := postComment(issueRef, comment)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: posting comment: %v\n", err)
 		return ExitRetry
 	}
 
-	progress("asegurando label status:planned…")
-	if err := ensureLabel("status:planned", progress); err != nil {
+	progress("asegurando label status:plan…")
+	if err := ensureLabel("status:plan", progress); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
-		fmt.Fprintf(stderr, "warning: comentario posteado (%s) pero label no se pudo crear/actualizar; volvé a correr con --no-comment\n", commentURL)
+		fmt.Fprintf(stderr, "warning: comentario posteado (%s) pero label no se pudo crear/actualizar; corré de nuevo\n", commentURL)
 		return ExitRetry
 	}
 
-	progress("transicionando label a status:planned…")
+	progress("transicionando label a status:plan…")
 	if err := transitionLabels(issueRef); err != nil {
 		fmt.Fprintf(stderr, "error: editing labels: %v\n", err)
 		fmt.Fprintf(stderr, "warning: comentario posteado (%s) pero label no cambió; corré de nuevo o editá a mano\n", commentURL)
@@ -212,8 +264,8 @@ type Candidate struct {
 }
 
 // ListCandidates devuelve los issues abiertos con label ct:plan que todavía
-// no fueron explorados (status:planned ausente). Limita a los 50 más
-// recientes para mantener la TUI manejable.
+// no fueron explorados (status:plan ausente). Limita a los 50 más recientes
+// para mantener la TUI manejable.
 func ListCandidates() ([]Candidate, error) {
 	cmd := exec.Command("gh", "issue", "list",
 		"--label", "ct:plan",
@@ -233,7 +285,7 @@ func ListCandidates() ([]Candidate, error) {
 	}
 	out2 := make([]Candidate, 0, len(raw))
 	for _, i := range raw {
-		if i.HasLabel("status:planned") {
+		if i.HasLabel("status:plan") {
 			continue
 		}
 		out2 = append(out2, Candidate{Number: i.Number, Title: i.Title})
@@ -268,15 +320,18 @@ func gateIssue(i *Issue) error {
 	if !i.HasLabel("ct:plan") {
 		return fmt.Errorf("issue #%d is missing label ct:plan (not created by `che idea`?)", i.Number)
 	}
-	if i.HasLabel("status:planned") {
-		return fmt.Errorf("issue #%d was already explored (status:planned present)", i.Number)
+	if i.HasLabel("status:plan") {
+		return fmt.Errorf("issue #%d was already explored (status:plan present)", i.Number)
 	}
 	return nil
 }
 
-func callClaude(issue *Issue, progress func(string)) (*Response, error) {
+// callAgent invoca al binario correspondiente al agente elegido con el prompt
+// construido para el issue. Mantiene el patrón -p + streaming por stdout
+// establecido en el flow idea.
+func callAgent(agent Agent, issue *Issue, progress func(string)) (*Response, error) {
 	prompt := buildPrompt(issue)
-	cmd := exec.Command("claude", "-p", prompt, "--output-format", "text")
+	cmd := exec.Command(agent.Binary(), "-p", prompt, "--output-format", "text")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -295,7 +350,7 @@ func callClaude(issue *Issue, progress func(string)) (*Response, error) {
 		line := scanner.Text()
 		fullOutput.WriteString(line + "\n")
 		if strings.TrimSpace(line) != "" {
-			progress("claude: " + line)
+			progress(string(agent) + ": " + line)
 		}
 	}
 
@@ -437,9 +492,13 @@ func validate(r *Response) error {
 }
 
 // renderComment genera el markdown que se postea como comentario en el issue.
-func renderComment(r *Response) string {
+// Arranca con un header HTML que identifica al ejecutor y la iteración — lo
+// van a leer iteraciones futuras (validadores, correcciones) para saber qué
+// comments corresponden a qué agente y ronda.
+func renderComment(r *Response, agent Agent, iter int) string {
 	var sb strings.Builder
-	sb.WriteString("## Exploración (che explore)\n\n")
+	sb.WriteString(fmt.Sprintf("<!-- claude-cli: flow=explore iter=%d agent=%s role=executor -->\n", iter, agent))
+	sb.WriteString(fmt.Sprintf("## [executor:%s · iter:%d]\n\n", agent, iter))
 
 	sb.WriteString("**Resumen:** ")
 	sb.WriteString(r.Summary)
@@ -528,13 +587,13 @@ func ensureLabel(name string, progress func(string)) error {
 	return nil
 }
 
-// transitionLabels saca `status:idea` y agrega `status:planned`. NO toca
+// transitionLabels saca `status:idea` y agrega `status:plan`. NO toca
 // `ct:plan` (queda como marcador de "fue creado por che idea") ni aplica
 // `ct:exec` (eso lo hace `che execute` al arrancar).
 func transitionLabels(ref string) error {
 	cmd := exec.Command("gh", "issue", "edit", ref,
 		"--remove-label", "status:idea",
-		"--add-label", "status:planned")
+		"--add-label", "status:plan")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gh issue edit: %s", strings.TrimSpace(string(out)))

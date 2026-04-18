@@ -27,6 +27,7 @@ const (
 	screenIdeaRunning
 	screenExploreLoading
 	screenExploreSelect
+	screenExploreAgent
 	screenExploreRunning
 	screenResult
 )
@@ -69,6 +70,10 @@ type Model struct {
 	exploreCandidates []explore.Candidate
 	exploreCursor     int
 	exploreLoadErr    error
+
+	// selector de agente ejecutor (pantalla post-select, pre-running)
+	exploreChosenRef string
+	exploreAgentIdx  int
 
 	// resultado final
 	resultLines []string
@@ -212,6 +217,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case screenExploreSelect:
 		return m.handleExploreSelectKey(msg)
+	case screenExploreAgent:
+		return m.handleExploreAgentKey(msg)
 	case screenResult:
 		return m.handleResultKey(msg)
 	}
@@ -290,7 +297,38 @@ func (m Model) handleExploreSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		chosen := m.exploreCandidates[m.exploreCursor]
-		return m.startExploreFlow(fmt.Sprint(chosen.Number))
+		m.exploreChosenRef = fmt.Sprint(chosen.Number)
+		m.exploreAgentIdx = 0
+		m.screen = screenExploreAgent
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) handleExploreAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	switch k {
+	case "esc":
+		m.screen = screenExploreSelect
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		m.exploreAgentIdx = (m.exploreAgentIdx - 1 + len(explore.ValidAgents)) % len(explore.ValidAgents)
+		return m, nil
+	case "down", "j":
+		m.exploreAgentIdx = (m.exploreAgentIdx + 1) % len(explore.ValidAgents)
+		return m, nil
+	case "enter":
+		agent := explore.ValidAgents[m.exploreAgentIdx]
+		return m.startExploreFlow(m.exploreChosenRef, agent)
+	}
+	// Atajos numéricos 1..N para selección rápida.
+	for i := range explore.ValidAgents {
+		if k == fmt.Sprint(i+1) {
+			agent := explore.ValidAgents[i]
+			return m.startExploreFlow(m.exploreChosenRef, agent)
+		}
 	}
 	return m, nil
 }
@@ -349,10 +387,10 @@ func (m Model) startIdeaFlow(text string) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
 }
 
-// startExploreFlow arranca explore.Run en background sobre el issue elegido.
-// Usa el mismo patrón que startIdeaFlow: channel para progress, goroutine que
-// corre el flow, y un tick para mostrar elapsed time.
-func (m Model) startExploreFlow(issueRef string) (tea.Model, tea.Cmd) {
+// startExploreFlow arranca explore.Run en background sobre el issue elegido
+// con el agente seleccionado. Usa el mismo patrón que startIdeaFlow: channel
+// para progress, goroutine que corre el flow, y un tick para elapsed time.
+func (m Model) startExploreFlow(issueRef string, agent explore.Agent) (tea.Model, tea.Cmd) {
 	m.screen = screenExploreRunning
 	m.runStart = time.Now()
 	m.runLog = []string{}
@@ -363,6 +401,7 @@ func (m Model) startExploreFlow(issueRef string) (tea.Model, tea.Cmd) {
 		code := explore.Run(issueRef, explore.Opts{
 			Stdout: &stdout,
 			Stderr: &stderr,
+			Agent:  agent,
 			OnProgress: func(line string) {
 				ch <- progressMsg{line: line}
 			},
@@ -426,6 +465,8 @@ func (m Model) View() string {
 		return renderExploreLoading(m)
 	case screenExploreSelect:
 		return renderExploreSelect(m)
+	case screenExploreAgent:
+		return renderExploreAgent(m)
 	case screenExploreRunning:
 		return renderRunning(m, "Explorando issue…", "Ctrl+C cancela")
 	case screenResult:
@@ -528,6 +569,40 @@ func renderExploreLoading(m Model) string {
 	sb.WriteString(subtitleStyle.Render("Buscando issues con label ct:plan…"))
 	sb.WriteString("\n")
 	sb.WriteString(hintStyle.Render("Ctrl+C cancela"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+var agentDescriptions = map[explore.Agent]string{
+	explore.AgentOpus:   "Claude Opus — el ejecutor por defecto, balanceado.",
+	explore.AgentCodex:  "Codex CLI — fuerte en código, criterio diferente al de Opus.",
+	explore.AgentGemini: "Gemini CLI — tercera opinión, útil cuando querés diversidad.",
+}
+
+func renderExploreAgent(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Elegí ejecutor"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("Para explorar el issue #%s — ¿qué agente corre el análisis?", m.exploreChosenRef)))
+	sb.WriteString("\n\n")
+
+	for i, a := range explore.ValidAgents {
+		prefix := "  "
+		style := menuItemStyle
+		if i == m.exploreAgentIdx {
+			prefix = "▸ "
+			style = menuSelectedStyle
+		}
+		num := menuNumberStyle.Render(fmt.Sprintf("%d.", i+1))
+		line := prefix + num + " " + strings.ToUpper(string(a)[:1]) + string(a)[1:]
+		if desc, ok := agentDescriptions[a]; ok {
+			line += "  " + comingSoonStyle.Render("— "+desc)
+		}
+		sb.WriteString(style.Render(line) + "\n")
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("↑/↓ navega · 1-3 atajo · Enter elige · Esc vuelve · Ctrl+C sale"))
 	sb.WriteString("\n")
 	return sb.String()
 }

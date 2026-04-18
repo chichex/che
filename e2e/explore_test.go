@@ -116,8 +116,9 @@ func TestExplore_IssueAlreadyPlanned_Exit3(t *testing.T) {
 	env.Invocations().AssertNotCalled(t, "claude")
 }
 
-// TestExplore_GoldenPath: issue OK → claude OK → comment posteado → label
+// TestExplore_GoldenPath: issue OK → ejecutor OK → comment posteado → label
 // transitioned. Verifica el flow completo y los asserts sobre invocations.
+// Default agent es opus (invoca el binario `claude`).
 func TestExplore_GoldenPath(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
@@ -148,11 +149,96 @@ func TestExplore_GoldenPath(t *testing.T) {
 	}
 	edits[0].AssertArgsContain(t,
 		"--remove-label", "status:idea",
-		"--add-label", "status:planned")
+		"--add-label", "status:plan")
 	// No aplicar ct:exec desde explore — eso lo hace che execute al arrancar.
 	if strings.Contains(strings.Join(edits[0].Args, " "), "ct:exec") {
 		t.Fatalf("explore must NOT apply ct:exec; edits[0].Args=%v", edits[0].Args)
 	}
+	// Otros agentes NO deberían haberse invocado.
+	inv.AssertNotCalled(t, "codex")
+	inv.AssertNotCalled(t, "gemini")
+}
+
+// TestExplore_AgentCodex: --agent codex invoca el binario `codex`, no claude.
+func TestExplore_AgentCodex(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectGh(`^issue comment 42`).RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-999\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	env.MustRun("explore", "--agent", "codex", "42")
+
+	inv := env.Invocations()
+	if len(inv.For("codex")) != 1 {
+		t.Fatalf("expected 1 codex call, got %d", len(inv.For("codex")))
+	}
+	inv.AssertNotCalled(t, "claude")
+	inv.AssertNotCalled(t, "gemini")
+}
+
+// TestExplore_AgentGemini: --agent gemini invoca el binario `gemini`.
+func TestExplore_AgentGemini(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
+	env.ExpectAgent("gemini").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectGh(`^issue comment 42`).RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-999\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	env.MustRun("explore", "--agent", "gemini", "42")
+
+	inv := env.Invocations()
+	if len(inv.For("gemini")) != 1 {
+		t.Fatalf("expected 1 gemini call, got %d", len(inv.For("gemini")))
+	}
+	inv.AssertNotCalled(t, "claude")
+	inv.AssertNotCalled(t, "codex")
+}
+
+// TestExplore_AgentOpusExplicit: --agent opus usa claude (alias del binario).
+func TestExplore_AgentOpusExplicit(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectGh(`^issue comment 42`).RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-999\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	env.MustRun("explore", "--agent", "opus", "42")
+
+	inv := env.Invocations()
+	if len(inv.For("claude")) != 1 {
+		t.Fatalf("expected 1 claude call, got %d", len(inv.For("claude")))
+	}
+}
+
+// TestExplore_InvalidAgent_ExitNonZero: --agent bogus rechazado.
+func TestExplore_InvalidAgent_ExitNonZero(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	r := env.Run("explore", "--agent", "bogus", "42")
+	if r.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit, got 0\nstdout: %s\nstderr: %s", r.Stdout, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "agent")
+	env.Invocations().AssertNotCalled(t, "gh")
+	env.Invocations().AssertNotCalled(t, "claude")
+	env.Invocations().AssertNotCalled(t, "codex")
+	env.Invocations().AssertNotCalled(t, "gemini")
 }
 
 // TestExplore_ClaudeInvalidEffort_Exit3: claude returns path.effort outside

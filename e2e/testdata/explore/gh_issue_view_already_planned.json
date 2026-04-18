@@ -1,12 +1,12 @@
 {
   "number": 42,
   "title": "Ya fue explorado en un run anterior",
-  "body": "El flow explore ya corrió sobre este issue: tiene status:planned.\n",
+  "body": "El flow explore ya corrió sobre este issue: tiene status:plan.\n",
   "url": "https://github.com/acme/demo/issues/42",
   "state": "OPEN",
   "labels": [
     {"name": "ct:plan"},
-    {"name": "status:planned"},
+    {"name": "status:plan"},
     {"name": "type:feature"},
     {"name": "size:m"}
   ]
