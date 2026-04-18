@@ -1,0 +1,38 @@
+version: 2
+
+builds:
+  - main: .
+    binary: che
+    ldflags:
+      - -s -w -X github.com/chichex/che/cmd.Version={{.Version}}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [tar.gz]
+
+homebrew_casks:
+  - repository:
+      owner: chichex
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/chichex/che
+    description: "che - workflow estandarizado para trabajar con agentes de IA sobre issues de GitHub"
+    license: MIT
+    binaries:
+      - che
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
