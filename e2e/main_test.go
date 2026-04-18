@@ -30,7 +30,7 @@ func TestMain(m *testing.M) {
 	cheBin := filepath.Join(tmp, "che")
 	fakeBin := filepath.Join(tmp, "chefake")
 
-	if err := goBuild(cheBin, "."); err != nil {
+	if err := goBuild(cheBin, ".", "-ldflags=-X github.com/chichex/che/cmd.Version="+harness.TestVersion); err != nil {
 		fmt.Fprintf(os.Stderr, "e2e: build che: %v\n", err)
 		os.Exit(1)
 	}
@@ -39,12 +39,15 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	harness.SetBinaries(cheBin, fakeBin)
+	harness.SetBinaries(cheBin, fakeBin, harness.TestVersion)
 	os.Exit(m.Run())
 }
 
-func goBuild(out, pkg string) error {
-	cmd := exec.Command("go", "build", "-o", out, pkg)
+func goBuild(out, pkg string, extraArgs ...string) error {
+	args := []string{"build", "-o", out}
+	args = append(args, extraArgs...)
+	args = append(args, pkg)
+	cmd := exec.Command("go", args...)
 	cmd.Dir = projectRoot()
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

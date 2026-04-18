@@ -55,6 +55,11 @@ func (e *Env) ExpectGit(argsRegex string) *ExpectBuilder {
 	return e.Expect("git").WhenArgsMatch(argsRegex)
 }
 
+// ExpectBrew scripts an invocation of brew where the joined args match argsRegex.
+func (e *Env) ExpectBrew(argsRegex string) *ExpectBuilder {
+	return e.Expect("brew").WhenArgsMatch(argsRegex)
+}
+
 // WhenArgsMatch filters the matcher by a regex over the joined args (argv[1:]).
 func (b *ExpectBuilder) WhenArgsMatch(re string) *ExpectBuilder {
 	b.m.ArgsRegex = re

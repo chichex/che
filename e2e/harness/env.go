@@ -22,7 +22,7 @@ import (
 
 // fakeIdentities are the external binaries che may shell out to. The harness
 // creates a symlink per identity in the fake bin dir.
-var fakeIdentities = []string{"gh", "claude", "codex", "gemini", "git"}
+var fakeIdentities = []string{"gh", "claude", "codex", "gemini", "git", "brew"}
 
 // Env is the per-test sandbox.
 type Env struct {
@@ -31,6 +31,9 @@ type Env struct {
 	RepoDir   string
 	FakeBin   string // dir containing symlinks for each fake identity
 	ScriptDir string // per-bin script files + invocations log
+
+	envOverrides map[string]string // extra env vars injected into che invocations
+	cleanup      []func()
 }
 
 // New builds a fresh sandbox. It calls t.Fatal on any setup failure.
@@ -60,13 +63,35 @@ func New(t *testing.T) *Env {
 		}
 	}
 
-	return &Env{
-		t:         t,
-		HomeDir:   home,
-		RepoDir:   repo,
-		FakeBin:   fakeBin,
-		ScriptDir: scriptDir,
+	e := &Env{
+		t:            t,
+		HomeDir:      home,
+		RepoDir:      repo,
+		FakeBin:      fakeBin,
+		ScriptDir:    scriptDir,
+		envOverrides: map[string]string{},
 	}
+	t.Cleanup(func() {
+		for _, fn := range e.cleanup {
+			fn()
+		}
+	})
+	return e
+}
+
+// SetEnv injects an env var into every subsequent che invocation.
+func (e *Env) SetEnv(key, val string) {
+	e.envOverrides[key] = val
+}
+
+// WithInstallPath is sugar over SetEnv for the upgrade flow.
+func (e *Env) WithInstallPath(path string) {
+	e.SetEnv("CHE_UPGRADE_TARGET_PATH", path)
+}
+
+// registerCleanup stores a teardown fn to run when the test ends.
+func (e *Env) registerCleanup(fn func()) {
+	e.cleanup = append(e.cleanup, fn)
 }
 
 // RemoveFake deletes the symlink for the given identity so the binary is no

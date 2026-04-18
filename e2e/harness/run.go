@@ -86,6 +86,9 @@ func (e *Env) buildEnv() []string {
 	if term := os.Getenv("TERM"); term != "" {
 		base = append(base, "TERM="+term)
 	}
+	for k, v := range e.envOverrides {
+		base = append(base, k+"="+v)
+	}
 	return base
 }
 
