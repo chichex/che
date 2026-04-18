@@ -26,6 +26,11 @@ homebrew_casks:
     license: MIT
     binaries:
       - che
+    hooks:
+      post:
+        install: |
+          system "xattr", "-dr", "com.apple.quarantine", "#{staged_path}/che"
+          system "codesign", "--sign", "-", "--force", "#{staged_path}/che"
 
 checksum:
   name_template: checksums.txt
