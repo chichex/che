@@ -22,6 +22,9 @@ var (
 			Foreground(colorMuted).
 			Padding(0, 2, 1, 2)
 
+	contextLineStyle = lipgloss.NewStyle().
+				Padding(0, 2, 1, 2)
+
 	menuItemStyle = lipgloss.NewStyle().
 			Padding(0, 2).
 			Foreground(colorText)
@@ -49,8 +52,7 @@ var (
 
 	comingSoonStyle = lipgloss.NewStyle().
 			Foreground(colorMuted).
-			Italic(true).
-			Padding(1, 2)
+			Italic(true)
 
 	logLineStyle = lipgloss.NewStyle().
 			Foreground(colorMuted)
@@ -60,10 +62,17 @@ var (
 			BorderForeground(colorPrimary).
 			Padding(0, 1).
 			Margin(0, 2)
-
-	boxStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(colorMuted).
-			Padding(1, 2).
-			Margin(1, 2)
 )
+
+// Inline badges para el header del menú. Cada "chip" con color propio.
+func primaryBadge(s string) string {
+	return lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Render(s)
+}
+
+func accentBadge(s string) string {
+	return lipgloss.NewStyle().Foreground(colorAccent).Bold(true).Render(s)
+}
+
+func mutedBadge(s string) string {
+	return lipgloss.NewStyle().Foreground(colorMuted).Render(s)
+}

@@ -17,7 +17,7 @@ var rootCmd = &cobra.Command{
 	Version: Version,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Sin args → abre la TUI interactiva.
-		return tui.Run()
+		return tui.Run(Version)
 	},
 }
 

@@ -9,6 +9,7 @@ package tui
 import (
 	"bytes"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -50,6 +51,11 @@ type Model struct {
 	cursor   int
 	textarea textarea.Model
 
+	// contexto mostrado en el header
+	version string
+	repo    string
+	branch  string
+
 	// streaming del flow
 	runStart   time.Time
 	runLog     []string
@@ -60,8 +66,9 @@ type Model struct {
 	resultOK    bool
 }
 
-// New construye el modelo inicial.
-func New() Model {
+// New construye el modelo inicial. version es el tag con el que se buildeó
+// el binario (ej. "0.0.8"). El repo y la branch se detectan en el momento.
+func New(version string) Model {
 	ta := textarea.New()
 	ta.Placeholder = "Contame la idea — puede ser multilínea. Ctrl+D para enviar, Esc para cancelar."
 	ta.CharLimit = 5000
@@ -72,7 +79,34 @@ func New() Model {
 		screen:   screenMenu,
 		cursor:   0,
 		textarea: ta,
+		version:  version,
+		repo:     detectRepo(),
+		branch:   detectBranch(),
 	}
+}
+
+func detectRepo() string {
+	out, err := exec.Command("git", "remote", "get-url", "origin").Output()
+	if err != nil {
+		return ""
+	}
+	url := strings.TrimSpace(string(out))
+	url = strings.TrimSuffix(url, ".git")
+	switch {
+	case strings.HasPrefix(url, "https://github.com/"):
+		return strings.TrimPrefix(url, "https://github.com/")
+	case strings.HasPrefix(url, "git@github.com:"):
+		return strings.TrimPrefix(url, "git@github.com:")
+	}
+	return url
+}
+
+func detectBranch() string {
+	out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (m Model) Init() tea.Cmd { return nil }
@@ -293,6 +327,8 @@ func renderMenu(m Model) string {
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("che — workflow estandarizado con agentes de IA"))
 	sb.WriteString("\n")
+	sb.WriteString(contextLineStyle.Render(formatContext(m)))
+	sb.WriteString("\n")
 	sb.WriteString(subtitleStyle.Render("¿Qué querés hacer?"))
 	sb.WriteString("\n\n")
 
@@ -315,6 +351,24 @@ func renderMenu(m Model) string {
 	sb.WriteString(hintStyle.Render("↑/↓ navega · 1-6 atajo · Enter elige · q sale"))
 	sb.WriteString("\n")
 	return sb.String()
+}
+
+// formatContext arma la línea "v0.0.8 · chichex/demo · main". Omite partes
+// vacías (ej. si estás fuera de un repo git).
+func formatContext(m Model) string {
+	parts := []string{}
+	if m.version != "" {
+		parts = append(parts, accentBadge("v"+m.version))
+	}
+	if m.repo != "" {
+		parts = append(parts, primaryBadge(m.repo))
+	} else {
+		parts = append(parts, mutedBadge("(sin repo git)"))
+	}
+	if m.branch != "" {
+		parts = append(parts, mutedBadge(m.branch))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func renderIdeaInput(m Model) string {
@@ -396,9 +450,10 @@ func renderResult(m Model) string {
 	return sb.String()
 }
 
-// Run lanza el TUI y bloquea hasta que el usuario cierre.
-func Run() error {
-	p := tea.NewProgram(New(), tea.WithAltScreen())
+// Run lanza el TUI y bloquea hasta que el usuario cierre. version se muestra
+// en el header del menú (típicamente cmd.Version).
+func Run(version string) error {
+	p := tea.NewProgram(New(version), tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }
