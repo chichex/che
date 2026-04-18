@@ -52,6 +52,9 @@ var (
 			Italic(true).
 			Padding(1, 2)
 
+	logLineStyle = lipgloss.NewStyle().
+			Foreground(colorMuted)
+
 	textareaBorder = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorPrimary).

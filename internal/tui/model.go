@@ -1,15 +1,16 @@
 // Package tui implementa la aplicación interactiva principal de che.
 //
 // El loop es:
-//   1. Menú principal con 6 opciones (anotar/explorar/ejecutar/cerrar/eliminar/salir).
-//   2. Al elegir una opción entra a la pantalla correspondiente.
-//   3. Al terminar un flow (éxito o error), vuelve al menú con un toast.
+//  1. Menú principal con 6 opciones (anotar/explorar/ejecutar/cerrar/eliminar/salir).
+//  2. Al elegir una opción entra a la pantalla correspondiente.
+//  3. Al terminar un flow (éxito o error), vuelve al menú con un toast.
 package tui
 
 import (
 	"bytes"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
@@ -27,9 +28,9 @@ const (
 
 type menuItem struct {
 	label    string
-	key      string // atajo numérico
+	key      string
 	disabled bool
-	action   screen // pantalla a la que saltar
+	action   screen
 }
 
 var menuItems = []menuItem{
@@ -41,13 +42,20 @@ var menuItems = []menuItem{
 	{label: "Salir", key: "6"},
 }
 
+const maxLogLines = 20
+
 // Model es el estado raíz del TUI.
 type Model struct {
 	screen   screen
 	cursor   int
 	textarea textarea.Model
 
-	// resultado del último flow corrido
+	// streaming del flow
+	runStart   time.Time
+	runLog     []string
+	progressCh chan tea.Msg
+
+	// resultado final
 	resultLines []string
 	resultOK    bool
 }
@@ -67,18 +75,51 @@ func New() Model {
 	}
 }
 
-func (m Model) Init() tea.Cmd {
-	return nil
+func (m Model) Init() tea.Cmd { return nil }
+
+// ---- mensajes que fluyen desde el flow hacia el Update ----
+
+type progressMsg struct{ line string }
+type flowDoneMsg struct {
+	code     idea.ExitCode
+	stdout   string
+	stderr   string
 }
+type tickMsg time.Time
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
-	case ideaFlowDoneMsg:
-		m.resultLines = msg.lines
-		m.resultOK = msg.ok
+
+	case progressMsg:
+		m.runLog = appendLog(m.runLog, msg.line)
+		// seguimos escuchando el channel
+		return m, waitForMsg(m.progressCh)
+
+	case flowDoneMsg:
+		// drenamos el channel por si queda algo
+		m.runLog = appendLog(m.runLog, "—")
 		m.screen = screenResult
+		m.resultOK = msg.code == idea.ExitOK
+		var lines []string
+		for _, s := range splitNonEmpty(msg.stdout) {
+			lines = append(lines, s)
+		}
+		for _, s := range splitNonEmpty(msg.stderr) {
+			lines = append(lines, s)
+		}
+		if !m.resultOK {
+			lines = append(lines, fmt.Sprintf("(exit %d)", int(msg.code)))
+		}
+		m.resultLines = lines
+		m.progressCh = nil
+		return m, nil
+
+	case tickMsg:
+		if m.screen == screenIdeaRunning {
+			return m, tickCmd()
+		}
 		return m, nil
 	}
 	return m, nil
@@ -91,7 +132,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenIdeaInput:
 		return m.handleIdeaInputKey(msg)
 	case screenIdeaRunning:
-		// ignorar input mientras corre
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
 		return m, nil
 	case screenResult:
 		return m.handleResultKey(msg)
@@ -101,15 +144,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
-
-	// Shortcuts numéricos
 	for i, item := range menuItems {
 		if k == item.key {
 			m.cursor = i
 			return m.activateCurrent()
 		}
 	}
-
 	switch k {
 	case "up", "k":
 		m.cursor = (m.cursor - 1 + len(menuItems)) % len(menuItems)
@@ -125,7 +165,6 @@ func (m Model) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 	item := menuItems[m.cursor]
-	// "Salir"
 	if item.key == "6" {
 		return m, tea.Quit
 	}
@@ -154,8 +193,7 @@ func (m Model) handleIdeaInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if text == "" {
 			return m, nil
 		}
-		m.screen = screenIdeaRunning
-		return m, runIdeaCmd(text)
+		return m.startIdeaFlow(text)
 	}
 	var cmd tea.Cmd
 	m.textarea, cmd = m.textarea.Update(msg)
@@ -163,17 +201,79 @@ func (m Model) handleIdeaInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
+	if msg.String() == "ctrl+c" {
 		return m, tea.Quit
 	}
-	// Cualquier tecla vuelve al menú.
 	m.screen = screenMenu
 	m.resultLines = nil
+	m.runLog = nil
 	return m, nil
 }
 
-// View es la render function.
+// startIdeaFlow lanza el flow en background, abre un channel para mensajes
+// de progreso, y programa el tick de elapsed time.
+func (m Model) startIdeaFlow(text string) (tea.Model, tea.Cmd) {
+	m.screen = screenIdeaRunning
+	m.runStart = time.Now()
+	m.runLog = []string{}
+	m.progressCh = make(chan tea.Msg, 64)
+
+	go func(ch chan<- tea.Msg) {
+		var stdout, stderr bytes.Buffer
+		code := idea.Run(text, idea.Opts{
+			Stdout: &stdout,
+			Stderr: &stderr,
+			OnProgress: func(line string) {
+				ch <- progressMsg{line: line}
+			},
+		})
+		ch <- flowDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	}(m.progressCh)
+
+	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
+}
+
+// waitForMsg lee el próximo mensaje del channel y lo devuelve como tea.Msg.
+// Se re-emite después de cada progressMsg para seguir escuchando.
+func waitForMsg(ch <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		if ch == nil {
+			return nil
+		}
+		msg, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return msg
+	}
+}
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
+}
+
+func appendLog(log []string, line string) []string {
+	log = append(log, line)
+	if len(log) > maxLogLines {
+		log = log[len(log)-maxLogLines:]
+	}
+	return log
+}
+
+func splitNonEmpty(s string) []string {
+	var out []string
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// ---- render ----
+
 func (m Model) View() string {
 	switch m.screen {
 	case screenMenu:
@@ -181,7 +281,7 @@ func (m Model) View() string {
 	case screenIdeaInput:
 		return renderIdeaInput(m)
 	case screenIdeaRunning:
-		return renderIdeaRunning()
+		return renderIdeaRunning(m)
 	case screenResult:
 		return renderResult(m)
 	}
@@ -220,7 +320,7 @@ func renderIdeaInput(m Model) string {
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("Anotar una idea"))
 	sb.WriteString("\n")
-	sb.WriteString(subtitleStyle.Render("Escribilo como un commit message: claro y accionable."))
+	sb.WriteString(subtitleStyle.Render("Escribila como un commit message: clara y accionable."))
 	sb.WriteString("\n")
 	sb.WriteString(textareaBorder.Render(m.textarea.View()))
 	sb.WriteString("\n")
@@ -229,9 +329,28 @@ func renderIdeaInput(m Model) string {
 	return sb.String()
 }
 
-func renderIdeaRunning() string {
-	return titleStyle.Render("Procesando…") + "\n" +
-		subtitleStyle.Render("Consultando a claude y creando los issues…") + "\n"
+func renderIdeaRunning(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Procesando…"))
+	sb.WriteString("\n")
+
+	elapsed := time.Since(m.runStart).Round(time.Second)
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("⏱  %s transcurridos", elapsed)))
+	sb.WriteString("\n")
+
+	if len(m.runLog) == 0 {
+		sb.WriteString(hintStyle.Render("  arrancando…"))
+		sb.WriteString("\n")
+	} else {
+		for _, line := range m.runLog {
+			sb.WriteString("  " + logLineStyle.Render(line) + "\n")
+		}
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("Ctrl+C cancela"))
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 func renderResult(m Model) string {
@@ -249,39 +368,6 @@ func renderResult(m Model) string {
 	sb.WriteString(hintStyle.Render("presioná cualquier tecla para volver al menú"))
 	sb.WriteString("\n")
 	return sb.String()
-}
-
-// ---- comandos async para Bubble Tea ----
-
-type ideaFlowDoneMsg struct {
-	ok    bool
-	lines []string
-}
-
-// runIdeaCmd invoca el flow en background y emite un ideaFlowDoneMsg con
-// el resultado cuando termina.
-func runIdeaCmd(text string) tea.Cmd {
-	return func() tea.Msg {
-		var stdout, stderr bytes.Buffer
-		code := idea.Run(text, &stdout, &stderr)
-		lines := collectLines(stdout.String(), stderr.String())
-		if code == idea.ExitOK {
-			return ideaFlowDoneMsg{ok: true, lines: lines}
-		}
-		return ideaFlowDoneMsg{ok: false, lines: append(lines, fmt.Sprintf("(exit %d)", int(code)))}
-	}
-}
-
-func collectLines(stdout, stderr string) []string {
-	var out []string
-	for _, block := range []string{stdout, stderr} {
-		for _, l := range strings.Split(block, "\n") {
-			if strings.TrimSpace(l) != "" {
-				out = append(out, l)
-			}
-		}
-	}
-	return out
 }
 
 // Run lanza el TUI y bloquea hasta que el usuario cierre.

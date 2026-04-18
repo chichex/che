@@ -4,6 +4,7 @@
 package idea
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -41,20 +42,37 @@ const (
 	ExitSemantic ExitCode = 3 // entrada vacía, JSON inválido, enums fuera de rango
 )
 
+// Opts agrupa los writers y la callback de progreso. Si OnProgress es nil,
+// el flow corre silencioso (modo CI).
+type Opts struct {
+	Stdout     io.Writer
+	Stderr     io.Writer
+	OnProgress func(string) // invocado por cada línea de output de los subprocesses
+}
+
 var (
 	validTypes = map[string]bool{"feature": true, "fix": true, "mejora": true, "ux": true}
 	validSizes = map[string]bool{"XS": true, "S": true, "M": true, "L": true, "XL": true}
 )
 
-// Run ejecuta el flow completo. Toma el texto de la idea por parámetro, hace
-// los prechecks, invoca al agente, crea los issues y (si aplica) rollback.
-func Run(text string, stdout, stderr io.Writer) ExitCode {
+// Run ejecuta el flow completo. Los writers de opts son el stdout/stderr
+// "final" (URLs creadas, errores). OnProgress recibe las líneas que van
+// saliendo de claude mientras corre — el caller decide qué hacer con ellas
+// (mostrarlas en vivo en la TUI, escribirlas a log, o nada).
+func Run(text string, opts Opts) ExitCode {
+	stdout, stderr := opts.Stdout, opts.Stderr
+	progress := opts.OnProgress
+	if progress == nil {
+		progress = func(string) {}
+	}
+
 	text = strings.TrimSpace(text)
 	if text == "" {
 		fmt.Fprintln(stderr, "error: idea text is empty")
 		return ExitSemantic
 	}
 
+	progress("chequeando repo git y auth de GitHub…")
 	if err := precheckGitHubRemote(); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
@@ -64,7 +82,8 @@ func Run(text string, stdout, stderr io.Writer) ExitCode {
 		return ExitRetry
 	}
 
-	resp, err := callClaude(text)
+	progress("consultando a claude…")
+	resp, err := callClaude(text, progress)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: calling claude: %v\n", err)
 		return ExitRetry
@@ -75,14 +94,16 @@ func Run(text string, stdout, stderr io.Writer) ExitCode {
 		return ExitSemantic
 	}
 
+	progress(fmt.Sprintf("claude clasificó %d idea(s); creando issues…", len(resp.Items)))
 	fmt.Fprintf(stdout, "Creating %d issue(s)…\n", len(resp.Items))
 
 	created := []string{}
 	for i, item := range resp.Items {
+		progress(fmt.Sprintf("creando issue %d/%d: %s", i+1, len(resp.Items), item.Title))
 		url, err := createIssue(item)
 		if err != nil {
 			fmt.Fprintf(stderr, "error: creating issue %d/%d: %v\n", i+1, len(resp.Items), err)
-			rollback(created, stderr)
+			rollback(created, stderr, progress)
 			return ExitRetry
 		}
 		created = append(created, url)
@@ -113,30 +134,120 @@ func precheckGhAuth() error {
 	return nil
 }
 
-func callClaude(userText string) (*Response, error) {
+func callClaude(userText string, progress func(string)) (*Response, error) {
 	prompt := buildPrompt(userText)
-	cmd := exec.Command("claude",
-		"-p",
-		"--output-format", "json",
-	)
-	cmd.Stdin = strings.NewReader(prompt)
-	out, err := cmd.Output()
+	cmd := exec.Command("claude", "-p", prompt, "--output-format", "text")
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
+		return nil, err
+	}
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	var fullOutput strings.Builder
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fullOutput.WriteString(line + "\n")
+		if strings.TrimSpace(line) != "" {
+			progress("claude: " + line)
+		}
+	}
+
+	if err := cmd.Wait(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("exit %d: %s", ee.ExitCode(), strings.TrimSpace(string(ee.Stderr)))
+			return nil, fmt.Errorf("exit %d: %s", ee.ExitCode(), strings.TrimSpace(stderrBuf.String()))
 		}
 		return nil, err
 	}
+
+	return parseResponse(fullOutput.String())
+}
+
+// parseResponse extrae el JSON del output de claude, tolerando code fences
+// y texto circundante.
+func parseResponse(raw string) (*Response, error) {
+	raw = strings.TrimSpace(raw)
+
+	// Si viene con ```json ... ``` lo limpiamos.
+	if strings.HasPrefix(raw, "```") {
+		if nl := strings.Index(raw, "\n"); nl >= 0 {
+			raw = raw[nl+1:]
+		}
+		if idx := strings.LastIndex(raw, "```"); idx >= 0 {
+			raw = raw[:idx]
+		}
+		raw = strings.TrimSpace(raw)
+	}
+
+	// Si hay texto antes del primer `{`, cortamos hasta ahí.
+	if i := strings.Index(raw, "{"); i > 0 {
+		raw = raw[i:]
+	}
+	// Idem después del último `}`.
+	if i := strings.LastIndex(raw, "}"); i >= 0 && i < len(raw)-1 {
+		raw = raw[:i+1]
+	}
+
 	var r Response
-	if err := json.Unmarshal(out, &r); err != nil {
-		return nil, fmt.Errorf("invalid JSON from claude: %w", err)
+	if err := json.Unmarshal([]byte(raw), &r); err != nil {
+		return nil, fmt.Errorf("invalid JSON from claude: %w (raw: %q)", err, truncate(raw, 200))
 	}
 	return &r, nil
 }
 
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
 func buildPrompt(userText string) string {
-	// Placeholder prompt — fine-tunearemos contra claude real.
-	return "system: devolvé JSON con items[] clasificando la idea.\n\nuser:\n" + userText
+	return `Sos un clasificador de ideas para un backlog de ingeniería en GitHub.
+
+Te voy a pasar una idea escrita en texto libre (como un commit message). Tu tarea:
+1. Decidí si contiene una idea o varias ideas independientes (split).
+2. Para cada idea, asigná type y size.
+3. Armá title, body estructurado y criterios de éxito.
+
+Tipos válidos: feature, fix, mejora, ux.
+Tamaños válidos: XS (minutos), S (horas), M (1-2 días), L (1 semana), XL (varias semanas).
+
+Devolvé EXCLUSIVAMENTE un objeto JSON con este shape — sin texto antes ni después, sin markdown code fences:
+
+{
+  "items": [
+    {
+      "type": "feature",
+      "size": "M",
+      "title": "Título imperativo corto, máx 60 chars",
+      "idea": "Parafraseo accionable de la idea, 1-3 oraciones",
+      "context_paths": ["ruta/al/archivo.go"],
+      "context_area": "Área del producto (auth, billing, UI, etc.)",
+      "dependencies": ["libs o módulos visibles"],
+      "criteria": ["Criterio de éxito 1", "Criterio de éxito 2"],
+      "notes": "Warnings, decisiones pendientes, coordinación necesaria",
+      "size_reason": "Justificación corta del tamaño"
+    }
+  ]
+}
+
+Reglas:
+- Si la idea cubre varias cosas independientes, items[] tiene un elemento por cada una.
+- Si es una sola cosa, items[] tiene UN solo elemento.
+- NUNCA devuelvas items[] vacío — si no podés clasificar, devolvé un único item con type=feature size=M y anotá en "notes" que la idea estaba ambigua.
+- Los campos context_paths/dependencies pueden ir [] si no aplican, pero criteria[] tiene que tener al menos 1 criterio.
+
+Idea del usuario:
+<<<
+` + userText + `
+>>>`
 }
 
 func validate(r *Response) error {
@@ -231,10 +342,11 @@ func renderBody(it Item) string {
 	return sb.String()
 }
 
-func rollback(created []string, stderr io.Writer) {
+func rollback(created []string, stderr io.Writer, progress func(string)) {
 	var orphans []string
 	for i := len(created) - 1; i >= 0; i-- {
 		url := created[i]
+		progress("rollback: cerrando " + url)
 		if err := exec.Command("gh", "issue", "close", url).Run(); err != nil {
 			orphans = append(orphans, url)
 		}

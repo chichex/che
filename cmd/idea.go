@@ -32,7 +32,10 @@ Este subcomando es la ruta no-interactiva (scripting/CI). La TUI de che
 			cmd.SilenceErrors = true
 			return err
 		}
-		code := idea.Run(text, cmd.OutOrStdout(), cmd.ErrOrStderr())
+		code := idea.Run(text, idea.Opts{
+			Stdout: cmd.OutOrStdout(),
+			Stderr: cmd.ErrOrStderr(),
+		})
 		if code != idea.ExitOK {
 			os.Exit(int(code))
 		}
