@@ -28,9 +28,44 @@ const (
 	screenExploreLoading
 	screenExploreSelect
 	screenExploreAgent
+	screenExploreValidators
 	screenExploreRunning
 	screenResult
 )
+
+// validatorPreset agrupa una lista de validators bajo un nombre mostrable
+// en la TUI. Mantiene simple la selección: el usuario elige un preset en
+// vez de armar la lista manualmente.
+type validatorPreset struct {
+	label      string
+	validators []explore.Validator
+}
+
+var validatorPresets = []validatorPreset{
+	{label: "Codex + Gemini (default — diversidad)", validators: []explore.Validator{
+		{Agent: explore.AgentCodex, Instance: 1},
+		{Agent: explore.AgentGemini, Instance: 1},
+	}},
+	{label: "Opus + Codex", validators: []explore.Validator{
+		{Agent: explore.AgentOpus, Instance: 1},
+		{Agent: explore.AgentCodex, Instance: 1},
+	}},
+	{label: "Opus + Gemini", validators: []explore.Validator{
+		{Agent: explore.AgentOpus, Instance: 1},
+		{Agent: explore.AgentGemini, Instance: 1},
+	}},
+	{label: "Codex × 2 + Gemini (más profundidad en código)", validators: []explore.Validator{
+		{Agent: explore.AgentCodex, Instance: 1},
+		{Agent: explore.AgentCodex, Instance: 2},
+		{Agent: explore.AgentGemini, Instance: 1},
+	}},
+	{label: "Opus + Codex + Gemini (los 3)", validators: []explore.Validator{
+		{Agent: explore.AgentOpus, Instance: 1},
+		{Agent: explore.AgentCodex, Instance: 1},
+		{Agent: explore.AgentGemini, Instance: 1},
+	}},
+	{label: "Sin validadores (CI/debug)", validators: nil},
+}
 
 type menuItem struct {
 	label    string
@@ -71,9 +106,11 @@ type Model struct {
 	exploreCursor     int
 	exploreLoadErr    error
 
-	// selector de agente ejecutor (pantalla post-select, pre-running)
-	exploreChosenRef string
-	exploreAgentIdx  int
+	// selector de agente ejecutor + preset de validadores
+	exploreChosenRef     string
+	exploreAgentIdx      int
+	exploreChosenAgent   explore.Agent
+	exploreValidatorsIdx int
 
 	// resultado final
 	resultLines []string
@@ -219,6 +256,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleExploreSelectKey(msg)
 	case screenExploreAgent:
 		return m.handleExploreAgentKey(msg)
+	case screenExploreValidators:
+		return m.handleExploreValidatorsKey(msg)
 	case screenResult:
 		return m.handleResultKey(msg)
 	}
@@ -320,14 +359,46 @@ func (m Model) handleExploreAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.exploreAgentIdx = (m.exploreAgentIdx + 1) % len(explore.ValidAgents)
 		return m, nil
 	case "enter":
-		agent := explore.ValidAgents[m.exploreAgentIdx]
-		return m.startExploreFlow(m.exploreChosenRef, agent)
+		m.exploreChosenAgent = explore.ValidAgents[m.exploreAgentIdx]
+		m.exploreValidatorsIdx = 0
+		m.screen = screenExploreValidators
+		return m, nil
 	}
-	// Atajos numéricos 1..N para selección rápida.
+	// Atajos numéricos 1..N para selección rápida del ejecutor.
 	for i := range explore.ValidAgents {
 		if k == fmt.Sprint(i+1) {
-			agent := explore.ValidAgents[i]
-			return m.startExploreFlow(m.exploreChosenRef, agent)
+			m.exploreChosenAgent = explore.ValidAgents[i]
+			m.exploreValidatorsIdx = 0
+			m.screen = screenExploreValidators
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m Model) handleExploreValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	switch k {
+	case "esc":
+		m.screen = screenExploreAgent
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		m.exploreValidatorsIdx = (m.exploreValidatorsIdx - 1 + len(validatorPresets)) % len(validatorPresets)
+		return m, nil
+	case "down", "j":
+		m.exploreValidatorsIdx = (m.exploreValidatorsIdx + 1) % len(validatorPresets)
+		return m, nil
+	case "enter":
+		preset := validatorPresets[m.exploreValidatorsIdx]
+		return m.startExploreFlow(m.exploreChosenRef, m.exploreChosenAgent, preset.validators)
+	}
+	// Atajos numéricos 1..N
+	for i := range validatorPresets {
+		if k == fmt.Sprint(i+1) {
+			preset := validatorPresets[i]
+			return m.startExploreFlow(m.exploreChosenRef, m.exploreChosenAgent, preset.validators)
 		}
 	}
 	return m, nil
@@ -388,9 +459,9 @@ func (m Model) startIdeaFlow(text string) (tea.Model, tea.Cmd) {
 }
 
 // startExploreFlow arranca explore.Run en background sobre el issue elegido
-// con el agente seleccionado. Usa el mismo patrón que startIdeaFlow: channel
-// para progress, goroutine que corre el flow, y un tick para elapsed time.
-func (m Model) startExploreFlow(issueRef string, agent explore.Agent) (tea.Model, tea.Cmd) {
+// con el agente seleccionado y la lista de validators del preset. Mismo
+// patrón async que startIdeaFlow.
+func (m Model) startExploreFlow(issueRef string, agent explore.Agent, validators []explore.Validator) (tea.Model, tea.Cmd) {
 	m.screen = screenExploreRunning
 	m.runStart = time.Now()
 	m.runLog = []string{}
@@ -399,9 +470,10 @@ func (m Model) startExploreFlow(issueRef string, agent explore.Agent) (tea.Model
 	go func(ch chan<- tea.Msg) {
 		var stdout, stderr bytes.Buffer
 		code := explore.Run(issueRef, explore.Opts{
-			Stdout: &stdout,
-			Stderr: &stderr,
-			Agent:  agent,
+			Stdout:     &stdout,
+			Stderr:     &stderr,
+			Agent:      agent,
+			Validators: validators,
 			OnProgress: func(line string) {
 				ch <- progressMsg{line: line}
 			},
@@ -467,6 +539,8 @@ func (m Model) View() string {
 		return renderExploreSelect(m)
 	case screenExploreAgent:
 		return renderExploreAgent(m)
+	case screenExploreValidators:
+		return renderExploreValidators(m)
 	case screenExploreRunning:
 		return renderRunning(m, "Explorando issue…", "Ctrl+C cancela")
 	case screenResult:
@@ -603,6 +677,32 @@ func renderExploreAgent(m Model) string {
 
 	sb.WriteString("\n")
 	sb.WriteString(hintStyle.Render("↑/↓ navega · 1-3 atajo · Enter elige · Esc vuelve · Ctrl+C sale"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func renderExploreValidators(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Elegí validadores"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("Issue #%s · ejecutor: %s — ¿qué agentes revisan el plan?",
+		m.exploreChosenRef, m.exploreChosenAgent)))
+	sb.WriteString("\n\n")
+
+	for i, p := range validatorPresets {
+		prefix := "  "
+		style := menuItemStyle
+		if i == m.exploreValidatorsIdx {
+			prefix = "▸ "
+			style = menuSelectedStyle
+		}
+		num := menuNumberStyle.Render(fmt.Sprintf("%d.", i+1))
+		line := prefix + num + " " + p.label
+		sb.WriteString(style.Render(line) + "\n")
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("↑/↓ navega · 1-6 atajo · Enter elige · Esc vuelve · Ctrl+C sale"))
 	sb.WriteString("\n")
 	return sb.String()
 }

@@ -132,7 +132,7 @@ func TestExplore_GoldenPath(t *testing.T) {
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
-	out := env.MustRun("explore", "42")
+	out := env.MustRun("explore", "--validators", "none", "42")
 	harness.AssertContains(t, out, "Explored")
 	harness.AssertContains(t, out, "https://github.com/acme/demo/issues/42")
 
@@ -172,7 +172,7 @@ func TestExplore_AgentCodex(t *testing.T) {
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
-	env.MustRun("explore", "--agent", "codex", "42")
+	env.MustRun("explore", "--agent", "codex", "--validators", "none", "42")
 
 	inv := env.Invocations()
 	if len(inv.For("codex")) != 1 {
@@ -195,7 +195,7 @@ func TestExplore_AgentGemini(t *testing.T) {
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
-	env.MustRun("explore", "--agent", "gemini", "42")
+	env.MustRun("explore", "--agent", "gemini", "--validators", "none", "42")
 
 	inv := env.Invocations()
 	if len(inv.For("gemini")) != 1 {
@@ -218,7 +218,7 @@ func TestExplore_AgentOpusExplicit(t *testing.T) {
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
-	env.MustRun("explore", "--agent", "opus", "42")
+	env.MustRun("explore", "--agent", "opus", "--validators", "none", "42")
 
 	inv := env.Invocations()
 	if len(inv.For("claude")) != 1 {
@@ -252,7 +252,7 @@ func TestExplore_ClaudeInvalidEffort_Exit3(t *testing.T) {
 		WhenArgsMatch(`-p`).
 		RespondStdoutFromFixture("explore/sonnet_explore_invalid_effort.json", 0)
 
-	r := env.Run("explore", "42")
+	r := env.Run("explore", "--validators", "none", "42")
 	if r.ExitCode != 3 {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
@@ -275,7 +275,7 @@ func TestExplore_ClaudeNoRecommended_Exit3(t *testing.T) {
 		WhenArgsMatch(`-p`).
 		RespondStdoutFromFixture("explore/sonnet_explore_no_recommended.json", 0)
 
-	r := env.Run("explore", "42")
+	r := env.Run("explore", "--validators", "none", "42")
 	if r.ExitCode != 3 {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
@@ -293,7 +293,7 @@ func TestExplore_ClaudeMultipleRecommended_Exit3(t *testing.T) {
 		WhenArgsMatch(`-p`).
 		RespondStdoutFromFixture("explore/sonnet_explore_multiple_recommended.json", 0)
 
-	r := env.Run("explore", "42")
+	r := env.Run("explore", "--validators", "none", "42")
 	if r.ExitCode != 3 {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
@@ -315,7 +315,7 @@ func TestExplore_LabelEditFailsAfterComment_Exit2_WarnsOrphan(t *testing.T) {
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondExitWithError(1, "422 validation failed\n")
 
-	r := env.Run("explore", "42")
+	r := env.Run("explore", "--validators", "none", "42")
 	if r.ExitCode != 2 {
 		t.Fatalf("expected exit 2, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
@@ -342,7 +342,263 @@ func TestExplore_URLAsRef(t *testing.T) {
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit `).RespondStdout("ok\n", 0)
 
-	env.MustRun("explore", "https://github.com/acme/demo/issues/42")
+	env.MustRun("explore", "--validators", "none", "https://github.com/acme/demo/issues/42")
+}
+
+// TestExplore_Validators_DefaultBothApprove: default --validators codex,gemini
+// con ambos aprobando → label status:plan, 1 comment de executor + 2 de
+// validators, reporte en stdout con ✓ para cada uno.
+func TestExplore_Validators_DefaultBothApprove(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
+	env.ExpectAgent("gemini").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-executor\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-codex\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-gemini\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("explore", "42")
+	harness.AssertContains(t, out, "Explored")
+	harness.AssertContains(t, out, "codex#1")
+	harness.AssertContains(t, out, "gemini#1")
+	harness.AssertContains(t, out, "approve")
+
+	inv := env.Invocations()
+	if comments := inv.FindCalls("gh", "issue", "comment", "42"); len(comments) != 3 {
+		t.Fatalf("expected 3 issue comment (executor + 2 validators), got %d", len(comments))
+	}
+	if codexCalls := inv.For("codex"); len(codexCalls) != 1 {
+		t.Fatalf("expected 1 codex call, got %d", len(codexCalls))
+	}
+	if geminiCalls := inv.For("gemini"); len(geminiCalls) != 1 {
+		t.Fatalf("expected 1 gemini call, got %d", len(geminiCalls))
+	}
+	edits := inv.FindCalls("gh", "issue", "edit", "42")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 issue edit (status:plan), got %d", len(edits))
+	}
+	edits[0].AssertArgsContain(t, "--add-label", "status:plan")
+}
+
+// TestExplore_Validators_ChangesRequested_StillPlan: un validator reporta
+// findings (sin needs_human) → status:plan se aplica igual, findings quedan
+// en el comment y en el reporte. La iteración interactiva no es parte de
+// v0.0.12.
+func TestExplore_Validators_ChangesRequested_StillPlan(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_validator_changes_requested.json", 0)
+	env.ExpectAgent("gemini").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-e\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-c\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-g\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("explore", "42")
+	harness.AssertContains(t, out, "changes_requested")
+	harness.AssertContains(t, out, "Explored")
+
+	inv := env.Invocations()
+	edits := inv.FindCalls("gh", "issue", "edit", "42")
+	if len(edits) != 1 {
+		t.Fatalf("expected status:plan to be applied despite changes_requested, got %d edits", len(edits))
+	}
+	edits[0].AssertArgsContain(t, "--add-label", "status:plan")
+	if strings.Contains(strings.Join(edits[0].Args, " "), "status:awaiting-human") {
+		t.Fatalf("unexpected status:awaiting-human applied: %v", edits[0].Args)
+	}
+}
+
+// TestExplore_Validators_NeedsHuman_AwaitingLabel: un validator reporta
+// needs_human → label status:awaiting-human (no status:plan), comment
+// adicional con las preguntas para el humano.
+func TestExplore_Validators_NeedsHuman_AwaitingLabel(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_validator_needs_human.json", 0)
+	env.ExpectAgent("gemini").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
+	// 3 validator-era comments (executor + 2 validators) + 1 human-request comment.
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-e\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-c\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-g\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-human\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("explore", "42")
+	harness.AssertContains(t, out, "needs_human")
+	harness.AssertContains(t, out, "awaiting-human")
+
+	inv := env.Invocations()
+	if comments := inv.FindCalls("gh", "issue", "comment", "42"); len(comments) != 4 {
+		t.Fatalf("expected 4 comments (executor + 2 validators + human-request), got %d", len(comments))
+	}
+	edits := inv.FindCalls("gh", "issue", "edit", "42")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 label edit, got %d", len(edits))
+	}
+	edits[0].AssertArgsContain(t, "--add-label", "status:awaiting-human")
+	if strings.Contains(strings.Join(edits[0].Args, " "), "status:plan") {
+		t.Fatalf("status:plan should NOT be applied when needs_human; got %v", edits[0].Args)
+	}
+}
+
+// TestExplore_Validators_Duplicate: codex,codex,gemini → 2 invocaciones a
+// codex (instance=1 e instance=2) + 1 a gemini. Verifica que el harness
+// soporta múltiples calls al mismo binario y que el flow distingue instancias.
+func TestExplore_Validators_Duplicate(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	// Dos respuestas consumables para codex (instances 1 y 2).
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`-p`).Consumable().
+		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`-p`).Consumable().
+		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
+	env.ExpectAgent("gemini").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("explore", "--validators", "codex,codex,gemini", "42")
+	harness.AssertContains(t, out, "codex#1")
+	harness.AssertContains(t, out, "codex#2")
+	harness.AssertContains(t, out, "gemini#1")
+
+	inv := env.Invocations()
+	if codexCalls := inv.For("codex"); len(codexCalls) != 2 {
+		t.Fatalf("expected 2 codex calls, got %d", len(codexCalls))
+	}
+}
+
+// TestExplore_Validators_NoneSkipsValidation: --validators none se comporta
+// como v0.0.11 — solo ejecutor, sin validators.
+func TestExplore_Validators_NoneSkipsValidation(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectGh(`^issue comment 42`).RespondStdout("url\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	env.MustRun("explore", "--validators", "none", "42")
+
+	inv := env.Invocations()
+	inv.AssertNotCalled(t, "codex")
+	inv.AssertNotCalled(t, "gemini")
+	if comments := inv.FindCalls("gh", "issue", "comment", "42"); len(comments) != 1 {
+		t.Fatalf("expected 1 comment (executor only), got %d", len(comments))
+	}
+}
+
+// TestExplore_Validators_Invalid: --validators bogus → exit 3.
+func TestExplore_Validators_Invalid(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	r := env.Run("explore", "--validators", "bogus", "42")
+	if r.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit, got 0")
+	}
+	harness.AssertContains(t, r.Stderr, "validators")
+	env.Invocations().AssertNotCalled(t, "gh")
+}
+
+// TestExplore_Validators_CountOutOfRange: 1 solo validator o 4 → exit 3 (el
+// design requiere 2-3 validadores).
+func TestExplore_Validators_CountOutOfRange(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	r := env.Run("explore", "--validators", "codex", "42")
+	if r.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit for single validator, got 0")
+	}
+	harness.AssertContains(t, r.Stderr, "2-3")
+
+	env2 := harness.New(t)
+	r2 := env2.Run("explore", "--validators", "codex,codex,codex,gemini", "42")
+	if r2.ExitCode == 0 {
+		t.Fatalf("expected non-zero exit for 4 validators, got 0")
+	}
+	harness.AssertContains(t, r2.Stderr, "2-3")
+}
+
+// TestExplore_Validators_InvalidResponse_Exit3: un validator devuelve un
+// verdict fuera del enum → exit 3 sin aplicar labels ni postear human request.
+// El ejecutor y los comments de los validators válidos ya se postearon (no
+// hacemos rollback), pero el label NO transiciona.
+func TestExplore_Validators_InvalidResponse_Exit3(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_validator_invalid_verdict.json", 0)
+	env.ExpectAgent("gemini").
+		WhenArgsMatch(`-p`).
+		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
+
+	r := env.Run("explore", "42")
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "verdict")
+
+	inv := env.Invocations()
+	if edits := inv.FindCalls("gh", "issue", "edit"); len(edits) > 0 {
+		t.Fatalf("should not edit labels when validator response invalid: %+v", edits)
+	}
 }
 
 func scriptExplorePrechecks(env *harness.Env) {
