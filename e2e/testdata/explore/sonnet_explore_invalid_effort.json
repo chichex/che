@@ -1,0 +1,28 @@
+{
+  "summary": "Un análisis de ejemplo con un campo effort inválido.",
+  "questions": [
+    {"q": "¿Algo?", "why": "Hay que pensarlo.", "blocker": false}
+  ],
+  "risks": [
+    {"risk": "Riesgo genérico", "likelihood": "low", "impact": "low", "mitigation": "Ninguna"}
+  ],
+  "paths": [
+    {
+      "title": "Camino con effort inválido",
+      "sketch": "Este path tiene effort HUGE que no está en el enum.",
+      "pros": ["Pro 1"],
+      "cons": ["Con 1"],
+      "effort": "HUGE",
+      "recommended": true
+    },
+    {
+      "title": "Segundo camino válido",
+      "sketch": "Este está bien.",
+      "pros": ["Pro 2"],
+      "cons": ["Con 2"],
+      "effort": "S",
+      "recommended": false
+    }
+  ],
+  "next_step": "Paso siguiente."
+}

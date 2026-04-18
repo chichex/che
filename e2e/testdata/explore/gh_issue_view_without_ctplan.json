@@ -1,0 +1,11 @@
+{
+  "number": 99,
+  "title": "Un issue creado a mano sin ct:plan",
+  "body": "No fue creado por che idea, no tiene el label de gate.\n",
+  "url": "https://github.com/acme/demo/issues/99",
+  "state": "OPEN",
+  "labels": [
+    {"name": "type:fix"},
+    {"name": "size:s"}
+  ]
+}

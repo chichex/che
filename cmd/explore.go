@@ -1,0 +1,42 @@
+package cmd
+
+import (
+	"os"
+
+	"github.com/chichex/che/internal/flow/explore"
+	"github.com/spf13/cobra"
+)
+
+var exploreCmd = &cobra.Command{
+	Use:   "explore <issue-ref>",
+	Short: "explora un issue del backlog: preguntas, riesgos, caminos posibles",
+	Long: `explore toma la referencia a un issue creado por 'che idea' (con label
+ct:plan), lee su body, y profundiza con el modelo para devolver preguntas
+abiertas, riesgos y caminos de implementación posibles. El análisis se
+postea como comentario en el issue y el label transiciona a status:planned.
+
+Formatos aceptados para <issue-ref>:
+  che explore 42
+  che explore https://github.com/owner/repo/issues/42
+  che explore owner/repo#42
+
+Este subcomando es la ruta no-interactiva (scripting/CI). La TUI de che
+(invocable con 'che' sin args) usa el mismo flow por dentro.`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		code := explore.Run(args[0], explore.Opts{
+			Stdout: cmd.OutOrStdout(),
+			Stderr: cmd.ErrOrStderr(),
+		})
+		if code != explore.ExitOK {
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			os.Exit(int(code))
+		}
+		return nil
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(exploreCmd)
+}

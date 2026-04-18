@@ -1,0 +1,42 @@
+{
+  "summary": "Agregar comando `che explore <issue>` que lea un issue con ct:plan, profundice con claude, y postee un análisis estructurado como comentario.",
+  "questions": [
+    {
+      "q": "¿El análisis se postea como comentario único o como múltiples comentarios (uno por sección)?",
+      "why": "Afecta la UX en GitHub y la capacidad de editarlo después.",
+      "blocker": true
+    },
+    {
+      "q": "¿Qué pasa si el usuario re-corre explore sobre un issue ya explorado?",
+      "why": "Define idempotencia y si hay que validar estado antes de postear.",
+      "blocker": false
+    }
+  ],
+  "risks": [
+    {
+      "risk": "El modelo alucina paths no factibles dado el codebase real.",
+      "likelihood": "medium",
+      "impact": "medium",
+      "mitigation": "Pasarle al prompt extractos de archivos relevantes, no solo el body del issue."
+    }
+  ],
+  "paths": [
+    {
+      "title": "Comando nuevo che explore",
+      "sketch": "Crear cmd/explore.go + internal/flow/explore/ espejando idea. Reusar precheckGitHubRemote y callClaude.",
+      "pros": ["Consistente con el embudo idea → explore → execute → close", "Separación clara de responsabilidades"],
+      "cons": ["Duplica plomería de idea (prechecks, callClaude)"],
+      "effort": "M",
+      "recommended": true
+    },
+    {
+      "title": "Extender che idea con --explore",
+      "sketch": "Agregar flag a idea que cambia modo: en vez de crear issue, lee un issue existente y profundiza.",
+      "pros": ["Menos archivos nuevos"],
+      "cons": ["Mezcla dos flows distintos en un solo comando", "Rompe el modelo mental del embudo"],
+      "effort": "S",
+      "recommended": false
+    }
+  ],
+  "next_step": "Resolver las open questions sobre formato del comentario e idempotencia antes de implementar."
+}

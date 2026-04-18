@@ -1,0 +1,13 @@
+{
+  "number": 42,
+  "title": "Implementar comando che explore",
+  "body": "## Idea\nAgregar un flow que permita explorar una idea existente en el backlog.\n\n## Criterios de éxito iniciales\n- [ ] che explore <issue> lee el issue desde GitHub\n- [ ] El comando produce output estructurado\n",
+  "url": "https://github.com/acme/demo/issues/42",
+  "state": "OPEN",
+  "labels": [
+    {"name": "ct:plan"},
+    {"name": "status:idea"},
+    {"name": "type:feature"},
+    {"name": "size:m"}
+  ]
+}

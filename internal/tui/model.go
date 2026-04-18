@@ -15,6 +15,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/chichex/che/internal/flow/explore"
 	"github.com/chichex/che/internal/flow/idea"
 )
 
@@ -24,6 +25,9 @@ const (
 	screenMenu screen = iota
 	screenIdeaInput
 	screenIdeaRunning
+	screenExploreLoading
+	screenExploreSelect
+	screenExploreRunning
 	screenResult
 )
 
@@ -36,7 +40,7 @@ type menuItem struct {
 
 var menuItems = []menuItem{
 	{label: "Anotar una idea nueva", key: "1", action: screenIdeaInput},
-	{label: "Explorar un issue existente", key: "2", disabled: true},
+	{label: "Explorar un issue existente", key: "2", action: screenExploreLoading},
 	{label: "Ejecutar un plan", key: "3", disabled: true},
 	{label: "Cerrar una idea", key: "4", disabled: true},
 	{label: "Eliminar una idea", key: "5", disabled: true},
@@ -60,6 +64,11 @@ type Model struct {
 	runStart   time.Time
 	runLog     []string
 	progressCh chan tea.Msg
+
+	// selector de explore: lista de issues candidatos + cursor propio
+	exploreCandidates []explore.Candidate
+	exploreCursor     int
+	exploreLoadErr    error
 
 	// resultado final
 	resultLines []string
@@ -115,9 +124,18 @@ func (m Model) Init() tea.Cmd { return nil }
 
 type progressMsg struct{ line string }
 type flowDoneMsg struct {
-	code     idea.ExitCode
-	stdout   string
-	stderr   string
+	code   idea.ExitCode
+	stdout string
+	stderr string
+}
+type exploreDoneMsg struct {
+	code   explore.ExitCode
+	stdout string
+	stderr string
+}
+type exploreCandidatesLoadedMsg struct {
+	items []explore.Candidate
+	err   error
 }
 type tickMsg time.Time
 
@@ -132,32 +150,53 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForMsg(m.progressCh)
 
 	case flowDoneMsg:
-		m.screen = screenResult
-		m.resultOK = msg.code == idea.ExitOK
-		// El log del run queda disponible en m.runLog; el render lo muestra
-		// arriba. resultLines captura solo el stdout/stderr final (URLs o
-		// errores) para que la parte "importante" quede destacada al pie.
-		var lines []string
-		for _, s := range splitNonEmpty(msg.stdout) {
-			lines = append(lines, s)
+		return m.finishRun(int(msg.code), msg.code == idea.ExitOK, msg.stdout, msg.stderr), nil
+
+	case exploreDoneMsg:
+		return m.finishRun(int(msg.code), msg.code == explore.ExitOK, msg.stdout, msg.stderr), nil
+
+	case exploreCandidatesLoadedMsg:
+		if msg.err != nil {
+			m.screen = screenResult
+			m.resultOK = false
+			m.resultLines = []string{"error: " + msg.err.Error()}
+			return m, nil
 		}
-		for _, s := range splitNonEmpty(msg.stderr) {
-			lines = append(lines, s)
+		if len(msg.items) == 0 {
+			m.screen = screenResult
+			m.resultOK = false
+			m.resultLines = []string{"No hay issues con label ct:plan listos para explorar."}
+			return m, nil
 		}
-		if !m.resultOK {
-			lines = append(lines, fmt.Sprintf("(exit %d)", int(msg.code)))
-		}
-		m.resultLines = lines
-		m.progressCh = nil
+		m.exploreCandidates = msg.items
+		m.exploreCursor = 0
+		m.screen = screenExploreSelect
 		return m, nil
 
 	case tickMsg:
-		if m.screen == screenIdeaRunning {
+		if m.screen == screenIdeaRunning || m.screen == screenExploreRunning {
 			return m, tickCmd()
 		}
 		return m, nil
 	}
 	return m, nil
+}
+
+// finishRun centraliza la transición de un flow running → screenResult,
+// compartida por idea y explore. resultLines captura el stdout/stderr final
+// (URLs o errores); m.runLog se muestra arriba para preservar el contexto.
+func (m Model) finishRun(exitCode int, ok bool, stdout, stderr string) Model {
+	m.screen = screenResult
+	m.resultOK = ok
+	var lines []string
+	lines = append(lines, splitNonEmpty(stdout)...)
+	lines = append(lines, splitNonEmpty(stderr)...)
+	if !ok {
+		lines = append(lines, fmt.Sprintf("(exit %d)", exitCode))
+	}
+	m.resultLines = lines
+	m.progressCh = nil
+	return m
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -166,11 +205,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleMenuKey(msg)
 	case screenIdeaInput:
 		return m.handleIdeaInputKey(msg)
-	case screenIdeaRunning:
+	case screenIdeaRunning, screenExploreRunning, screenExploreLoading:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
 		return m, nil
+	case screenExploreSelect:
+		return m.handleExploreSelectKey(msg)
 	case screenResult:
 		return m.handleResultKey(msg)
 	}
@@ -211,6 +252,45 @@ func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 		m.textarea.Reset()
 		m.textarea.Focus()
 		m.screen = screenIdeaInput
+		return m, nil
+	case screenExploreLoading:
+		m.screen = screenExploreLoading
+		m.exploreCandidates = nil
+		m.exploreCursor = 0
+		m.exploreLoadErr = nil
+		return m, loadExploreCandidatesCmd()
+	}
+	return m, nil
+}
+
+func loadExploreCandidatesCmd() tea.Cmd {
+	return func() tea.Msg {
+		items, err := explore.ListCandidates()
+		return exploreCandidatesLoadedMsg{items: items, err: err}
+	}
+}
+
+func (m Model) handleExploreSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	switch k {
+	case "esc":
+		m.screen = screenMenu
+		m.exploreCandidates = nil
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		m.exploreCursor = (m.exploreCursor - 1 + len(m.exploreCandidates)) % len(m.exploreCandidates)
+		return m, nil
+	case "down", "j":
+		m.exploreCursor = (m.exploreCursor + 1) % len(m.exploreCandidates)
+		return m, nil
+	case "enter":
+		if len(m.exploreCandidates) == 0 {
+			return m, nil
+		}
+		chosen := m.exploreCandidates[m.exploreCursor]
+		return m.startExploreFlow(fmt.Sprint(chosen.Number))
 	}
 	return m, nil
 }
@@ -242,6 +322,7 @@ func (m Model) handleResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.screen = screenMenu
 	m.resultLines = nil
 	m.runLog = nil
+	m.exploreCandidates = nil
 	return m, nil
 }
 
@@ -263,6 +344,30 @@ func (m Model) startIdeaFlow(text string) (tea.Model, tea.Cmd) {
 			},
 		})
 		ch <- flowDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	}(m.progressCh)
+
+	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
+}
+
+// startExploreFlow arranca explore.Run en background sobre el issue elegido.
+// Usa el mismo patrón que startIdeaFlow: channel para progress, goroutine que
+// corre el flow, y un tick para mostrar elapsed time.
+func (m Model) startExploreFlow(issueRef string) (tea.Model, tea.Cmd) {
+	m.screen = screenExploreRunning
+	m.runStart = time.Now()
+	m.runLog = []string{}
+	m.progressCh = make(chan tea.Msg, 64)
+
+	go func(ch chan<- tea.Msg) {
+		var stdout, stderr bytes.Buffer
+		code := explore.Run(issueRef, explore.Opts{
+			Stdout: &stdout,
+			Stderr: &stderr,
+			OnProgress: func(line string) {
+				ch <- progressMsg{line: line}
+			},
+		})
+		ch <- exploreDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
 	}(m.progressCh)
 
 	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
@@ -316,7 +421,13 @@ func (m Model) View() string {
 	case screenIdeaInput:
 		return renderIdeaInput(m)
 	case screenIdeaRunning:
-		return renderIdeaRunning(m)
+		return renderRunning(m, "Procesando idea…", "Ctrl+C cancela")
+	case screenExploreLoading:
+		return renderExploreLoading(m)
+	case screenExploreSelect:
+		return renderExploreSelect(m)
+	case screenExploreRunning:
+		return renderRunning(m, "Explorando issue…", "Ctrl+C cancela")
 	case screenResult:
 		return renderResult(m)
 	}
@@ -384,9 +495,11 @@ func renderIdeaInput(m Model) string {
 	return sb.String()
 }
 
-func renderIdeaRunning(m Model) string {
+// renderRunning es el render compartido para flows en ejecución (idea +
+// explore): título + elapsed + log de progreso + hint.
+func renderRunning(m Model, title, hint string) string {
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Procesando…"))
+	sb.WriteString(titleStyle.Render(title))
 	sb.WriteString("\n")
 
 	elapsed := time.Since(m.runStart).Round(time.Second)
@@ -403,7 +516,43 @@ func renderIdeaRunning(m Model) string {
 	}
 
 	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render(hint))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func renderExploreLoading(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Explorar un issue"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render("Buscando issues con label ct:plan…"))
+	sb.WriteString("\n")
 	sb.WriteString(hintStyle.Render("Ctrl+C cancela"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func renderExploreSelect(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Explorar un issue"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("%d issue(s) listos para explorar — elegí uno:", len(m.exploreCandidates))))
+	sb.WriteString("\n\n")
+
+	for i, c := range m.exploreCandidates {
+		prefix := "  "
+		style := menuItemStyle
+		if i == m.exploreCursor {
+			prefix = "▸ "
+			style = menuSelectedStyle
+		}
+		num := menuNumberStyle.Render(fmt.Sprintf("#%d", c.Number))
+		line := prefix + num + "  " + c.Title
+		sb.WriteString(style.Render(line) + "\n")
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("↑/↓ navega · Enter elige · Esc vuelve · Ctrl+C sale"))
 	sb.WriteString("\n")
 	return sb.String()
 }

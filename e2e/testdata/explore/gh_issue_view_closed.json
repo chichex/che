@@ -1,0 +1,13 @@
+{
+  "number": 7,
+  "title": "Idea vieja que ya se cerró",
+  "body": "Cerrada hace tiempo; no tiene sentido explorar.\n",
+  "url": "https://github.com/acme/demo/issues/7",
+  "state": "CLOSED",
+  "labels": [
+    {"name": "ct:plan"},
+    {"name": "status:idea"},
+    {"name": "type:feature"},
+    {"name": "size:m"}
+  ]
+}
