@@ -1,0 +1,40 @@
+{
+  "items": [
+    {
+      "type": "feature",
+      "size": "S",
+      "title": "Idea uno",
+      "idea": "Descripción uno.",
+      "context_paths": [],
+      "context_area": "",
+      "dependencies": [],
+      "criteria": ["ok"],
+      "notes": "",
+      "size_reason": "S"
+    },
+    {
+      "type": "fix",
+      "size": "XS",
+      "title": "Idea dos",
+      "idea": "Descripción dos.",
+      "context_paths": [],
+      "context_area": "",
+      "dependencies": [],
+      "criteria": ["ok"],
+      "notes": "",
+      "size_reason": "XS"
+    },
+    {
+      "type": "mejora",
+      "size": "M",
+      "title": "Idea tres",
+      "idea": "Descripción tres.",
+      "context_paths": [],
+      "context_area": "",
+      "dependencies": [],
+      "criteria": ["ok"],
+      "notes": "",
+      "size_reason": "M"
+    }
+  ]
+}

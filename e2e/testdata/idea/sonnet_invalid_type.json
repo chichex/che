@@ -1,0 +1,16 @@
+{
+  "items": [
+    {
+      "type": "bug",
+      "size": "S",
+      "title": "Algo",
+      "idea": "Descripción.",
+      "context_paths": [],
+      "context_area": "",
+      "dependencies": [],
+      "criteria": ["ok"],
+      "notes": "",
+      "size_reason": "S"
+    }
+  ]
+}

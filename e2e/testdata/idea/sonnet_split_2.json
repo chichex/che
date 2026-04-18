@@ -1,0 +1,28 @@
+{
+  "items": [
+    {
+      "type": "feature",
+      "size": "S",
+      "title": "Agregar login con GitHub OAuth",
+      "idea": "Permitir autenticación via GitHub OAuth.",
+      "context_paths": ["internal/auth/"],
+      "context_area": "Autenticación",
+      "dependencies": [],
+      "criteria": ["Login funciona", "Sesión persiste"],
+      "notes": "",
+      "size_reason": "S: scope acotado."
+    },
+    {
+      "type": "fix",
+      "size": "XS",
+      "title": "Corregir redirect loop en logout",
+      "idea": "Tras logout el usuario queda en un redirect loop si tenía sesión vieja.",
+      "context_paths": ["internal/auth/session.go"],
+      "context_area": "Autenticación",
+      "dependencies": [],
+      "criteria": ["Logout redirige a /login sin loop"],
+      "notes": "",
+      "size_reason": "XS: un if + clear de cookie."
+    }
+  ]
+}

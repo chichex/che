@@ -1,0 +1,20 @@
+{
+  "items": [
+    {
+      "type": "feature",
+      "size": "M",
+      "title": "Agregar login con GitHub OAuth",
+      "idea": "Permitir que los usuarios se autentiquen usando GitHub OAuth en vez de email/password. Requiere configurar OAuth app en GitHub y manejar callbacks.",
+      "context_paths": ["internal/auth/", "cmd/server/routes.go"],
+      "context_area": "Autenticación",
+      "dependencies": ["golang.org/x/oauth2"],
+      "criteria": [
+        "Usuario puede iniciar sesión clickeando 'Sign in with GitHub'",
+        "Sesión persiste entre requests con cookie HTTP-only",
+        "Error path: si GitHub rechaza, se muestra mensaje claro"
+      ],
+      "notes": "Coordinar con el equipo para el OAuth app en GitHub.",
+      "size_reason": "M: cambios en auth middleware + routes + UI button + config. ~1-2 días."
+    }
+  ]
+}
