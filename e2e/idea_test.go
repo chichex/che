@@ -63,12 +63,11 @@ func TestIdea_GoldenPath_Single(t *testing.T) {
 	harness.AssertContains(t, out, "https://github.com/acme/demo/issues/47")
 	harness.AssertContains(t, out, "Done")
 
-	inv := env.Invocations()
-	ghCalls := inv.For("gh")
-	if len(ghCalls) != 2 {
-		t.Fatalf("expected 2 gh calls (auth + create), got %d", len(ghCalls))
+	creates := env.Invocations().FindCalls("gh", "issue", "create")
+	if len(creates) != 1 {
+		t.Fatalf("expected 1 issue create, got %d", len(creates))
 	}
-	inv.CallOf("gh", 2).AssertArgsContain(t, "issue", "create",
+	creates[0].AssertArgsContain(t,
 		"--label", "type:feature",
 		"--label", "size:m",
 		"--label", "status:idea")
@@ -90,9 +89,12 @@ func TestIdea_GoldenPath_SplitIntoTwo(t *testing.T) {
 	harness.AssertContains(t, out, "/issues/47")
 	harness.AssertContains(t, out, "/issues/48")
 
-	inv := env.Invocations()
-	inv.CallOf("gh", 2).AssertArgsContain(t, "type:feature", "size:s")
-	inv.CallOf("gh", 3).AssertArgsContain(t, "type:fix", "size:xs")
+	creates := env.Invocations().FindCalls("gh", "issue", "create")
+	if len(creates) != 2 {
+		t.Fatalf("expected 2 issue create, got %d", len(creates))
+	}
+	creates[0].AssertArgsContain(t, "type:feature", "size:s")
+	creates[1].AssertArgsContain(t, "type:fix", "size:xs")
 }
 
 // TestIdea_InvalidType_Exit3_NoIssuesCreated: claude returns an item with an
@@ -111,13 +113,13 @@ func TestIdea_InvalidType_Exit3_NoIssuesCreated(t *testing.T) {
 	}
 	harness.AssertContains(t, r.Stderr, "bug")
 
-	// Only auth status should have been called, no issue create.
-	for _, c := range env.Invocations().For("gh") {
-		for _, a := range c.Args {
-			if a == "create" {
-				t.Fatalf("unexpected gh issue create call: %v", c.Args)
-			}
-		}
+	// Validation fails before any issue is created. No label create either —
+	// ensureLabels runs after validate.
+	if creates := env.Invocations().FindCalls("gh", "issue", "create"); len(creates) > 0 {
+		t.Fatalf("unexpected gh issue create calls: %+v", creates)
+	}
+	if labels := env.Invocations().FindCalls("gh", "label", "create"); len(labels) > 0 {
+		t.Fatalf("unexpected gh label create calls: %+v", labels)
 	}
 }
 
@@ -141,10 +143,11 @@ func TestIdea_SecondCreateFails_RollbackClosesFirst(t *testing.T) {
 	harness.AssertContains(t, r.Stderr, "creating issue 2/2")
 	harness.AssertNotContains(t, r.Stderr, "could not close")
 
-	// Final gh call was the close of /47.
-	inv := env.Invocations()
-	lastGh := inv.For("gh")[len(inv.For("gh"))-1]
-	lastGh.AssertArgsContain(t, "issue", "close", "/47")
+	closes := env.Invocations().FindCalls("gh", "issue", "close")
+	if len(closes) != 1 {
+		t.Fatalf("expected 1 issue close (rollback of /47), got %d", len(closes))
+	}
+	closes[0].AssertArgsContain(t, "/47")
 }
 
 // TestIdea_RollbackCloseFails_ReportsOrphans: during rollback, closing /47
@@ -173,4 +176,7 @@ func TestIdea_RollbackCloseFails_ReportsOrphans(t *testing.T) {
 func scriptIdeaPrechecks(env *harness.Env) {
 	env.ExpectGit(`^remote get-url origin`).RespondStdout("https://github.com/acme/demo.git\n", 0)
 	env.ExpectGh(`^auth status`).RespondStdout("Logged in as acme\n", 0)
+	// gh label create --force es idempotente; lo scripteamos permisivo para
+	// cualquier label que el flow requiera.
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 }

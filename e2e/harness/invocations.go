@@ -107,6 +107,23 @@ func (l *InvocationLog) CallOf(bin string, n int) *Invocation {
 	return &calls[n-1]
 }
 
+// FindCalls returns every invocation of bin whose args contain ALL the given
+// needles. Order of returned calls matches invocation order.
+func (l *InvocationLog) FindCalls(bin string, needles ...string) []Invocation {
+	var out []Invocation
+outer:
+	for _, c := range l.For(bin) {
+		joined := strings.Join(c.Args, " ")
+		for _, n := range needles {
+			if !strings.Contains(joined, n) {
+				continue outer
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // AssertArgsContain fails if any of needles is not present in the args slice.
 func (i *Invocation) AssertArgsContain(t *testing.T, needles ...string) {
 	t.Helper()

@@ -42,7 +42,7 @@ var menuItems = []menuItem{
 	{label: "Salir", key: "6"},
 }
 
-const maxLogLines = 20
+const maxLogLines = 40
 
 // Model es el estado raíz del TUI.
 type Model struct {
@@ -98,10 +98,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForMsg(m.progressCh)
 
 	case flowDoneMsg:
-		// drenamos el channel por si queda algo
-		m.runLog = appendLog(m.runLog, "—")
 		m.screen = screenResult
 		m.resultOK = msg.code == idea.ExitOK
+		// El log del run queda disponible en m.runLog; el render lo muestra
+		// arriba. resultLines captura solo el stdout/stderr final (URLs o
+		// errores) para que la parte "importante" quede destacada al pie.
 		var lines []string
 		for _, s := range splitNonEmpty(msg.stdout) {
 			lines = append(lines, s)
@@ -360,10 +361,35 @@ func renderResult(m Model) string {
 	} else {
 		sb.WriteString(errorStyle.Render("✗ Error"))
 	}
-	sb.WriteString("\n\n")
-	for _, line := range m.resultLines {
-		sb.WriteString("  " + line + "\n")
+	sb.WriteString("\n")
+
+	// Log completo de lo que pasó durante el run — preserva contexto aunque
+	// haya terminado en error.
+	if len(m.runLog) > 0 {
+		sb.WriteString("\n")
+		sb.WriteString(subtitleStyle.Render("Log:"))
+		sb.WriteString("\n")
+		for _, line := range m.runLog {
+			sb.WriteString("  " + logLineStyle.Render(line) + "\n")
+		}
 	}
+
+	// Resumen final (URLs creadas o mensaje de error).
+	if len(m.resultLines) > 0 {
+		sb.WriteString("\n")
+		sb.WriteString(subtitleStyle.Render("Resultado:"))
+		sb.WriteString("\n")
+		for _, line := range m.resultLines {
+			style := logLineStyle
+			if strings.HasPrefix(line, "error:") || strings.Contains(line, "(exit ") {
+				style = errorStyle
+			} else if strings.HasPrefix(line, "Created ") {
+				style = successStyle
+			}
+			sb.WriteString("  " + style.Render(line) + "\n")
+		}
+	}
+
 	sb.WriteString("\n")
 	sb.WriteString(hintStyle.Render("presioná cualquier tecla para volver al menú"))
 	sb.WriteString("\n")

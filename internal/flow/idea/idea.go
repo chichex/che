@@ -94,7 +94,13 @@ func Run(text string, opts Opts) ExitCode {
 		return ExitSemantic
 	}
 
-	progress(fmt.Sprintf("claude clasificó %d idea(s); creando issues…", len(resp.Items)))
+	progress(fmt.Sprintf("claude clasificó %d idea(s); preparando labels…", len(resp.Items)))
+	if err := ensureLabels(resp.Items, progress); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
+	}
+
+	progress("creando issues…")
 	fmt.Fprintf(stdout, "Creating %d issue(s)…\n", len(resp.Items))
 
 	created := []string{}
@@ -266,6 +272,35 @@ func validate(r *Response) error {
 		}
 		if strings.TrimSpace(it.Idea) == "" {
 			return fmt.Errorf("item %d: idea is required", i)
+		}
+	}
+	return nil
+}
+
+// ensureLabels garantiza que los labels type:*, size:* y status:idea que se
+// van a aplicar existan en el repo. Usa `gh label create --force` que es
+// idempotente: crea si no existe, actualiza si existe.
+func ensureLabels(items []Item, progress func(string)) error {
+	seen := map[string]bool{}
+	var labels []string
+	for _, it := range items {
+		for _, l := range []string{
+			"type:" + it.Type,
+			"size:" + strings.ToLower(it.Size),
+			"status:idea",
+		} {
+			if !seen[l] {
+				seen[l] = true
+				labels = append(labels, l)
+			}
+		}
+	}
+	for _, lbl := range labels {
+		progress("asegurando label " + lbl)
+		cmd := exec.Command("gh", "label", "create", lbl, "--force")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("ensuring label %s: %s", lbl, strings.TrimSpace(string(out)))
 		}
 	}
 	return nil
