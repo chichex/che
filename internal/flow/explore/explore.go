@@ -12,8 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ExitCode es el código de salida semántico para el caller.
@@ -54,6 +56,23 @@ func (a Agent) Binary() string {
 		return "gemini"
 	}
 	return ""
+}
+
+// InvokeArgs devuelve los args de línea de comando para correr al agente en
+// modo no-interactivo con el prompt dado. Cada CLI tiene su propia sintaxis:
+//   - claude  -p <prompt> --output-format text
+//   - codex   exec <prompt>                  (no acepta -p ni --output-format)
+//   - gemini  -p <prompt>                    (text es el default)
+func (a Agent) InvokeArgs(prompt string) []string {
+	switch a {
+	case AgentOpus:
+		return []string{"-p", prompt, "--output-format", "text"}
+	case AgentCodex:
+		return []string{"exec", prompt}
+	case AgentGemini:
+		return []string{"-p", prompt}
+	}
+	return nil
 }
 
 // ParseAgent normaliza un string a Agent, o error si no matchea ningún enum.
@@ -114,17 +133,80 @@ type Opts struct {
 // Issue modela el subset del output de `gh issue view --json ...` que
 // necesitamos para el flow. Los field names matchean las keys que devuelve gh.
 type Issue struct {
-	Number int     `json:"number"`
-	Title  string  `json:"title"`
-	Body   string  `json:"body"`
-	URL    string  `json:"url"`
-	State  string  `json:"state"`
-	Labels []Label `json:"labels"`
+	Number   int            `json:"number"`
+	Title    string         `json:"title"`
+	Body     string         `json:"body"`
+	URL      string         `json:"url"`
+	State    string         `json:"state"`
+	Labels   []Label        `json:"labels"`
+	Comments []IssueComment `json:"comments,omitempty"`
 }
 
 // Label es el shape que gh devuelve para cada label del issue.
 type Label struct {
 	Name string `json:"name"`
+}
+
+// IssueComment es un comment del issue; el body puede tener header de
+// claude-cli al principio (parseado en CommentHeader).
+type IssueComment struct {
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"createdAt"`
+	Author    struct {
+		Login string `json:"login"`
+	} `json:"author"`
+}
+
+// CommentHeader es la metadata parseada del HTML comment que usamos como
+// marcador al inicio de cada comment posteado por che. Si Role es "", no es
+// un comment de che (es del humano o de otra herramienta).
+type CommentHeader struct {
+	Flow     string
+	Iter     int
+	Agent    Agent
+	Instance int
+	Role     string // "executor", "validator", "human-request"
+}
+
+// headerRe matchea el HTML comment de che al principio del body. Captura
+// flow, iter, agent, instance, role como key=value dentro del comment.
+var headerRe = regexp.MustCompile(`^<!--\s*claude-cli:\s*(.+?)\s*-->`)
+var kvRe = regexp.MustCompile(`(\w+)=(\S+)`)
+
+// ParseCommentHeader lee la primera línea del body y, si es un HTML comment
+// de che, devuelve la metadata. Si no lo es, devuelve un CommentHeader vacío.
+func ParseCommentHeader(body string) CommentHeader {
+	m := headerRe.FindStringSubmatch(strings.TrimSpace(body))
+	if m == nil {
+		return CommentHeader{}
+	}
+	h := CommentHeader{}
+	for _, kv := range kvRe.FindAllStringSubmatch(m[1], -1) {
+		switch kv[1] {
+		case "flow":
+			h.Flow = kv[2]
+		case "iter":
+			fmt.Sscanf(kv[2], "%d", &h.Iter)
+		case "agent":
+			h.Agent = Agent(kv[2])
+		case "instance":
+			fmt.Sscanf(kv[2], "%d", &h.Instance)
+		case "role":
+			h.Role = kv[2]
+		}
+	}
+	return h
+}
+
+// IsHuman devuelve true cuando el comment NO tiene header de che — asumimos
+// entonces que es una respuesta del humano.
+func (c *IssueComment) IsHuman() bool {
+	return ParseCommentHeader(c.Body).Role == ""
+}
+
+// Header parseado del comment (helper para lectores).
+func (c *IssueComment) Header() CommentHeader {
+	return ParseCommentHeader(c.Body)
 }
 
 // HasLabel devuelve true si el issue tiene un label con ese nombre.
@@ -232,20 +314,20 @@ func hasHumanGaps(results []validatorResult) bool {
 	return false
 }
 
-// Run ejecuta el flow completo.
+// MaxIterations es el tope de iteraciones del loop humano antes de cortar
+// con error. 3 es el umbral del design — si después de 3 rondas los
+// validadores siguen pidiendo input humano, la conversación requiere
+// intervención directa del dueño, no más loops de agentes.
+const MaxIterations = 3
+
+// Run ejecuta el flow. Detecta automáticamente el modo según los labels del
+// issue: status:awaiting-human dispara reanudación, el resto es exploración
+// nueva. status:plan sin awaiting significa "ya explorado" y corta.
 func Run(issueRef string, opts Opts) ExitCode {
 	stdout, stderr := opts.Stdout, opts.Stderr
 	progress := opts.OnProgress
 	if progress == nil {
 		progress = func(string) {}
-	}
-	agent := opts.Agent
-	if agent == "" {
-		agent = DefaultAgent
-	}
-	if agent.Binary() == "" {
-		fmt.Fprintf(stderr, "error: unknown agent %q\n", agent)
-		return ExitSemantic
 	}
 
 	issueRef = strings.TrimSpace(issueRef)
@@ -271,8 +353,33 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitRetry
 	}
 
-	if err := gateIssue(issue); err != nil {
+	if err := gateBasic(issue); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitSemantic
+	}
+
+	// Ramificación por modo. awaiting-human → resume; status:plan → error
+	// de "ya explorado"; default → new.
+	if issue.HasLabel("status:awaiting-human") {
+		return runResume(issueRef, issue, opts, progress, stdout, stderr)
+	}
+	if issue.HasLabel("status:plan") {
+		fmt.Fprintf(stderr, "error: issue #%d was already explored (status:plan present)\n", issue.Number)
+		return ExitSemantic
+	}
+	return runNew(issueRef, issue, opts, progress, stdout, stderr)
+}
+
+// runNew es la exploración desde cero: ejecutor arma el plan, validators
+// iter=1 revisan, y se transiciona a status:plan o status:awaiting-human
+// según haya o no preguntas humanas.
+func runNew(issueRef string, issue *Issue, opts Opts, progress func(string), stdout, stderr io.Writer) ExitCode {
+	agent := opts.Agent
+	if agent == "" {
+		agent = DefaultAgent
+	}
+	if agent.Binary() == "" {
+		fmt.Fprintf(stderr, "error: unknown agent %q\n", agent)
 		return ExitSemantic
 	}
 
@@ -296,7 +403,6 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitRetry
 	}
 
-	// --- etapa de validación (opt-in vía opts.Validators) ---
 	var validationResults []validatorResult
 	if len(opts.Validators) > 0 {
 		progress(fmt.Sprintf("corriendo %d validador(es) en paralelo…", len(opts.Validators)))
@@ -312,44 +418,147 @@ func Run(issueRef string, opts Opts) ExitCode {
 		}
 	}
 
-	humanGaps := hasHumanGaps(validationResults)
-	if humanGaps {
-		progress("validadores pidieron input humano; posteando request…")
-		humanReq := renderHumanRequest(validationResults, 1)
-		if _, err := postComment(issueRef, humanReq); err != nil {
-			fmt.Fprintf(stderr, "error: posting human-request comment: %v\n", err)
-			return ExitRetry
-		}
-		progress("asegurando label status:awaiting-human…")
-		if err := ensureLabel("status:awaiting-human", progress); err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			return ExitRetry
-		}
-		if err := setLabelAwaitingHuman(issueRef); err != nil {
-			fmt.Fprintf(stderr, "error: editing labels: %v\n", err)
-			return ExitRetry
-		}
-		fmt.Fprintln(stdout, renderValidationReport(validationResults, true))
-		fmt.Fprintf(stdout, "Paused %s — contestá en el issue y corré de nuevo (v0.0.13 detecta la respuesta).\n", issue.URL)
-		return ExitOK
+	if hasHumanGaps(validationResults) {
+		return pauseForHuman(issueRef, issue, validationResults, 1, progress, stdout, stderr)
 	}
 
+	return finalizeToPlan(issueRef, issue, resp, validationResults, agent, opts.Validators, commentURL, progress, stdout, stderr)
+}
+
+// runResume reanuda un flow que quedó en status:awaiting-human. Lee los
+// comments, extrae las respuestas humanas y re-corre los validadores con
+// iteración N+1 incorporando esas respuestas. Si siguen pidiendo humano,
+// pausa otra vez; si convergen, consolida el body y cierra.
+func runResume(issueRef string, issue *Issue, opts Opts, progress func(string), stdout, stderr io.Writer) ExitCode {
+	state := parseConversation(issue)
+
+	if state.ExecutorPlan == nil {
+		fmt.Fprintf(stderr, "error: issue #%d tiene status:awaiting-human pero no se encontró el plan del ejecutor en los comments\n", issue.Number)
+		return ExitSemantic
+	}
+	if len(state.HumanAnswers) == 0 {
+		fmt.Fprintf(stderr, "error: no hay respuestas humanas posteriores al último human-request en #%d — contestá en el issue antes de re-correr\n", issue.Number)
+		return ExitSemantic
+	}
+	if state.MaxIter >= MaxIterations {
+		fmt.Fprintf(stderr, "error: issue #%d excedió %d iteraciones sin converger — resolvé a mano (conversación con validadores en los comments)\n", issue.Number, MaxIterations)
+		return ExitRetry
+	}
+
+	nextIter := state.MaxIter + 1
+	progress(fmt.Sprintf("reanudando iter=%d (executor=%s, validators=%d)…", nextIter, state.ExecutorAgent, len(state.Validators)))
+
+	// Validators para esta iteración: los mismos que en iter=1 si el user no
+	// pasó un override; si pasó, los del override. Priorizamos preservar la
+	// continuidad del panel de revisión.
+	validators := opts.Validators
+	if validators == nil {
+		validators = state.Validators
+	}
+	if len(validators) == 0 {
+		fmt.Fprintf(stderr, "error: no hay validadores configurados para reanudar — pasá --validators o escriba el flow original con validators\n")
+		return ExitSemantic
+	}
+
+	progress(fmt.Sprintf("corriendo %d validador(es) con las respuestas humanas…", len(validators)))
+	results := runValidatorsResumeParallel(issue, state, validators, progress)
+	if err := validateValidatorResults(results); err != nil {
+		fmt.Fprintf(stderr, "error: validator response: %v\n", err)
+		return ExitSemantic
+	}
+
+	progress("posteando comments de validadores…")
+	if err := postValidatorComments(issueRef, nextIter, results); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
+	}
+
+	if hasHumanGaps(results) {
+		if nextIter >= MaxIterations {
+			fmt.Fprintf(stderr, "error: después de %d iteraciones siguen quedando preguntas sin resolver; resolvé a mano en el issue #%d\n", nextIter, issue.Number)
+			fmt.Fprintln(stdout, renderValidationReport(results, true))
+			return ExitRetry
+		}
+		return pauseForHuman(issueRef, issue, results, nextIter, progress, stdout, stderr)
+	}
+
+	// Convergencia: llamamos al executor en modo consolidación para armar el
+	// body final sin ambigüedades.
+	progress(fmt.Sprintf("convergencia alcanzada; consolidando plan con %s…", state.ExecutorAgent))
+	consolidated, err := callConsolidation(state.ExecutorAgent, issue, state, results, progress)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: consolidation: %v\n", err)
+		return ExitRetry
+	}
+	if err := validateConsolidated(consolidated); err != nil {
+		fmt.Fprintf(stderr, "error: consolidated response: %v\n", err)
+		return ExitSemantic
+	}
+
+	newBody := renderConsolidatedBody(consolidated, issue.Body)
+	progress("actualizando body del issue con plan consolidado…")
+	if err := editIssueBody(issueRef, newBody); err != nil {
+		fmt.Fprintf(stderr, "error: updating body: %v\n", err)
+		return ExitRetry
+	}
+
+	progress("asegurando label status:plan…")
+	if err := ensureLabel("status:plan", progress); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
+	}
+	progress("quitando status:awaiting-human, agregando status:plan…")
+	if err := closeAwaitingHuman(issueRef); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
+	}
+
+	fmt.Fprintln(stdout, renderValidationReport(results, false))
+	fmt.Fprintf(stdout, "Resumed and consolidated %s\n", issue.URL)
+	fmt.Fprintln(stdout, "Done.")
+	return ExitOK
+}
+
+// pauseForHuman centraliza lo que hacen new y resume cuando detectan human
+// gaps: postean human-request, aseguran status:awaiting-human y salen.
+func pauseForHuman(issueRef string, issue *Issue, results []validatorResult, iter int, progress func(string), stdout, stderr io.Writer) ExitCode {
+	progress("validadores pidieron input humano; posteando request…")
+	humanReq := renderHumanRequest(results, iter)
+	if _, err := postComment(issueRef, humanReq); err != nil {
+		fmt.Fprintf(stderr, "error: posting human-request comment: %v\n", err)
+		return ExitRetry
+	}
+	progress("asegurando label status:awaiting-human…")
+	if err := ensureLabel("status:awaiting-human", progress); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
+	}
+	if err := setLabelAwaitingHuman(issueRef); err != nil {
+		fmt.Fprintf(stderr, "error: editing labels: %v\n", err)
+		return ExitRetry
+	}
+	fmt.Fprintln(stdout, renderValidationReport(results, true))
+	fmt.Fprintf(stdout, "Paused %s — contestá en el issue y corré `che explore %d` de nuevo; el flow va a detectar tu respuesta y continuar.\n", issue.URL, issue.Number)
+	return ExitOK
+}
+
+// finalizeToPlan es el cierre normal del modo new cuando no hay human gaps:
+// transiciona status:idea → status:plan y devuelve ExitOK.
+func finalizeToPlan(issueRef string, issue *Issue, _ *Response, results []validatorResult, _ Agent, _ []Validator, commentURL string, progress func(string), stdout, stderr io.Writer) ExitCode {
 	progress("asegurando label status:plan…")
 	if err := ensureLabel("status:plan", progress); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		fmt.Fprintf(stderr, "warning: comentario posteado (%s) pero label no se pudo crear/actualizar; corré de nuevo\n", commentURL)
 		return ExitRetry
 	}
-
 	progress("transicionando label a status:plan…")
 	if err := transitionLabels(issueRef); err != nil {
 		fmt.Fprintf(stderr, "error: editing labels: %v\n", err)
 		fmt.Fprintf(stderr, "warning: comentario posteado (%s) pero label no cambió; corré de nuevo o editá a mano\n", commentURL)
 		return ExitRetry
 	}
-
-	if len(validationResults) > 0 {
-		fmt.Fprintln(stdout, renderValidationReport(validationResults, false))
+	if len(results) > 0 {
+		fmt.Fprintln(stdout, renderValidationReport(results, false))
 	}
 	fmt.Fprintf(stdout, "Explored %s\n", issue.URL)
 	if commentURL != "" {
@@ -388,9 +597,46 @@ type Candidate struct {
 }
 
 // ListCandidates devuelve los issues abiertos con label ct:plan que todavía
-// no fueron explorados (status:plan ausente). Limita a los 50 más recientes
-// para mantener la TUI manejable.
+// no fueron explorados (sin status:plan) y que NO están esperando input
+// humano (sin status:awaiting-human). Limita a los 50 más recientes para
+// mantener la TUI manejable. Los awaiting-human se listan aparte con
+// ListAwaiting() — el usuario los reanuda desde otra sección de la TUI.
 func ListCandidates() ([]Candidate, error) {
+	raw, err := listIssuesWithCtPlan()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Candidate, 0, len(raw))
+	for _, i := range raw {
+		if i.HasLabel("status:plan") || i.HasLabel("status:awaiting-human") {
+			continue
+		}
+		out = append(out, Candidate{Number: i.Number, Title: i.Title})
+	}
+	return out, nil
+}
+
+// ListAwaiting devuelve los issues con status:awaiting-human, candidatos a
+// reanudación. Son los que quedaron en pausa porque los validadores pidieron
+// input humano en una corrida anterior.
+func ListAwaiting() ([]Candidate, error) {
+	raw, err := listIssuesWithCtPlan()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Candidate, 0, len(raw))
+	for _, i := range raw {
+		if !i.HasLabel("status:awaiting-human") {
+			continue
+		}
+		out = append(out, Candidate{Number: i.Number, Title: i.Title})
+	}
+	return out, nil
+}
+
+// listIssuesWithCtPlan es el fetch compartido: trae todos los issues open con
+// ct:plan y deja el filtrado a los callers específicos.
+func listIssuesWithCtPlan() ([]Issue, error) {
 	cmd := exec.Command("gh", "issue", "list",
 		"--label", "ct:plan",
 		"--state", "open",
@@ -407,21 +653,16 @@ func ListCandidates() ([]Candidate, error) {
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("parse gh issue list output: %w", err)
 	}
-	out2 := make([]Candidate, 0, len(raw))
-	for _, i := range raw {
-		if i.HasLabel("status:plan") {
-			continue
-		}
-		out2 = append(out2, Candidate{Number: i.Number, Title: i.Title})
-	}
-	return out2, nil
+	return raw, nil
 }
 
 // fetchIssue corre `gh issue view <ref> --json ...` y parsea el output. El
-// ref puede ser número, URL, o owner/repo#N — gh los normaliza.
+// ref puede ser número, URL, o owner/repo#N — gh los normaliza. Incluye
+// comments porque el modo resume los necesita para encontrar las respuestas
+// humanas y las iteraciones previas.
 func fetchIssue(ref string) (*Issue, error) {
 	cmd := exec.Command("gh", "issue", "view", ref,
-		"--json", "number,title,body,labels,url,state")
+		"--json", "number,title,body,labels,url,state,comments")
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -436,26 +677,25 @@ func fetchIssue(ref string) (*Issue, error) {
 	return &issue, nil
 }
 
-// gateIssue valida que el issue sea candidato para explorar.
-func gateIssue(i *Issue) error {
+// gateBasic valida las precondiciones mínimas (open + ct:plan). La decisión
+// entre modo new/resume/already-explored se toma después en Run() mirando
+// los labels de estado.
+func gateBasic(i *Issue) error {
 	if i.State != "OPEN" {
 		return fmt.Errorf("issue #%d is closed", i.Number)
 	}
 	if !i.HasLabel("ct:plan") {
 		return fmt.Errorf("issue #%d is missing label ct:plan (not created by `che idea`?)", i.Number)
 	}
-	if i.HasLabel("status:plan") {
-		return fmt.Errorf("issue #%d was already explored (status:plan present)", i.Number)
-	}
 	return nil
 }
 
 // callAgent invoca al binario correspondiente al agente elegido con el prompt
-// construido para el issue. Mantiene el patrón -p + streaming por stdout
-// establecido en el flow idea.
+// construido para el issue. Usa InvokeArgs para adaptarse a la sintaxis
+// específica de cada CLI (opus/codex/gemini usan flags distintos).
 func callAgent(agent Agent, issue *Issue, progress func(string)) (*Response, error) {
 	prompt := buildPrompt(issue)
-	cmd := exec.Command(agent.Binary(), "-p", prompt, "--output-format", "text")
+	cmd := exec.Command(agent.Binary(), agent.InvokeArgs(prompt)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -616,9 +856,10 @@ func validate(r *Response) error {
 }
 
 // renderComment genera el markdown que se postea como comentario en el issue.
-// Arranca con un header HTML que identifica al ejecutor y la iteración — lo
-// van a leer iteraciones futuras (validadores, correcciones) para saber qué
-// comments corresponden a qué agente y ronda.
+// Arranca con un header HTML que identifica al ejecutor y la iteración, y
+// termina con el Response completo en un bloque ```json colapsado — esa
+// representación es la fuente de verdad que modo resume re-parsea para
+// continuar la conversación sin perder estructura.
 func renderComment(r *Response, agent Agent, iter int) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("<!-- claude-cli: flow=explore iter=%d agent=%s role=executor -->\n", iter, agent))
@@ -671,7 +912,34 @@ func renderComment(r *Response, agent Agent, iter int) string {
 	sb.WriteString("### Próximo paso\n")
 	sb.WriteString(r.NextStep + "\n")
 
+	appendEmbeddedJSON(&sb, r, "Plan en JSON")
 	return sb.String()
+}
+
+// appendEmbeddedJSON escribe al final del comment un bloque <details> con el
+// JSON completo de la estructura. Esa es la fuente de verdad para el modo
+// resume, que re-parsea sin depender del markdown (que puede perder nesting).
+func appendEmbeddedJSON(sb *strings.Builder, v any, title string) {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return
+	}
+	sb.WriteString("\n---\n\n")
+	sb.WriteString(fmt.Sprintf("<details>\n<summary>%s (para re-procesar)</summary>\n\n```json\n", title))
+	sb.Write(data)
+	sb.WriteString("\n```\n\n</details>\n")
+}
+
+// extractEmbeddedJSON busca el primer bloque ```json ... ``` en el body del
+// comment y devuelve el contenido. Si no encuentra, devuelve "".
+var embeddedJSONRe = regexp.MustCompile("```json\\s*\\n([\\s\\S]*?)\\n```")
+
+func extractEmbeddedJSON(body string) string {
+	m := embeddedJSONRe.FindStringSubmatch(body)
+	if m == nil {
+		return ""
+	}
+	return m[1]
 }
 
 // postComment corre `gh issue comment <ref> --body-file <tmp>` y devuelve la
@@ -765,7 +1033,7 @@ func runValidatorsParallel(issue *Issue, execResp *Response, validators []Valida
 // incluye el plan del ejecutor. Devuelve la respuesta parseada o el error.
 func callValidator(v Validator, issue *Issue, execResp *Response, progress func(string)) (*ValidatorResponse, error) {
 	prompt := buildValidatorPrompt(issue, execResp)
-	cmd := exec.Command(v.Agent.Binary(), "-p", prompt, "--output-format", "text")
+	cmd := exec.Command(v.Agent.Binary(), v.Agent.InvokeArgs(prompt)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -963,6 +1231,7 @@ func renderValidatorComment(r validatorResult, iter int) string {
 			sb.WriteString("  - sugerencia: " + f.Suggestion + "\n")
 		}
 	}
+	appendEmbeddedJSON(&sb, resp, "Validación en JSON")
 	return sb.String()
 }
 
@@ -1022,7 +1291,459 @@ func renderValidationReport(results []validatorResult, humanGaps bool) string {
 			mark, label, r.Response.Verdict, r.Response.Summary, len(r.Response.Findings)))
 	}
 	if humanGaps {
-		sb.WriteString("\n⚠ Hay preguntas que requieren input tuyo. El issue se marcó con status:awaiting-human y se posteó un comment con las preguntas. Contestá en el issue y corré `che explore <ref>` de nuevo (la reanudación automática llega en v0.0.13).\n")
+		sb.WriteString("\n⚠ Hay preguntas que requieren input tuyo. El issue se marcó con status:awaiting-human y se posteó un comment con las preguntas. Contestá en el issue y corré `che explore <ref>` de nuevo — el flow va a detectar tu respuesta, re-validar, y cerrar el plan si queda sin ambigüedades.\n")
 	}
 	return sb.String()
+}
+
+// conversationState resume lo que extraemos de los comments del issue para
+// modo resume: el plan del ejecutor, los validadores que participaron, la
+// iteración más alta, las respuestas humanas posteriores al último human
+// request.
+type conversationState struct {
+	ExecutorAgent Agent
+	ExecutorPlan  *Response
+	Validators    []Validator
+	MaxIter       int
+	HumanAnswers  []string
+	// PreviousFindings son los findings de la iteración más reciente de
+	// validators; se pasan al prompt de resume para que el validador vea qué
+	// preguntó antes.
+	PreviousFindings []validatorResult
+}
+
+// parseConversation recorre los comments del issue (en orden cronológico) y
+// arma el estado que necesita el modo resume.
+func parseConversation(issue *Issue) conversationState {
+	st := conversationState{}
+	seenValidators := map[string]bool{} // "<agent>#<instance>"
+	var lastHumanRequestIdx int = -1
+	var lastHumanRequestIter int
+	// Agrupo validators por iter para determinar la lista completa.
+	iterValidators := map[int][]validatorResult{}
+
+	for idx, c := range issue.Comments {
+		h := c.Header()
+		if h.Role == "" {
+			// Comment humano (sin header) — lo consideramos respuesta solo si
+			// está después del último human-request. Lo resolvemos en un
+			// segundo pase abajo.
+			continue
+		}
+		if h.Iter > st.MaxIter {
+			st.MaxIter = h.Iter
+		}
+		switch h.Role {
+		case "executor":
+			// Preservamos siempre el último executor (por si hubo iter=2).
+			if raw := extractEmbeddedJSON(c.Body); raw != "" {
+				var plan Response
+				if err := json.Unmarshal([]byte(raw), &plan); err == nil {
+					st.ExecutorPlan = &plan
+					st.ExecutorAgent = h.Agent
+				}
+			}
+		case "validator":
+			key := fmt.Sprintf("%s#%d", h.Agent, h.Instance)
+			if !seenValidators[key] {
+				seenValidators[key] = true
+				st.Validators = append(st.Validators, Validator{Agent: h.Agent, Instance: h.Instance})
+			}
+			// Extraemos el ValidatorResponse para poder pasarle feedback al
+			// prompt de iter siguiente.
+			if raw := extractEmbeddedJSON(c.Body); raw != "" {
+				var vr ValidatorResponse
+				if err := json.Unmarshal([]byte(raw), &vr); err == nil {
+					iterValidators[h.Iter] = append(iterValidators[h.Iter], validatorResult{
+						Validator: Validator{Agent: h.Agent, Instance: h.Instance},
+						Response:  &vr,
+					})
+				}
+			}
+		case "human-request":
+			lastHumanRequestIdx = idx
+			lastHumanRequestIter = h.Iter
+		}
+	}
+
+	// Respuestas humanas: todos los comments sin header posteriores al último
+	// human-request.
+	if lastHumanRequestIdx >= 0 {
+		for _, c := range issue.Comments[lastHumanRequestIdx+1:] {
+			if c.IsHuman() && strings.TrimSpace(c.Body) != "" {
+				st.HumanAnswers = append(st.HumanAnswers, c.Body)
+			}
+		}
+	}
+
+	// PreviousFindings = findings de la iter del último human-request.
+	st.PreviousFindings = iterValidators[lastHumanRequestIter]
+
+	return st
+}
+
+// runValidatorsResumeParallel corre los validadores con un prompt que
+// incluye las respuestas humanas + el plan original. El loop estructural es
+// igual que runValidatorsParallel; solo cambia el prompt.
+func runValidatorsResumeParallel(issue *Issue, state conversationState, validators []Validator, progress func(string)) []validatorResult {
+	results := make([]validatorResult, len(validators))
+	var wg sync.WaitGroup
+	for i, v := range validators {
+		wg.Add(1)
+		go func(i int, v Validator) {
+			defer wg.Done()
+			label := fmt.Sprintf("%s#%d", v.Agent, v.Instance)
+			progress(label + ": consultando (resume)…")
+			resp, err := callValidatorResume(v, issue, state, func(line string) {
+				progress(label + ": " + line)
+			})
+			results[i] = validatorResult{Validator: v, Response: resp, Err: err}
+		}(i, v)
+	}
+	wg.Wait()
+	return results
+}
+
+// callValidatorResume es como callValidator pero usa el prompt de reanudación
+// que incluye respuestas humanas + findings previos.
+func callValidatorResume(v Validator, issue *Issue, state conversationState, progress func(string)) (*ValidatorResponse, error) {
+	prompt := buildValidatorResumePrompt(issue, state)
+	cmd := exec.Command(v.Agent.Binary(), v.Agent.InvokeArgs(prompt)...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	var fullOutput strings.Builder
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fullOutput.WriteString(line + "\n")
+		if strings.TrimSpace(line) != "" {
+			progress(line)
+		}
+	}
+	if err := cmd.Wait(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("exit %d: %s", ee.ExitCode(), strings.TrimSpace(stderrBuf.String()))
+		}
+		return nil, err
+	}
+	return parseValidatorResponse(fullOutput.String())
+}
+
+func buildValidatorResumePrompt(issue *Issue, state conversationState) string {
+	planJSON, _ := json.MarshalIndent(state.ExecutorPlan, "", "  ")
+
+	var previousFindings strings.Builder
+	for _, r := range state.PreviousFindings {
+		if r.Response == nil {
+			continue
+		}
+		previousFindings.WriteString(fmt.Sprintf("- %s#%d (verdict=%s, %d findings)\n",
+			r.Validator.Agent, r.Validator.Instance, r.Response.Verdict, len(r.Response.Findings)))
+		for _, f := range r.Response.Findings {
+			tag := ""
+			if f.NeedsHuman {
+				tag = " [needs_human]"
+			}
+			previousFindings.WriteString(fmt.Sprintf("  - [%s · %s]%s %s\n", f.Severity, f.Area, tag, f.Issue))
+		}
+	}
+
+	humanText := strings.Join(state.HumanAnswers, "\n\n---\n\n")
+
+	return `Sos un validador técnico senior. En una iteración anterior, otros validadores (incluido vos posiblemente) marcaron que el plan necesitaba input humano para ciertas preguntas de producto. El humano contestó. Tu tarea ahora es verificar si las respuestas cubren los gaps, y si queda algo sin responder.
+
+Reglas de esta iteración:
+1. Si las respuestas humanas cubren todas las preguntas que tenían needs_human=true en iter anterior, devolvé verdict=approve.
+2. Si quedan gaps técnicos menores (no bloqueantes ni de producto), devolvé verdict=changes_requested con findings específicos. Esto NO bloquea convergencia.
+3. Si las respuestas son ambiguas, parciales o contradicen algo del plan, devolvé verdict=needs_human con un finding needs_human=true explicando QUÉ falta responder — NO repitas las preguntas si ya fueron contestadas.
+4. Sé riguroso pero no inventes gaps — si la respuesta humana es clara aunque breve, aceptala.
+
+Valores válidos: mismo enum que antes (verdict, severity, area).
+
+Devolvé EXCLUSIVAMENTE un objeto JSON con el shape:
+
+{
+  "verdict": "approve",
+  "summary": "Tu opinión global en 1-2 oraciones",
+  "findings": [
+    {"severity": "minor", "area": "paths", "where": "...", "issue": "...", "suggestion": "...", "needs_human": false}
+  ]
+}
+
+Issue #` + fmt.Sprint(issue.Number) + `:
+Título: ` + issue.Title + `
+
+Body del issue:
+<<<
+` + issue.Body + `
+>>>
+
+Plan del ejecutor (iter=1):
+<<<
+` + string(planJSON) + `
+>>>
+
+Findings de validadores en iter anterior:
+<<<
+` + previousFindings.String() + `
+>>>
+
+Respuestas del humano:
+<<<
+` + humanText + `
+>>>`
+}
+
+// ConsolidatedPlan es el plan final post-convergencia que se escribe al body
+// del issue. Sin ambigüedades, listo para ejecutar.
+type ConsolidatedPlan struct {
+	Summary            string   `json:"summary"`
+	Goal               string   `json:"goal"`
+	AcceptanceCriteria []string `json:"acceptance_criteria"`
+	Approach           string   `json:"approach"`
+	Steps              []string `json:"steps"`
+	RisksToMitigate    []Risk   `json:"risks_to_mitigate"`
+	OutOfScope         []string `json:"out_of_scope"`
+}
+
+// callConsolidation invoca al ejecutor con un prompt de "consolidación" que
+// recibe el plan original, las respuestas humanas y los findings finales, y
+// produce el ConsolidatedPlan listo para ser el nuevo body del issue.
+func callConsolidation(agent Agent, issue *Issue, state conversationState, finalResults []validatorResult, progress func(string)) (*ConsolidatedPlan, error) {
+	prompt := buildConsolidationPrompt(issue, state, finalResults)
+	cmd := exec.Command(agent.Binary(), agent.InvokeArgs(prompt)...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderrBuf strings.Builder
+	cmd.Stderr = &stderrBuf
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	var fullOutput strings.Builder
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		fullOutput.WriteString(line + "\n")
+		if strings.TrimSpace(line) != "" {
+			progress(string(agent) + " (consolidación): " + line)
+		}
+	}
+	if err := cmd.Wait(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("exit %d: %s", ee.ExitCode(), strings.TrimSpace(stderrBuf.String()))
+		}
+		return nil, err
+	}
+
+	raw := strings.TrimSpace(fullOutput.String())
+	if strings.HasPrefix(raw, "```") {
+		if nl := strings.Index(raw, "\n"); nl >= 0 {
+			raw = raw[nl+1:]
+		}
+		if idx := strings.LastIndex(raw, "```"); idx >= 0 {
+			raw = raw[:idx]
+		}
+		raw = strings.TrimSpace(raw)
+	}
+	if i := strings.Index(raw, "{"); i > 0 {
+		raw = raw[i:]
+	}
+	if i := strings.LastIndex(raw, "}"); i >= 0 && i < len(raw)-1 {
+		raw = raw[:i+1]
+	}
+	var cp ConsolidatedPlan
+	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
+		return nil, fmt.Errorf("invalid JSON from consolidation: %w (raw: %q)", err, truncate(raw, 200))
+	}
+	return &cp, nil
+}
+
+func buildConsolidationPrompt(issue *Issue, state conversationState, finalResults []validatorResult) string {
+	planJSON, _ := json.MarshalIndent(state.ExecutorPlan, "", "  ")
+
+	var findingsText strings.Builder
+	for _, r := range finalResults {
+		if r.Response == nil {
+			continue
+		}
+		findingsText.WriteString(fmt.Sprintf("- %s#%d (verdict=%s): %s\n",
+			r.Validator.Agent, r.Validator.Instance, r.Response.Verdict, r.Response.Summary))
+		for _, f := range r.Response.Findings {
+			findingsText.WriteString(fmt.Sprintf("  - [%s · %s] %s", f.Severity, f.Area, f.Issue))
+			if f.Suggestion != "" {
+				findingsText.WriteString(" — sugerencia: " + f.Suggestion)
+			}
+			findingsText.WriteString("\n")
+		}
+	}
+
+	humanText := strings.Join(state.HumanAnswers, "\n\n---\n\n")
+
+	return `Sos un ingeniero senior. Tenés que consolidar un plan de implementación para un issue de GitHub. El plan ya pasó por una ronda de exploración + validación + respuesta del humano a preguntas de producto. Tu tarea es producir el plan FINAL sin ambigüedades — un ingeniero que lea esto tiene que poder arrancar a implementar sin más preguntas.
+
+Reglas:
+- Incorporá las respuestas del humano como DECISIONES firmes (no como "a definir").
+- Los findings de los validadores son cosas a cubrir: los blockers/majors van como steps o acceptance_criteria, los minors van como risks_to_mitigate.
+- Elegí UN approach (el recommended del plan original ajustado por las decisiones del humano si cambió algo).
+- Sé concreto: si el humano dijo "no aplica X", sacá X del alcance; si dijo "preferimos A sobre B", elegí A y descartá B.
+- No incluyas preguntas abiertas ni ambigüedades — si algo quedó gris, elegí la opción más conservadora y anotá en risks_to_mitigate.
+
+Devolvé EXCLUSIVAMENTE un objeto JSON con este shape — sin texto antes ni después, sin markdown code fences:
+
+{
+  "summary": "1-2 oraciones del qué y para qué",
+  "goal": "Qué logramos cuando esto está implementado",
+  "acceptance_criteria": ["Criterio 1 observable", "Criterio 2"],
+  "approach": "Descripción del approach elegido, 2-4 oraciones",
+  "steps": ["Paso 1 concreto", "Paso 2 concreto"],
+  "risks_to_mitigate": [
+    {"risk": "...", "likelihood": "low|medium|high", "impact": "low|medium|high", "mitigation": "..."}
+  ],
+  "out_of_scope": ["Cosa que explícitamente NO hacemos ahora"]
+}
+
+Issue #` + fmt.Sprint(issue.Number) + `:
+Título: ` + issue.Title + `
+
+Body original:
+<<<
+` + issue.Body + `
+>>>
+
+Plan original del ejecutor:
+<<<
+` + string(planJSON) + `
+>>>
+
+Respuestas del humano a preguntas de producto:
+<<<
+` + humanText + `
+>>>
+
+Findings de validadores en la iteración final:
+<<<
+` + findingsText.String() + `
+>>>`
+}
+
+func validateConsolidated(c *ConsolidatedPlan) error {
+	if strings.TrimSpace(c.Summary) == "" {
+		return fmt.Errorf("summary is empty")
+	}
+	if strings.TrimSpace(c.Goal) == "" {
+		return fmt.Errorf("goal is empty")
+	}
+	if len(c.AcceptanceCriteria) == 0 {
+		return fmt.Errorf("acceptance_criteria is empty")
+	}
+	if strings.TrimSpace(c.Approach) == "" {
+		return fmt.Errorf("approach is empty")
+	}
+	if len(c.Steps) == 0 {
+		return fmt.Errorf("steps is empty")
+	}
+	for i, r := range c.RisksToMitigate {
+		if !validLikelihood[r.Likelihood] {
+			return fmt.Errorf("risk %d: likelihood %q not in [low medium high]", i, r.Likelihood)
+		}
+		if !validImpact[r.Impact] {
+			return fmt.Errorf("risk %d: impact %q not in [low medium high]", i, r.Impact)
+		}
+	}
+	return nil
+}
+
+// renderConsolidatedBody arma el nuevo body del issue: plan consolidado
+// arriba (listo para ejecución), idea original preservada abajo como
+// referencia.
+func renderConsolidatedBody(c *ConsolidatedPlan, originalBody string) string {
+	var sb strings.Builder
+	sb.WriteString("## Plan consolidado (post-exploración)\n\n")
+	sb.WriteString("**Resumen:** " + c.Summary + "\n\n")
+	sb.WriteString("**Goal:** " + c.Goal + "\n\n")
+
+	sb.WriteString("### Criterios de aceptación\n")
+	for _, crit := range c.AcceptanceCriteria {
+		sb.WriteString("- [ ] " + crit + "\n")
+	}
+	sb.WriteString("\n")
+
+	sb.WriteString("### Approach\n")
+	sb.WriteString(c.Approach + "\n\n")
+
+	sb.WriteString("### Pasos\n")
+	for i, step := range c.Steps {
+		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, step))
+	}
+	sb.WriteString("\n")
+
+	if len(c.RisksToMitigate) > 0 {
+		sb.WriteString("### Riesgos a mitigar\n")
+		for _, r := range c.RisksToMitigate {
+			sb.WriteString(fmt.Sprintf("- **%s** (likelihood=%s, impact=%s) — %s\n",
+				r.Risk, r.Likelihood, r.Impact, r.Mitigation))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(c.OutOfScope) > 0 {
+		sb.WriteString("### Fuera de alcance\n")
+		for _, o := range c.OutOfScope {
+			sb.WriteString("- " + o + "\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("---\n\n")
+	sb.WriteString("## Idea original (de `che idea`)\n\n")
+	sb.WriteString(originalBody)
+	if !strings.HasSuffix(originalBody, "\n") {
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+// editIssueBody reemplaza el body del issue via `gh issue edit --body-file`.
+func editIssueBody(ref, body string) error {
+	tmpDir, err := os.MkdirTemp("", "che-explore-body-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	bodyFile := filepath.Join(tmpDir, "body.md")
+	if err := os.WriteFile(bodyFile, []byte(body), 0o644); err != nil {
+		return err
+	}
+	cmd := exec.Command("gh", "issue", "edit", ref, "--body-file", bodyFile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gh issue edit --body-file: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// closeAwaitingHuman saca el label status:awaiting-human y agrega status:plan
+// en la misma operación, cerrando el ciclo.
+func closeAwaitingHuman(ref string) error {
+	cmd := exec.Command("gh", "issue", "edit", ref,
+		"--remove-label", "status:awaiting-human",
+		"--remove-label", "status:idea",
+		"--add-label", "status:plan")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gh issue edit: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
 }

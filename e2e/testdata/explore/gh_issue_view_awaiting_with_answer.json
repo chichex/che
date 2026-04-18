@@ -1,0 +1,41 @@
+{
+  "number": 42,
+  "title": "Issue en pausa con respuesta humana",
+  "body": "## Idea\nUn flow ambiguo que quedó esperando input humano.\n",
+  "url": "https://github.com/acme/demo/issues/42",
+  "state": "OPEN",
+  "labels": [
+    {"name": "ct:plan"},
+    {"name": "status:idea"},
+    {"name": "status:awaiting-human"},
+    {"name": "type:feature"},
+    {"name": "size:m"}
+  ],
+  "comments": [
+    {
+      "body": "<!-- claude-cli: flow=explore iter=1 agent=opus role=executor -->\n## [executor:opus · iter:1]\n\n**Resumen:** Plan inicial.\n\n---\n\n<details>\n<summary>Plan en JSON (para re-procesar)</summary>\n\n```json\n{\n  \"summary\": \"Plan inicial de la feature.\",\n  \"questions\": [{\"q\":\"¿A o B?\",\"why\":\"Define scope\",\"blocker\":true}],\n  \"risks\": [{\"risk\":\"Scope creep\",\"likelihood\":\"medium\",\"impact\":\"high\",\"mitigation\":\"Dry-run primero\"}],\n  \"paths\": [\n    {\"title\":\"Path A\",\"sketch\":\"Approach A\",\"pros\":[\"pro1\"],\"cons\":[\"con1\"],\"effort\":\"M\",\"recommended\":true},\n    {\"title\":\"Path B\",\"sketch\":\"Approach B\",\"pros\":[\"pro2\"],\"cons\":[\"con2\"],\"effort\":\"S\",\"recommended\":false}\n  ],\n  \"next_step\": \"Resolver preguntas de producto.\"\n}\n```\n\n</details>\n",
+      "createdAt": "2026-04-18T10:00:00Z",
+      "author": {"login": "chichex-bot"}
+    },
+    {
+      "body": "<!-- claude-cli: flow=explore iter=1 agent=codex instance=1 role=validator -->\n## [validator:codex#1 · iter:1 · needs_human]\n\n```json\n{\n  \"verdict\": \"needs_human\",\n  \"summary\": \"Preguntas de producto sin resolver\",\n  \"findings\": [{\"severity\":\"blocker\",\"area\":\"questions\",\"where\":\"questions[0]\",\"issue\":\"¿Elegimos Path A o Path B?\",\"suggestion\":\"\",\"needs_human\":true}]\n}\n```\n",
+      "createdAt": "2026-04-18T10:05:00Z",
+      "author": {"login": "chichex-bot"}
+    },
+    {
+      "body": "<!-- claude-cli: flow=explore iter=1 agent=gemini instance=1 role=validator -->\n## [validator:gemini#1 · iter:1 · approve]\n\n```json\n{\n  \"verdict\": \"approve\",\n  \"summary\": \"Plan aceptable\",\n  \"findings\": []\n}\n```\n",
+      "createdAt": "2026-04-18T10:05:30Z",
+      "author": {"login": "chichex-bot"}
+    },
+    {
+      "body": "<!-- claude-cli: flow=explore iter=1 role=human-request -->\n## 🧑 Input humano requerido\n\n### Preguntas\n- **[codex#1 · questions]** ¿Elegimos Path A o Path B?\n",
+      "createdAt": "2026-04-18T10:06:00Z",
+      "author": {"login": "chichex-bot"}
+    },
+    {
+      "body": "Vamos con Path A. Path B tiene mucho overhead de mantenimiento y no escala para nuestro caso.",
+      "createdAt": "2026-04-18T11:00:00Z",
+      "author": {"login": "chichex"}
+    }
+  ]
+}

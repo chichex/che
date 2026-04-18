@@ -55,12 +55,11 @@ type menuItem struct {
 }
 
 var menuItems = []menuItem{
-	{label: "Anotar una idea nueva", key: "1", action: screenIdeaInput},
-	{label: "Explorar un issue existente", key: "2", action: screenExploreLoading},
-	{label: "Ejecutar un plan", key: "3", disabled: true},
-	{label: "Cerrar una idea", key: "4", disabled: true},
-	{label: "Eliminar una idea", key: "5", disabled: true},
-	{label: "Salir", key: "6"},
+	{label: "Idea nueva", key: "1", action: screenIdeaInput},
+	{label: "Explorar", key: "2", action: screenExploreLoading},
+	{label: "Ejecutar", key: "3", disabled: true},
+	{label: "Cerrar", key: "4", disabled: true},
+	{label: "Eliminar", key: "5", disabled: true},
 }
 
 const maxLogLines = 40
@@ -81,10 +80,13 @@ type Model struct {
 	runLog     []string
 	progressCh chan tea.Msg
 
-	// selector de explore: lista de issues candidatos + cursor propio
-	exploreCandidates []explore.Candidate
-	exploreCursor     int
-	exploreLoadErr    error
+	// selector de explore: dos listas — ideas sin explorar + issues
+	// awaiting-human para reanudar. El cursor es un índice global sobre la
+	// concatenación new+resume; exploreTargets arma esa vista unificada.
+	exploreNew     []explore.Candidate
+	exploreResume  []explore.Candidate
+	exploreCursor  int
+	exploreLoadErr error
 
 	// selector de agente ejecutor + checkbox de validadores
 	exploreChosenRef       string
@@ -157,8 +159,9 @@ type exploreDoneMsg struct {
 	stderr string
 }
 type exploreCandidatesLoadedMsg struct {
-	items []explore.Candidate
-	err   error
+	newItems    []explore.Candidate
+	resumeItems []explore.Candidate
+	err         error
 }
 type tickMsg time.Time
 
@@ -185,13 +188,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resultLines = []string{"error: " + msg.err.Error()}
 			return m, nil
 		}
-		if len(msg.items) == 0 {
+		if len(msg.newItems) == 0 && len(msg.resumeItems) == 0 {
 			m.screen = screenResult
 			m.resultOK = false
-			m.resultLines = []string{"No hay issues con label ct:plan listos para explorar."}
+			m.resultLines = []string{
+				"No hay issues con label ct:plan listos para explorar.",
+				"Tampoco hay issues en pausa esperando tu respuesta.",
+			}
 			return m, nil
 		}
-		m.exploreCandidates = msg.items
+		m.exploreNew = msg.newItems
+		m.exploreResume = msg.resumeItems
 		m.exploreCursor = 0
 		m.screen = screenExploreSelect
 		return m, nil
@@ -268,9 +275,6 @@ func (m Model) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 	item := menuItems[m.cursor]
-	if item.key == "6" {
-		return m, tea.Quit
-	}
 	if item.disabled {
 		return m, nil
 	}
@@ -282,7 +286,8 @@ func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 		return m, nil
 	case screenExploreLoading:
 		m.screen = screenExploreLoading
-		m.exploreCandidates = nil
+		m.exploreNew = nil
+		m.exploreResume = nil
 		m.exploreCursor = 0
 		m.exploreLoadErr = nil
 		return m, loadExploreCandidatesCmd()
@@ -292,37 +297,69 @@ func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 
 func loadExploreCandidatesCmd() tea.Cmd {
 	return func() tea.Msg {
-		items, err := explore.ListCandidates()
-		return exploreCandidatesLoadedMsg{items: items, err: err}
+		newItems, err := explore.ListCandidates()
+		if err != nil {
+			return exploreCandidatesLoadedMsg{err: err}
+		}
+		resumeItems, err := explore.ListAwaiting()
+		if err != nil {
+			return exploreCandidatesLoadedMsg{err: err}
+		}
+		return exploreCandidatesLoadedMsg{newItems: newItems, resumeItems: resumeItems}
 	}
 }
 
 func (m Model) handleExploreSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
+	total := len(m.exploreNew) + len(m.exploreResume)
 	switch k {
 	case "esc":
 		m.screen = screenMenu
-		m.exploreCandidates = nil
+		m.exploreNew = nil
+		m.exploreResume = nil
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
 	case "up", "k":
-		m.exploreCursor = (m.exploreCursor - 1 + len(m.exploreCandidates)) % len(m.exploreCandidates)
-		return m, nil
-	case "down", "j":
-		m.exploreCursor = (m.exploreCursor + 1) % len(m.exploreCandidates)
-		return m, nil
-	case "enter":
-		if len(m.exploreCandidates) == 0 {
+		if total == 0 {
 			return m, nil
 		}
-		chosen := m.exploreCandidates[m.exploreCursor]
+		m.exploreCursor = (m.exploreCursor - 1 + total) % total
+		return m, nil
+	case "down", "j":
+		if total == 0 {
+			return m, nil
+		}
+		m.exploreCursor = (m.exploreCursor + 1) % total
+		return m, nil
+	case "enter":
+		if total == 0 {
+			return m, nil
+		}
+		chosen, resume := m.exploreItemAt(m.exploreCursor)
 		m.exploreChosenRef = fmt.Sprint(chosen.Number)
+		if resume {
+			// reanudación: saltamos la selección de ejecutor/validadores y
+			// usamos los del run original (leídos del issue). El flow de
+			// resume se maneja en explore.Run cuando detecta status:
+			// awaiting-human.
+			return m.startExploreFlow(m.exploreChosenRef, "", nil)
+		}
 		m.exploreAgentIdx = 0
 		m.screen = screenExploreAgent
 		return m, nil
 	}
 	return m, nil
+}
+
+// exploreItemAt devuelve el candidato en el índice global y si viene de la
+// sección "resume" (awaiting-human) o "new". El orden visual siempre es
+// new primero, resume después.
+func (m Model) exploreItemAt(idx int) (explore.Candidate, bool) {
+	if idx < len(m.exploreNew) {
+		return m.exploreNew[idx], false
+	}
+	return m.exploreResume[idx-len(m.exploreNew)], true
 }
 
 func (m Model) handleExploreAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -437,7 +474,8 @@ func (m Model) handleResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.screen = screenMenu
 	m.resultLines = nil
 	m.runLog = nil
-	m.exploreCandidates = nil
+	m.exploreNew = nil
+	m.exploreResume = nil
 	return m, nil
 }
 
@@ -757,27 +795,56 @@ func renderValidatorTotal(total int) string {
 
 func renderExploreSelect(m Model) string {
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Explorar un issue"))
+	sb.WriteString(titleStyle.Render("Explorar"))
 	sb.WriteString("\n")
-	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("%d issue(s) listos para explorar — elegí uno:", len(m.exploreCandidates))))
+
+	newCount := len(m.exploreNew)
+	resumeCount := len(m.exploreResume)
+	summary := fmt.Sprintf("%d sin explorar · %d en pausa para revalidar", newCount, resumeCount)
+	sb.WriteString(subtitleStyle.Render(summary))
 	sb.WriteString("\n\n")
 
-	for i, c := range m.exploreCandidates {
-		prefix := "  "
-		style := menuItemStyle
-		if i == m.exploreCursor {
-			prefix = "▸ "
-			style = menuSelectedStyle
+	idx := 0
+
+	if newCount > 0 {
+		sb.WriteString("  " + mutedBadge("— Ideas sin explorar —") + "\n")
+		for _, c := range m.exploreNew {
+			sb.WriteString(exploreCandidateLine(c, idx == m.exploreCursor))
+			idx++
 		}
-		num := menuNumberStyle.Render(fmt.Sprintf("#%d", c.Number))
-		line := prefix + num + "  " + c.Title
-		sb.WriteString(style.Render(line) + "\n")
+	} else {
+		sb.WriteString("  " + mutedBadge("— Ideas sin explorar —") + "  " + comingSoonStyle.Render("(ninguna)") + "\n")
+	}
+
+	sb.WriteString("\n")
+
+	if resumeCount > 0 {
+		sb.WriteString("  " + mutedBadge("— Para revalidar (pausadas por input humano) —") + "\n")
+		for _, c := range m.exploreResume {
+			sb.WriteString(exploreCandidateLine(c, idx == m.exploreCursor))
+			idx++
+		}
+	} else {
+		sb.WriteString("  " + mutedBadge("— Para revalidar —") + "  " + comingSoonStyle.Render("(ninguna)") + "\n")
 	}
 
 	sb.WriteString("\n")
 	sb.WriteString(hintStyle.Render("↑/↓ navega · Enter elige · Esc vuelve · Ctrl+C sale"))
 	sb.WriteString("\n")
 	return sb.String()
+}
+
+// exploreCandidateLine renderiza un item de la lista de exploración con el
+// marcador ▸ cuando el cursor está encima.
+func exploreCandidateLine(c explore.Candidate, selected bool) string {
+	prefix := "  "
+	style := menuItemStyle
+	if selected {
+		prefix = "▸ "
+		style = menuSelectedStyle
+	}
+	num := menuNumberStyle.Render(fmt.Sprintf("#%d", c.Number))
+	return style.Render(prefix+num+"  "+c.Title) + "\n"
 }
 
 func renderResult(m Model) string {

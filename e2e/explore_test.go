@@ -79,7 +79,7 @@ func TestExplore_IssueMissingCtPlanLabel_Exit3(t *testing.T) {
 	if edits := env.Invocations().FindCalls("gh", "issue", "edit"); len(edits) > 0 {
 		t.Fatalf("unexpected gh issue edit calls: %+v", edits)
 	}
-	if comments := env.Invocations().FindCalls("gh", "issue", "comment"); len(comments) > 0 {
+	if comments := env.Invocations().FindCalls("gh", "issue", "comment", "--body-file"); len(comments) > 0 {
 		t.Fatalf("unexpected gh issue comment calls: %+v", comments)
 	}
 }
@@ -125,7 +125,7 @@ func TestExplore_GoldenPath(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		CaptureStdin().
 		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
 	env.ExpectGh(`^issue comment 42`).RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-999\n", 0)
@@ -140,7 +140,7 @@ func TestExplore_GoldenPath(t *testing.T) {
 	if views := inv.FindCalls("gh", "issue", "view", "42"); len(views) != 1 {
 		t.Fatalf("expected 1 gh issue view, got %d", len(views))
 	}
-	if comments := inv.FindCalls("gh", "issue", "comment", "42"); len(comments) != 1 {
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) != 1 {
 		t.Fatalf("expected 1 gh issue comment, got %d", len(comments))
 	}
 	edits := inv.FindCalls("gh", "issue", "edit", "42")
@@ -166,7 +166,7 @@ func TestExplore_AgentCodex(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("codex").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
 	env.ExpectGh(`^issue comment 42`).RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-999\n", 0)
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
@@ -189,7 +189,7 @@ func TestExplore_AgentGemini(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("gemini").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
 	env.ExpectGh(`^issue comment 42`).RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-999\n", 0)
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
@@ -212,7 +212,7 @@ func TestExplore_AgentOpusExplicit(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
 	env.ExpectGh(`^issue comment 42`).RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-999\n", 0)
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
@@ -249,7 +249,7 @@ func TestExplore_ClaudeInvalidEffort_Exit3(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_invalid_effort.json", 0)
 
 	r := env.Run("explore", "--validators", "none", "42")
@@ -257,7 +257,7 @@ func TestExplore_ClaudeInvalidEffort_Exit3(t *testing.T) {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
 	harness.AssertContains(t, r.Stderr, "effort")
-	if comments := env.Invocations().FindCalls("gh", "issue", "comment"); len(comments) > 0 {
+	if comments := env.Invocations().FindCalls("gh", "issue", "comment", "--body-file"); len(comments) > 0 {
 		t.Fatalf("unexpected gh issue comment calls: %+v", comments)
 	}
 	if edits := env.Invocations().FindCalls("gh", "issue", "edit"); len(edits) > 0 {
@@ -272,7 +272,7 @@ func TestExplore_ClaudeNoRecommended_Exit3(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_no_recommended.json", 0)
 
 	r := env.Run("explore", "--validators", "none", "42")
@@ -290,7 +290,7 @@ func TestExplore_ClaudeMultipleRecommended_Exit3(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_multiple_recommended.json", 0)
 
 	r := env.Run("explore", "--validators", "none", "42")
@@ -309,7 +309,7 @@ func TestExplore_LabelEditFailsAfterComment_Exit2_WarnsOrphan(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
 	env.ExpectGh(`^issue comment 42`).RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-999\n", 0)
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
@@ -322,7 +322,7 @@ func TestExplore_LabelEditFailsAfterComment_Exit2_WarnsOrphan(t *testing.T) {
 	harness.AssertContains(t, r.Stderr, "comentario posteado")
 	harness.AssertContains(t, r.Stderr, "label")
 
-	if comments := env.Invocations().FindCalls("gh", "issue", "comment", "42"); len(comments) != 1 {
+	if comments := env.Invocations().FindCalls("gh", "issue", "comment", "--body-file"); len(comments) != 1 {
 		t.Fatalf("expected 1 gh issue comment (posted before edit failed), got %d", len(comments))
 	}
 }
@@ -336,7 +336,7 @@ func TestExplore_URLAsRef(t *testing.T) {
 	env.ExpectGh(`^issue view https://github\.com/acme/demo/issues/42`).
 		RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
 	env.ExpectGh(`^issue comment `).RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-999\n", 0)
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
@@ -354,13 +354,13 @@ func TestExplore_Validators_DefaultBothApprove(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
 	env.ExpectAgent("codex").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`validador técnico`).
 		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
 	env.ExpectAgent("gemini").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`validador técnico`).
 		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
 	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-executor\n", 0)
 	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-codex\n", 0)
@@ -375,7 +375,7 @@ func TestExplore_Validators_DefaultBothApprove(t *testing.T) {
 	harness.AssertContains(t, out, "approve")
 
 	inv := env.Invocations()
-	if comments := inv.FindCalls("gh", "issue", "comment", "42"); len(comments) != 3 {
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) != 3 {
 		t.Fatalf("expected 3 issue comment (executor + 2 validators), got %d", len(comments))
 	}
 	if codexCalls := inv.For("codex"); len(codexCalls) != 1 {
@@ -401,13 +401,13 @@ func TestExplore_Validators_ChangesRequested_StillPlan(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
 	env.ExpectAgent("codex").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`validador técnico`).
 		RespondStdoutFromFixture("explore/sonnet_validator_changes_requested.json", 0)
 	env.ExpectAgent("gemini").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`validador técnico`).
 		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
 	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-e\n", 0)
 	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-c\n", 0)
@@ -439,13 +439,13 @@ func TestExplore_Validators_NeedsHuman_AwaitingLabel(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
 	env.ExpectAgent("codex").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`validador técnico`).
 		RespondStdoutFromFixture("explore/sonnet_validator_needs_human.json", 0)
 	env.ExpectAgent("gemini").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`validador técnico`).
 		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
 	// 3 validator-era comments (executor + 2 validators) + 1 human-request comment.
 	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-e\n", 0)
@@ -460,7 +460,7 @@ func TestExplore_Validators_NeedsHuman_AwaitingLabel(t *testing.T) {
 	harness.AssertContains(t, out, "awaiting-human")
 
 	inv := env.Invocations()
-	if comments := inv.FindCalls("gh", "issue", "comment", "42"); len(comments) != 4 {
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) != 4 {
 		t.Fatalf("expected 4 comments (executor + 2 validators + human-request), got %d", len(comments))
 	}
 	edits := inv.FindCalls("gh", "issue", "edit", "42")
@@ -482,17 +482,17 @@ func TestExplore_Validators_Duplicate(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
 	// Dos respuestas consumables para codex (instances 1 y 2).
 	env.ExpectAgent("codex").
-		WhenArgsMatch(`-p`).Consumable().
+		WhenArgsMatch(`validador técnico`).Consumable().
 		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
 	env.ExpectAgent("codex").
-		WhenArgsMatch(`-p`).Consumable().
+		WhenArgsMatch(`validador técnico`).Consumable().
 		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
 	env.ExpectAgent("gemini").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`validador técnico`).
 		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
 	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
 	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
@@ -520,7 +520,7 @@ func TestExplore_Validators_NoneSkipsValidation(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
 	env.ExpectGh(`^issue comment 42`).RespondStdout("url\n", 0)
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
@@ -531,7 +531,7 @@ func TestExplore_Validators_NoneSkipsValidation(t *testing.T) {
 	inv := env.Invocations()
 	inv.AssertNotCalled(t, "codex")
 	inv.AssertNotCalled(t, "gemini")
-	if comments := inv.FindCalls("gh", "issue", "comment", "42"); len(comments) != 1 {
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) != 1 {
 		t.Fatalf("expected 1 comment (executor only), got %d", len(comments))
 	}
 }
@@ -577,13 +577,13 @@ func TestExplore_Validators_InvalidResponse_Exit3(t *testing.T) {
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
 	env.ExpectAgent("codex").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`validador técnico`).
 		RespondStdoutFromFixture("explore/sonnet_validator_invalid_verdict.json", 0)
 	env.ExpectAgent("gemini").
-		WhenArgsMatch(`-p`).
+		WhenArgsMatch(`validador técnico`).
 		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
 	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
 	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
@@ -598,6 +598,113 @@ func TestExplore_Validators_InvalidResponse_Exit3(t *testing.T) {
 	inv := env.Invocations()
 	if edits := inv.FindCalls("gh", "issue", "edit"); len(edits) > 0 {
 		t.Fatalf("should not edit labels when validator response invalid: %+v", edits)
+	}
+}
+
+// TestExplore_Resume_HappyPath_ConsolidatesAndClosesLoop: issue en
+// awaiting-human con respuesta humana → validators iter=2 aprueban →
+// executor consolida → body del issue actualizado, label a status:plan.
+func TestExplore_Resume_HappyPath_ConsolidatesAndClosesLoop(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_awaiting_with_answer.json", 0)
+	// Validators iter=2 ambos aprueban (las respuestas humanas cubrieron todo).
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`validador técnico`).
+		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
+	env.ExpectAgent("gemini").
+		WhenArgsMatch(`validador técnico`).
+		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
+	// Consolidación: executor (opus=claude) devuelve el plan final.
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`consolidar un plan`).
+		RespondStdoutFromFixture("explore/sonnet_consolidated.json", 0)
+	// 2 comments de validators iter=2 + body update.
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
+	env.ExpectGh(`^issue edit 42 --body-file`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 --remove-label`).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("explore", "42")
+	harness.AssertContains(t, out, "Resumed and consolidated")
+
+	inv := env.Invocations()
+	// 2 comments de validators (iter=2), no human-request.
+	if n := len(inv.FindCalls("gh", "issue", "comment", "--body-file")); n != 2 {
+		t.Fatalf("expected 2 validator comments at iter=2, got %d", n)
+	}
+	// body edit + labels edit.
+	bodyEdits := inv.FindCalls("gh", "issue", "edit", "--body-file")
+	if len(bodyEdits) != 1 {
+		t.Fatalf("expected 1 body edit, got %d", len(bodyEdits))
+	}
+	labelEdits := inv.FindCalls("gh", "issue", "edit", "--remove-label")
+	if len(labelEdits) != 1 {
+		t.Fatalf("expected 1 label edit, got %d", len(labelEdits))
+	}
+	labelEdits[0].AssertArgsContain(t,
+		"--remove-label", "status:awaiting-human",
+		"--add-label", "status:plan")
+}
+
+// TestExplore_Resume_StillNeedsHuman_PostsNewRequest: respuesta humana no
+// cubre todo, validator iter=2 sigue needs_human → nuevo human-request
+// posteado, sigue awaiting-human, NO se toca el body.
+func TestExplore_Resume_StillNeedsHuman_PostsNewRequest(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_awaiting_with_answer.json", 0)
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`validador técnico`).
+		RespondStdoutFromFixture("explore/sonnet_validator_needs_human.json", 0)
+	env.ExpectAgent("gemini").
+		WhenArgsMatch(`validador técnico`).
+		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
+	// 2 validators + 1 human-request = 3 comments. NO body edit.
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 --add-label`).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("explore", "42")
+	harness.AssertContains(t, out, "awaiting-human")
+
+	inv := env.Invocations()
+	if n := len(inv.FindCalls("gh", "issue", "comment", "--body-file")); n != 3 {
+		t.Fatalf("expected 3 comments (2 validators + human-request), got %d", n)
+	}
+	if n := len(inv.FindCalls("gh", "issue", "edit", "--body-file")); n != 0 {
+		t.Fatalf("body should NOT be updated when still needs_human, got %d edits", n)
+	}
+	// claude (opus) no debería haber sido llamado — la consolidación es solo
+	// al converger, no en este branch.
+	inv.AssertNotCalled(t, "claude")
+}
+
+// TestExplore_Resume_NoHumanAnswer_Exit3: issue en awaiting-human sin
+// comment humano posterior al human-request → exit 3, no se llama a nadie.
+func TestExplore_Resume_NoHumanAnswer_Exit3(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_awaiting_no_answer.json", 0)
+
+	r := env.Run("explore", "42")
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "respuestas humanas")
+
+	inv := env.Invocations()
+	inv.AssertNotCalled(t, "claude")
+	inv.AssertNotCalled(t, "codex")
+	inv.AssertNotCalled(t, "gemini")
+	if n := len(inv.FindCalls("gh", "issue", "comment", "--body-file")); n != 0 {
+		t.Fatalf("should not post any comment, got %d", n)
 	}
 }
 
