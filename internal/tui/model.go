@@ -163,6 +163,12 @@ type exploreCandidatesLoadedMsg struct {
 	resumeItems []explore.Candidate
 	err         error
 }
+type resumeInspectedMsg struct {
+	ref        string
+	agent      explore.Agent
+	validators []explore.Validator
+	err        error
+}
 type tickMsg time.Time
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -180,6 +186,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case exploreDoneMsg:
 		return m.finishRun(int(msg.code), msg.code == explore.ExitOK, msg.stdout, msg.stderr), nil
+
+	case resumeInspectedMsg:
+		if msg.err != nil {
+			m.screen = screenResult
+			m.resultOK = false
+			m.resultLines = []string{"error leyendo run anterior: " + msg.err.Error()}
+			return m, nil
+		}
+		m.exploreChosenRef = msg.ref
+		m.exploreAgentIdx = indexOfAgent(msg.agent)
+		// Pre-seleccionar validators del run anterior en el mapa de counts.
+		counts := map[explore.Agent]int{}
+		for _, v := range msg.validators {
+			counts[v.Agent]++
+		}
+		m.exploreValidatorCount = counts
+		m.exploreValidatorCursor = 0
+		m.screen = screenExploreAgent
+		return m, nil
 
 	case exploreCandidatesLoadedMsg:
 		if msg.err != nil {
@@ -337,19 +362,42 @@ func (m Model) handleExploreSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		chosen, resume := m.exploreItemAt(m.exploreCursor)
-		m.exploreChosenRef = fmt.Sprint(chosen.Number)
+		ref := fmt.Sprint(chosen.Number)
 		if resume {
-			// reanudación: saltamos la selección de ejecutor/validadores y
-			// usamos los del run original (leídos del issue). El flow de
-			// resume se maneja en explore.Run cuando detecta status:
-			// awaiting-human.
-			return m.startExploreFlow(m.exploreChosenRef, "", nil)
+			// Reanudación: vamos a mostrar pantalla de carga mientras leemos
+			// el run anterior del issue, y después paramos en agent+validators
+			// con los mismos pre-seleccionados (el humano puede cambiarlos).
+			m.exploreChosenRef = ref
+			m.screen = screenExploreLoading
+			return m, inspectResumeCmd(ref)
 		}
+		m.exploreChosenRef = ref
 		m.exploreAgentIdx = 0
+		// En modo new no hay preselect de validators — limpiamos por si quedó
+		// algo de una corrida anterior.
+		m.exploreValidatorCount = nil
 		m.screen = screenExploreAgent
 		return m, nil
 	}
 	return m, nil
+}
+
+// indexOfAgent devuelve el índice del agente en ValidAgents, o 0 si no se
+// encuentra (default: Opus).
+func indexOfAgent(a explore.Agent) int {
+	for i, v := range explore.ValidAgents {
+		if v == a {
+			return i
+		}
+	}
+	return 0
+}
+
+func inspectResumeCmd(ref string) tea.Cmd {
+	return func() tea.Msg {
+		agent, validators, err := explore.InspectResume(ref)
+		return resumeInspectedMsg{ref: ref, agent: agent, validators: validators, err: err}
+	}
 }
 
 // exploreItemAt devuelve el candidato en el índice global y si viene de la
@@ -390,14 +438,17 @@ func (m Model) handleExploreAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// enterValidatorsScreen inicializa el estado de la pantalla de validadores
-// con el default (codex + gemini, 1 cada uno) cada vez que se entra. El
-// usuario puede ajustar con space antes de mandar.
+// enterValidatorsScreen lleva a la pantalla de validadores. Si el mapa de
+// counts ya está seteado (caso de reanudación, donde lo pre-cargamos con el
+// panel del run anterior), lo preserva. Si está vacío, usa el default
+// codex+gemini para que el usuario arranque desde algo razonable.
 func (m Model) enterValidatorsScreen() Model {
 	m.exploreValidatorCursor = 0
-	m.exploreValidatorCount = map[explore.Agent]int{
-		explore.AgentCodex:  1,
-		explore.AgentGemini: 1,
+	if len(m.exploreValidatorCount) == 0 {
+		m.exploreValidatorCount = map[explore.Agent]int{
+			explore.AgentCodex:  1,
+			explore.AgentGemini: 1,
+		}
 	}
 	m.screen = screenExploreValidators
 	return m

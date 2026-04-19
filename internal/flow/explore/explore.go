@@ -6,6 +6,7 @@ package explore
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -61,18 +62,96 @@ func (a Agent) Binary() string {
 // InvokeArgs devuelve los args de línea de comando para correr al agente en
 // modo no-interactivo con el prompt dado. Cada CLI tiene su propia sintaxis:
 //   - claude  -p <prompt> --output-format text
-//   - codex   exec <prompt>                  (no acepta -p ni --output-format)
+//   - codex   exec --full-auto <prompt>      (full-auto evita prompts de
+//     confirmación de sandbox que colgarían el proceso sin TTY)
 //   - gemini  -p <prompt>                    (text es el default)
 func (a Agent) InvokeArgs(prompt string) []string {
 	switch a {
 	case AgentOpus:
 		return []string{"-p", prompt, "--output-format", "text"}
 	case AgentCodex:
-		return []string{"exec", prompt}
+		return []string{"exec", "--full-auto", prompt}
 	case AgentGemini:
 		return []string{"-p", prompt}
 	}
 	return nil
+}
+
+// AgentTimeout es el tiempo máximo que esperamos a que un agente responda
+// antes de cancelarlo. Valor configurable vía env CHE_AGENT_TIMEOUT_SECS
+// (útil para tests lentos o agentes pesados). Default 5 minutos: holgado
+// para un call a claude/codex/gemini sin dejar flows colgados para siempre.
+var AgentTimeout = func() time.Duration {
+	if s := strings.TrimSpace(os.Getenv("CHE_AGENT_TIMEOUT_SECS")); s != "" {
+		if n, err := time.ParseDuration(s + "s"); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 5 * time.Minute
+}()
+
+// runAgentCmd invoca al binario del agente con el prompt ya construido.
+// Streamea stdout y stderr en vivo al progress (así el usuario ve qué está
+// haciendo), aplica AgentTimeout con context cancellation (si se cuelga,
+// lo mata), y devuelve el stdout completo o un error con contexto.
+//
+// Todos los callers específicos (callAgent, callValidator, etc.) pasan por
+// acá; lo único que varía es qué prompt construyen y cómo parsean el output.
+func runAgentCmd(agent Agent, prompt string, progress func(string), progressPrefix string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), AgentTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, agent.Binary(), agent.InvokeArgs(prompt)...)
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return "", err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+
+	var fullStdout, fullStderr strings.Builder
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go streamPipe(&wg, stdoutPipe, &fullStdout, progress, progressPrefix)
+	go streamPipe(&wg, stderrPipe, &fullStderr, progress, progressPrefix+"stderr: ")
+
+	waitErr := cmd.Wait()
+	wg.Wait()
+
+	if ctx.Err() == context.DeadlineExceeded {
+		return fullStdout.String(), fmt.Errorf("%s timed out after %s (stderr: %s)",
+			agent, AgentTimeout, truncate(strings.TrimSpace(fullStderr.String()), 200))
+	}
+	if waitErr != nil {
+		if ee, ok := waitErr.(*exec.ExitError); ok {
+			return fullStdout.String(), fmt.Errorf("exit %d: %s",
+				ee.ExitCode(), strings.TrimSpace(fullStderr.String()))
+		}
+		return fullStdout.String(), waitErr
+	}
+	return fullStdout.String(), nil
+}
+
+// streamPipe lee línea por línea un pipe (stdout o stderr) y la reenvía a
+// progress con el prefix dado. Acumula todo en el Builder para que el caller
+// pueda usarlo después (parsing, error reporting).
+func streamPipe(wg *sync.WaitGroup, r io.Reader, full *strings.Builder, progress func(string), prefix string) {
+	defer wg.Done()
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		full.WriteString(line + "\n")
+		if strings.TrimSpace(line) != "" && progress != nil {
+			progress(prefix + line)
+		}
+	}
 }
 
 // ParseAgent normaliza un string a Agent, o error si no matchea ningún enum.
@@ -634,6 +713,26 @@ func ListAwaiting() ([]Candidate, error) {
 	return out, nil
 }
 
+// InspectResume fetchea un issue en status:awaiting-human y devuelve qué
+// agente ejecutor usó en la corrida anterior y qué validators participaron.
+// La TUI lo llama cuando el usuario elige reanudar, para pre-seleccionar
+// el mismo panel en las pantallas de agent/validators (el humano puede
+// aceptarlo o cambiarlo — no imponemos nada).
+func InspectResume(ref string) (Agent, []Validator, error) {
+	if err := precheckGitHubRemote(); err != nil {
+		return "", nil, err
+	}
+	if err := precheckGhAuth(); err != nil {
+		return "", nil, err
+	}
+	issue, err := fetchIssue(ref)
+	if err != nil {
+		return "", nil, err
+	}
+	state := parseConversation(issue)
+	return state.ExecutorAgent, state.Validators, nil
+}
+
 // listIssuesWithCtPlan es el fetch compartido: trae todos los issues open con
 // ct:plan y deja el filtrado a los callers específicos.
 func listIssuesWithCtPlan() ([]Issue, error) {
@@ -695,37 +794,11 @@ func gateBasic(i *Issue) error {
 // específica de cada CLI (opus/codex/gemini usan flags distintos).
 func callAgent(agent Agent, issue *Issue, progress func(string)) (*Response, error) {
 	prompt := buildPrompt(issue)
-	cmd := exec.Command(agent.Binary(), agent.InvokeArgs(prompt)...)
-	stdout, err := cmd.StdoutPipe()
+	out, err := runAgentCmd(agent, prompt, progress, string(agent)+": ")
 	if err != nil {
 		return nil, err
 	}
-	var stderrBuf strings.Builder
-	cmd.Stderr = &stderrBuf
-
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-
-	var fullOutput strings.Builder
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		fullOutput.WriteString(line + "\n")
-		if strings.TrimSpace(line) != "" {
-			progress(string(agent) + ": " + line)
-		}
-	}
-
-	if err := cmd.Wait(); err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("exit %d: %s", ee.ExitCode(), strings.TrimSpace(stderrBuf.String()))
-		}
-		return nil, err
-	}
-
-	return parseResponse(fullOutput.String())
+	return parseResponse(out)
 }
 
 // parseResponse extrae el JSON del output de claude, tolerando code fences
@@ -1033,36 +1106,11 @@ func runValidatorsParallel(issue *Issue, execResp *Response, validators []Valida
 // incluye el plan del ejecutor. Devuelve la respuesta parseada o el error.
 func callValidator(v Validator, issue *Issue, execResp *Response, progress func(string)) (*ValidatorResponse, error) {
 	prompt := buildValidatorPrompt(issue, execResp)
-	cmd := exec.Command(v.Agent.Binary(), v.Agent.InvokeArgs(prompt)...)
-	stdout, err := cmd.StdoutPipe()
+	out, err := runAgentCmd(v.Agent, prompt, progress, "")
 	if err != nil {
 		return nil, err
 	}
-	var stderrBuf strings.Builder
-	cmd.Stderr = &stderrBuf
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-
-	var fullOutput strings.Builder
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		fullOutput.WriteString(line + "\n")
-		if strings.TrimSpace(line) != "" {
-			progress(line)
-		}
-	}
-
-	if err := cmd.Wait(); err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("exit %d: %s", ee.ExitCode(), strings.TrimSpace(stderrBuf.String()))
-		}
-		return nil, err
-	}
-
-	return parseValidatorResponse(fullOutput.String())
+	return parseValidatorResponse(out)
 }
 
 func parseValidatorResponse(raw string) (*ValidatorResponse, error) {
@@ -1542,33 +1590,11 @@ func runValidatorsResumeParallel(issue *Issue, state conversationState, validato
 // que incluye respuestas humanas + findings previos.
 func callValidatorResume(v Validator, issue *Issue, state conversationState, progress func(string)) (*ValidatorResponse, error) {
 	prompt := buildValidatorResumePrompt(issue, state)
-	cmd := exec.Command(v.Agent.Binary(), v.Agent.InvokeArgs(prompt)...)
-	stdout, err := cmd.StdoutPipe()
+	out, err := runAgentCmd(v.Agent, prompt, progress, "")
 	if err != nil {
 		return nil, err
 	}
-	var stderrBuf strings.Builder
-	cmd.Stderr = &stderrBuf
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	var fullOutput strings.Builder
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		fullOutput.WriteString(line + "\n")
-		if strings.TrimSpace(line) != "" {
-			progress(line)
-		}
-	}
-	if err := cmd.Wait(); err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("exit %d: %s", ee.ExitCode(), strings.TrimSpace(stderrBuf.String()))
-		}
-		return nil, err
-	}
-	return parseValidatorResponse(fullOutput.String())
+	return parseValidatorResponse(out)
 }
 
 func buildValidatorResumePrompt(issue *Issue, state conversationState) string {
@@ -1653,34 +1679,12 @@ type ConsolidatedPlan struct {
 // produce el ConsolidatedPlan listo para ser el nuevo body del issue.
 func callConsolidation(agent Agent, issue *Issue, state conversationState, finalResults []validatorResult, progress func(string)) (*ConsolidatedPlan, error) {
 	prompt := buildConsolidationPrompt(issue, state, finalResults)
-	cmd := exec.Command(agent.Binary(), agent.InvokeArgs(prompt)...)
-	stdout, err := cmd.StdoutPipe()
+	rawOut, err := runAgentCmd(agent, prompt, progress, string(agent)+" (consolidación): ")
 	if err != nil {
 		return nil, err
 	}
-	var stderrBuf strings.Builder
-	cmd.Stderr = &stderrBuf
-	if err := cmd.Start(); err != nil {
-		return nil, err
-	}
-	var fullOutput strings.Builder
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		fullOutput.WriteString(line + "\n")
-		if strings.TrimSpace(line) != "" {
-			progress(string(agent) + " (consolidación): " + line)
-		}
-	}
-	if err := cmd.Wait(); err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("exit %d: %s", ee.ExitCode(), strings.TrimSpace(stderrBuf.String()))
-		}
-		return nil, err
-	}
 
-	raw := strings.TrimSpace(fullOutput.String())
+	raw := strings.TrimSpace(rawOut)
 	if strings.HasPrefix(raw, "```") {
 		if nl := strings.Index(raw, "\n"); nl >= 0 {
 			raw = raw[nl+1:]
