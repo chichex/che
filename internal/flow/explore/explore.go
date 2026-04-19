@@ -180,15 +180,15 @@ type Validator struct {
 
 // ParseValidators parsea una lista separada por coma ("codex,gemini",
 // "codex,codex,gemini"). Acepta "none" (o vacío) para desactivar validación.
-// Requiere 2-3 items cuando no es "none".
+// Requiere 1-3 items cuando no es "none".
 func ParseValidators(s string) ([]Validator, error) {
 	s = strings.TrimSpace(s)
 	if s == "" || strings.EqualFold(s, "none") {
 		return nil, nil
 	}
 	parts := strings.Split(s, ",")
-	if len(parts) < 2 || len(parts) > 3 {
-		return nil, fmt.Errorf("validators: need 2-3 items (or `none`), got %d", len(parts))
+	if len(parts) < 1 || len(parts) > 3 {
+		return nil, fmt.Errorf("validators: need 1-3 items (or `none`), got %d", len(parts))
 	}
 	counts := map[Agent]int{}
 	out := make([]Validator, 0, len(parts))

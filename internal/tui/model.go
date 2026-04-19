@@ -40,7 +40,7 @@ const (
 
 // maxValidatorsPerAgent define cuántas instancias del mismo agente se
 // pueden seleccionar. El design permite repetir tipo (ej: codex×2); le
-// ponemos tope 2 para mantener la suma razonable (2-3 validadores en total).
+// ponemos tope 2 para mantener la suma razonable (1-3 validadores en total).
 const maxValidatorsPerAgent = 2
 
 // validatorAgentDescriptions son los textos cortos que se muestran al lado
@@ -625,8 +625,8 @@ func (m Model) handleExploreValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		validators := validatorsFromCounts(m.exploreValidatorCount)
 		total := len(validators)
-		// Reglas: 0 (skip), 2 o 3 son válidos; 1 y 4+ no.
-		if total != 0 && (total < 2 || total > 3) {
+		// Reglas: 0 (skip) o 1-3 son válidos; 4+ no.
+		if total > 3 {
 			return m, nil
 		}
 		return m.startExploreFlow(m.exploreChosenRef, m.exploreChosenAgent, validators)
@@ -1047,14 +1047,14 @@ func renderCheckbox(count int) string {
 }
 
 // renderValidatorTotal imprime el total con un marcador que indica si el
-// count es aceptable (0, 2 o 3) o inválido (1, 4+).
+// count es aceptable (0-3) o inválido (4+).
 func renderValidatorTotal(total int) string {
 	mark := "✓"
 	note := ""
-	valid := total == 0 || total == 2 || total == 3
+	valid := total >= 0 && total <= 3
 	if !valid {
 		mark = "✗"
-		note = "  (necesitás 0 para skipear, o 2-3 para validar)"
+		note = "  (máximo 3 validadores)"
 	} else if total == 0 {
 		note = "  (sin validadores — solo ejecutor)"
 	}

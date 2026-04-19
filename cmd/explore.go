@@ -18,7 +18,7 @@ var exploreCmd = &cobra.Command{
 	Long: `explore toma la referencia a un issue creado por 'che idea' (con label
 ct:plan), lee su body, y profundiza con el agente elegido para devolver
 preguntas abiertas, riesgos y caminos de implementación posibles. El
-análisis se postea como comentario en el issue, 2-3 validadores lo
+análisis se postea como comentario en el issue, 1-3 validadores lo
 revisan en paralelo, y el label transiciona a status:plan (o
 status:awaiting-human si los validadores pidieron input humano).
 
@@ -28,7 +28,7 @@ Formatos aceptados para <issue-ref>:
   che explore owner/repo#42
 
 Agentes disponibles (--agent): opus (default, binario 'claude'), codex, gemini.
-Validadores (--validators): 2-3 separados por coma, pueden repetir tipo
+Validadores (--validators): 1-3 separados por coma, pueden repetir tipo
 (ej: 'codex,gemini' o 'codex,codex,gemini'). Usar 'none' para skipear
 validación (útil para CI/debug).
 
@@ -69,6 +69,6 @@ func init() {
 	exploreCmd.Flags().StringVar(&exploreAgentFlag, "agent", string(explore.DefaultAgent),
 		"ejecutor a usar: opus | codex | gemini")
 	exploreCmd.Flags().StringVar(&exploreValidatorsFlag, "validators", "codex,gemini",
-		"2-3 validadores separados por coma (opus|codex|gemini, pueden repetir), o 'none' para skipear")
+		"1-3 validadores separados por coma (opus|codex|gemini, pueden repetir), o 'none' para skipear")
 	rootCmd.AddCommand(exploreCmd)
 }

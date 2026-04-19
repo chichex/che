@@ -22,8 +22,8 @@ El diseño completo (flujos, diagramas, walkthrough punta a punta, observabilida
 | # | Comando | IA | Qué hace |
 |---|---------|----|----|
 | 01 | `che idea` | sí (Sonnet) | Anota idea, decide split, clasifica, crea issue(s) |
-| 02 | `che explore` | sí (Opus/Codex/Gemini + 2-3 validadores) | Convierte issue en plan, con iteración inline |
-| 03 | `che execute` | sí (Opus/Codex/Gemini + 2-3 validadores) | Implementa en worktree, abre PR, valida contra diff, CI como gate |
+| 02 | `che explore` | sí (Opus/Codex/Gemini + 1-3 validadores) | Convierte issue en plan, con iteración inline |
+| 03 | `che execute` | sí (Opus/Codex/Gemini + 1-3 validadores) | Implementa en worktree, abre PR, valida contra diff, CI como gate |
 | 04 | `che close` | no | Scoring humano + merge del PR + cleanup |
 | 05 | `che eliminar` | no | Descarta idea en cualquier estado |
 

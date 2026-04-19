@@ -548,23 +548,16 @@ func TestExplore_Validators_Invalid(t *testing.T) {
 	env.Invocations().AssertNotCalled(t, "gh")
 }
 
-// TestExplore_Validators_CountOutOfRange: 1 solo validator o 4 → exit 3 (el
-// design requiere 2-3 validadores).
+// TestExplore_Validators_CountOutOfRange: 4+ validadores → exit 3. Un solo
+// validador ahora es válido (1-3 items aceptados).
 func TestExplore_Validators_CountOutOfRange(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
-	r := env.Run("explore", "--validators", "codex", "42")
+	r := env.Run("explore", "--validators", "codex,codex,codex,gemini", "42")
 	if r.ExitCode == 0 {
-		t.Fatalf("expected non-zero exit for single validator, got 0")
-	}
-	harness.AssertContains(t, r.Stderr, "2-3")
-
-	env2 := harness.New(t)
-	r2 := env2.Run("explore", "--validators", "codex,codex,codex,gemini", "42")
-	if r2.ExitCode == 0 {
 		t.Fatalf("expected non-zero exit for 4 validators, got 0")
 	}
-	harness.AssertContains(t, r2.Stderr, "2-3")
+	harness.AssertContains(t, r.Stderr, "1-3")
 }
 
 // TestExplore_Validators_InvalidResponse_Exit3: un validator devuelve un
