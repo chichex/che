@@ -308,6 +308,84 @@ func TestWaitValidators_AllFinish(t *testing.T) {
 	}
 }
 
+// TestHasRepoScope_RepoPresent: scope 'repo' → pass.
+func TestHasRepoScope_RepoPresent(t *testing.T) {
+	out := "github.com\n  - Token: gho_xxx\n  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'\n"
+	if !hasRepoScope(out) {
+		t.Fatalf("expected repo scope to be detected in:\n%s", out)
+	}
+}
+
+// TestHasRepoScope_PublicRepoPresent: scope 'public_repo' → pass.
+func TestHasRepoScope_PublicRepoPresent(t *testing.T) {
+	out := "github.com\n  - Token scopes: 'gist', 'public_repo'\n"
+	if !hasRepoScope(out) {
+		t.Fatalf("expected public_repo scope to be detected in:\n%s", out)
+	}
+}
+
+// TestHasRepoScope_OnlyReadScopes: sin repo/public_repo, falla.
+func TestHasRepoScope_OnlyReadScopes(t *testing.T) {
+	out := "github.com\n  - Token scopes: 'read:org', 'read:user', 'repo:status'\n"
+	if hasRepoScope(out) {
+		t.Fatalf("unexpectedly accepted scopes without repo:\n%s", out)
+	}
+}
+
+// TestHasRepoScope_EmptyOutput: output vacío → falla.
+func TestHasRepoScope_EmptyOutput(t *testing.T) {
+	if hasRepoScope("") {
+		t.Fatal("expected false for empty output")
+	}
+}
+
+// TestPrecheckPRScopes_FakeGH_Pass: integración liviana — scripteamos un gh
+// fake que devuelve scopes válidos. precheckPRScopes debe pasar.
+func TestPrecheckPRScopes_FakeGH_Pass(t *testing.T) {
+	tmp := t.TempDir()
+	fakeGH := tmp + "/gh"
+	script := `#!/bin/sh
+echo "github.com"
+echo "  - Token: gho_xxx"
+echo "  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'"
+`
+	if err := writeExecutable(fakeGH, script); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	oldPath := getEnv("PATH")
+	setEnv("PATH", tmp+":"+oldPath)
+	t.Cleanup(func() { setEnv("PATH", oldPath) })
+
+	if err := precheckPRScopes(); err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+}
+
+// TestPrecheckPRScopes_FakeGH_MissingScope: gh fake sin repo/public_repo →
+// error accionable.
+func TestPrecheckPRScopes_FakeGH_MissingScope(t *testing.T) {
+	tmp := t.TempDir()
+	fakeGH := tmp + "/gh"
+	script := `#!/bin/sh
+echo "github.com"
+echo "  - Token scopes: 'read:org', 'repo:status'"
+`
+	if err := writeExecutable(fakeGH, script); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	oldPath := getEnv("PATH")
+	setEnv("PATH", tmp+":"+oldPath)
+	t.Cleanup(func() { setEnv("PATH", oldPath) })
+
+	err := precheckPRScopes()
+	if err == nil {
+		t.Fatal("expected error on missing scope")
+	}
+	if !strings.Contains(err.Error(), "gh auth refresh -s repo") {
+		t.Errorf("expected actionable hint, got: %v", err)
+	}
+}
+
 // TestFindOpenPRForBranch_MultipleMatches: si gh pr list devuelve >1 PRs,
 // findOpenPRForBranch debe fallar con un mensaje accionable en vez de
 // agarrar el primero silenciosamente. Usamos un PATH temporal con un

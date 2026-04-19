@@ -504,15 +504,55 @@ func precheckGhAuth() error {
 	return nil
 }
 
-// precheckPRScopes verifica que el token de gh tenga permisos para listar
-// PRs (proxy razonable para "puede crear PRs"). Un fallo acá es accionable:
-// el usuario sabe que tiene que `gh auth refresh -s repo`.
+// precheckPRScopes verifica que el token de gh tenga un scope que permita
+// crear PRs: 'repo' (privados + públicos) o 'public_repo' (sólo públicos).
+// El chequeo se hace parseando `gh auth status -t`, que imprime el token y
+// los scopes concedidos en stderr. Antes se usaba `gh pr list --limit 1`,
+// que sólo requiere scope read — un token read-only pasaba el precheck y
+// fallaba tarde en `gh pr create`, después de gastar tokens LLM y pushear.
 func precheckPRScopes() error {
-	cmd := exec.Command("gh", "pr", "list", "--limit", "1", "--json", "number")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("gh pr list (scope check): %s — probá `gh auth refresh -s repo`", strings.TrimSpace(string(out)))
+	cmd := exec.Command("gh", "auth", "status", "-t")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gh auth status: %s — probá `gh auth login`", strings.TrimSpace(string(out)))
+	}
+	if !hasRepoScope(string(out)) {
+		return fmt.Errorf("el token de gh no tiene scope 'repo' o 'public_repo'; ejecutá `gh auth refresh -s repo` y reintentá")
 	}
 	return nil
+}
+
+// hasRepoScope busca 'repo' o 'public_repo' en la lista de scopes que
+// imprime `gh auth status -t`. La línea típica es:
+//
+//	- Token scopes: 'gist', 'read:org', 'repo', 'workflow'
+//
+// Matcheamos con word boundaries para no confundir 'repo' con 'repo:status'
+// (que es un scope menos privilegiado).
+func hasRepoScope(out string) bool {
+	// Normalizamos: buscamos líneas que contengan "Token scopes:" o
+	// "scopes:" (el formato exacto puede variar entre versiones de gh).
+	for _, line := range strings.Split(out, "\n") {
+		lower := strings.ToLower(line)
+		if !strings.Contains(lower, "scopes") {
+			continue
+		}
+		// Parseamos los scopes individuales separados por coma.
+		// Cada scope viene como 'nombre' (con comillas). Limpiamos las
+		// comillas y chequeamos igualdad exacta.
+		for _, raw := range strings.Split(line, ",") {
+			tok := strings.TrimSpace(raw)
+			tok = strings.Trim(tok, "'\"")
+			// quedarnos con el pedacito después del último ":" o espacio
+			if idx := strings.LastIndexAny(tok, ": "); idx >= 0 {
+				tok = strings.Trim(tok[idx+1:], "'\"")
+			}
+			if tok == "repo" || tok == "public_repo" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ---- issue fetch / gate ----

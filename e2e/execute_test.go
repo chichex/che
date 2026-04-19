@@ -398,22 +398,13 @@ func runIn(t *testing.T, dir, bin string, args ...string) {
 	}
 }
 
-// scriptExecutePrechecks scriptea los 3 prechecks: git remote, gh auth, gh pr
-// list (scope check). Cuando se usa con un repo git real, NO hay que
-// scriptear git — es el real del sistema.
+// scriptExecutePrechecks scriptea los prechecks: gh auth status (auth) y gh
+// auth status -t (scope check). Cuando se usa con un repo git real, NO hay
+// que scriptear git — es el real del sistema.
 func scriptExecutePrechecks(env *harness.Env) {
-	// git remote get-url origin → lo tira git real del sistema (tenemos
-	// origin agregado en setupExecuteEnv). Pero precheckGitHubRemote exige
-	// que la URL contenga "github.com" — el remote es un path bare. Usamos
-	// el fake git solo para esa llamada. Pero si ya quitamos el fake…
-	// Solución: agregamos un remote falso "github.com" reescribiendo el
-	// origin antes de cada test. Mejor: modificamos el helper para que el
-	// remote apunte a un URL github.com + el push usa otro remote.
-	//
-	// Por simplicidad, redirigimos solo `git remote get-url origin`
-	// reinyectando el fake git SOLO para ese call pattern, y todo lo demás
-	// queda en el git real. Pero no podemos mezclar así — el fake es un
-	// único binario. Alternativa: cambiar el origin URL después del init.
-	env.ExpectGh(`^auth status`).RespondStdout("Logged in as acme\n", 0)
-	env.ExpectGh(`^pr list --limit 1`).RespondStdout("[]\n", 0)
+	// Primer call: auth status (sin -t). Chequeo de login.
+	env.ExpectGh(`^auth status$`).Consumable().RespondStdout("Logged in as acme\n", 0)
+	// Segundo call: auth status -t. Incluye scopes válidos.
+	env.ExpectGh(`^auth status -t`).Consumable().RespondStdout(
+		"github.com\n  - Token: gho_xxx\n  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'\n", 0)
 }
