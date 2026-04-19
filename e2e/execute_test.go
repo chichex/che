@@ -290,7 +290,54 @@ func TestExecute_NoChanges_Rollback(t *testing.T) {
 	if r.ExitCode != 2 {
 		t.Fatalf("expected exit 2, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
-	harness.AssertContains(t, r.Stderr, "sin cambios")
+	harness.AssertContains(t, r.Stderr, "no se generaron cambios")
+	harness.AssertContains(t, r.Stderr, "no hay PR previo")
+}
+
+// TestExecute_NoChanges_ExistingPR_Rollback: claude no toca archivos pero
+// hay un PR abierto; NO debe transicionar a executed/awaiting-human ni
+// refrescar el PR — rollback a status:plan y mensaje diferenciado.
+func TestExecute_NoChanges_ExistingPR_Rollback(t *testing.T) {
+	env := setupExecuteEnv(t)
+	scriptExecutePrechecks(env)
+	env.ExpectGh(`^issue view 42`).Consumable().RespondStdoutFromFixture("execute/gh_issue_view_ready.json", 0)
+	env.ExpectGh(`^issue view 42`).Consumable().RespondStdoutFromFixture("execute/gh_issue_view_locked_executing.json", 0)
+	// PR abierto existente.
+	env.ExpectGh(`^pr list --head exec/42-`).RespondStdout(
+		`[{"url":"https://github.com/acme/demo/pull/7","number":7}]`, 0)
+
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	// Esperamos 2 edits: lock + rollback. NO debería haber un edit que
+	// agregue status:executed.
+	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0)
+
+	// Claude no toca archivos.
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior ejecutando`).
+		RespondStdout("noop\n", 0)
+
+	r := env.Run("execute", "--validators", "none", "42")
+	if r.ExitCode != 2 {
+		t.Fatalf("expected exit 2, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "no se generaron cambios")
+	harness.AssertContains(t, r.Stderr, "PR no actualizado")
+
+	inv := env.Invocations()
+	// No debe haber gh pr create (había uno existente igual).
+	if creates := inv.FindCalls("gh", "pr", "create"); len(creates) != 0 {
+		t.Fatalf("expected 0 gh pr create, got %d", len(creates))
+	}
+	// Ninguno de los edits debe agregar status:executed (chequeo consecutivo).
+	edits := inv.FindCalls("gh", "issue", "edit", "42")
+	for _, e := range edits {
+		for i := 0; i+1 < len(e.Args); i++ {
+			if e.Args[i] == "--add-label" && e.Args[i+1] == "status:executed" {
+				t.Fatalf("rogue transition to status:executed: %v", e.Args)
+			}
+		}
+	}
 }
 
 // TestExecute_ListCandidates_FiltersAwaiting: integration-style — esta prueba

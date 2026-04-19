@@ -340,23 +340,31 @@ func Run(issueRef string, opts Opts) ExitCode {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
-	if !hasChanges && existingPR == "" {
-		fmt.Fprintf(stderr, "error: agente terminó sin cambios en el worktree y no hay PR existente — nada que commitear\n")
+	if !hasChanges {
+		// Sin cambios, no importa si hay PR existente o no: no tenemos
+		// nada que commitear ni que refrescar. NO transicionamos a
+		// executed + awaiting-human (eso engañaría al operador). Dejamos
+		// que el defer revierta executing → plan así el issue queda
+		// disponible para otro intento. Mensaje diferenciado según haya
+		// PR previo o no.
+		if existingPR != "" {
+			fmt.Fprintf(stderr, "error: no se generaron cambios en este run; PR no actualizado (%s)\n", existingPR)
+		} else {
+			fmt.Fprintln(stderr, "error: no se generaron cambios en este run; no hay PR previo")
+		}
 		return ExitRetry
 	}
 
-	if hasChanges {
-		progress("armando commit en el worktree…")
-		if err := commitAll(wt.Path, fmt.Sprintf("feat(#%d): %s\n\nCloses #%d", issue.Number, issue.Title, issue.Number)); err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			return ExitRetry
-		}
+	progress("armando commit en el worktree…")
+	if err := commitAll(wt.Path, fmt.Sprintf("feat(#%d): %s\n\nCloses #%d", issue.Number, issue.Title, issue.Number)); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
+	}
 
-		progress("pusheando branch " + wt.Branch + "…")
-		if err := pushBranch(wt.Path, wt.Branch); err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
-			return ExitRetry
-		}
+	progress("pusheando branch " + wt.Branch + "…")
+	if err := pushBranch(wt.Path, wt.Branch); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
 	}
 
 	var prURL string
