@@ -1373,15 +1373,11 @@ type extraQuestion struct {
 
 // collectValidatorQuestions junta los findings con needs_human=true de los
 // validadores y descarta los que ya aparecen cubiertos por las preguntas del
-// plan (heurística: substring en cualquier dirección tras normalizar).
-// También filtra findings que son meta-descripciones ("las 3 preguntas
-// bloqueantes definen...") identificables porque no mencionan conceptos
-// concretos del dominio.
+// plan. La detección usa 3 heurísticas en cascada porque los validadores
+// suelen "citar" o "glosar" las preguntas del plan en vez de repetirlas tal
+// cual — con contains simple no las detectábamos y terminaban duplicadas
+// debajo de "Observaciones adicionales".
 func collectValidatorQuestions(results []validatorResult, planQs []Question) []extraQuestion {
-	normPlan := make([]string, 0, len(planQs))
-	for _, q := range planQs {
-		normPlan = append(normPlan, normalizeQuestion(q.Q))
-	}
 	seen := map[string]bool{}
 	var out []extraQuestion
 	for _, r := range results {
@@ -1400,16 +1396,7 @@ func collectValidatorQuestions(results []validatorResult, planQs []Question) []e
 			if norm == "" || seen[norm] {
 				continue
 			}
-			// Dedupe vs plan: si el texto contiene o está contenido en alguna
-			// pregunta del plan, lo consideramos duplicado.
-			covered := false
-			for _, p := range normPlan {
-				if p != "" && (strings.Contains(p, norm) || strings.Contains(norm, p)) {
-					covered = true
-					break
-				}
-			}
-			if covered {
+			if coversSamePlanQuestion(f.Issue, norm, planQs) {
 				continue
 			}
 			seen[norm] = true
@@ -1417,6 +1404,58 @@ func collectValidatorQuestions(results []validatorResult, planQs []Question) []e
 		}
 	}
 	return out
+}
+
+// coversSamePlanQuestion aplica 3 heurísticas para decidir si un finding
+// del validador refiere a una pregunta del plan ya listada:
+//
+//  1. Contains exacto en cualquier dirección (caso trivial — cuando el
+//     validador copió la pregunta textualmente).
+//  2. Quote match: si el validador puso una sub-pregunta entre comillas
+//     (ej. "'¿Cuál es el input?' es decisión de producto..."), y los
+//     tokens significativos de esa comilla son un subconjunto de alguna
+//     pregunta del plan → cubierta.
+//  3. Meta + overlap: si el finding usa una frase típica de "decisión de
+//     producto" / "escalar al humano" / "parte del modelo" y comparte
+//     3+ tokens significativos con alguna pregunta del plan → cubierta.
+//
+// La lógica es conservadora: si el validador aporta genuinamente una
+// pregunta nueva que NO comparte tokens centrales ni se parafrasea como
+// meta-observación de otra, pasa a "Observaciones adicionales".
+func coversSamePlanQuestion(findingText, findingNorm string, planQs []Question) bool {
+	for _, pq := range planQs {
+		pqNorm := normalizeQuestion(pq.Q)
+		if pqNorm != "" && (strings.Contains(pqNorm, findingNorm) || strings.Contains(findingNorm, pqNorm)) {
+			return true
+		}
+	}
+	findingSig := significantTokens(findingNorm)
+
+	// (2) Quote match.
+	for _, quoted := range extractQuotedTexts(findingText) {
+		qTokens := significantTokens(normalizeQuestion(quoted))
+		if len(qTokens) < 2 {
+			continue
+		}
+		for _, pq := range planQs {
+			planSet := toTokenSet(significantTokens(normalizeQuestion(pq.Q)))
+			if isTokenSubset(qTokens, planSet) {
+				return true
+			}
+		}
+	}
+
+	// (3) Meta phrase + token overlap.
+	if containsMetaPhrase(findingNorm) {
+		for _, pq := range planQs {
+			planSig := significantTokens(normalizeQuestion(pq.Q))
+			if countCommonTokens(findingSig, planSig) >= 3 {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // normalizeQuestion baja a lowercase, quita signos de puntuación y colapsa
@@ -1431,10 +1470,146 @@ func normalizeQuestion(s string) string {
 	return strings.TrimSpace(s)
 }
 
+// stopwordsES son palabras vacías frecuentes en español que no aportan
+// información sobre el tema de una pregunta. Se usan solo para heurísticas
+// de similitud (dedupe de preguntas de validators); no afectan
+// normalización ni matching en otros lugares.
+var stopwordsES = map[string]bool{
+	"a": true, "al": true, "ante": true, "bajo": true, "cabe": true, "con": true,
+	"contra": true, "cual": true, "cuales": true, "cuando": true, "de": true,
+	"del": true, "desde": true, "donde": true, "durante": true, "e": true, "el": true,
+	"en": true, "entre": true, "era": true, "eran": true, "es": true, "esa": true,
+	"esas": true, "ese": true, "eso": true, "esos": true, "esta": true, "estas": true,
+	"este": true, "esto": true, "estos": true, "ha": true, "han": true, "hasta": true,
+	"hay": true, "la": true, "las": true, "le": true, "les": true, "lo": true, "los": true,
+	"mas": true, "me": true, "mi": true, "mis": true, "muy": true, "ni": true, "no": true,
+	"nos": true, "o": true, "para": true, "pero": true, "por": true, "porque": true,
+	"que": true, "quien": true, "quienes": true, "se": true, "segun": true, "ser": true,
+	"si": true, "sin": true, "sobre": true, "son": true, "su": true, "sus": true,
+	"te": true, "tras": true, "tu": true, "tus": true, "u": true, "un": true, "una": true,
+	"uno": true, "unos": true, "y": true, "ya": true,
+}
+
+// significantTokens tokeniza el texto normalizado y saca stopwords + palabras
+// de 1-2 letras. Devuelve tokens en orden de aparición (con repeticiones).
+func significantTokens(normalized string) []string {
+	if normalized == "" {
+		return nil
+	}
+	fields := strings.Fields(normalized)
+	out := make([]string, 0, len(fields))
+	for _, w := range fields {
+		if len(w) < 3 {
+			continue
+		}
+		if stopwordsES[w] {
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+// tokenRoot devuelve un "stem" aproximado del token: los primeros 5
+// caracteres si el token es suficientemente largo. Es un stemmer naive pero
+// suficiente para matchear "label"/"labels" y "transición"/"transiciona"
+// como el mismo concepto sin meter una dependencia de stemming real.
+func tokenRoot(t string) string {
+	if len(t) <= 5 {
+		return t
+	}
+	return t[:5]
+}
+
+// toTokenSet convierte un slice de tokens a un set indexado por tokenRoot,
+// así el matching es laxo respecto a flexiones morfológicas simples.
+func toTokenSet(tokens []string) map[string]bool {
+	m := make(map[string]bool, len(tokens))
+	for _, t := range tokens {
+		m[tokenRoot(t)] = true
+	}
+	return m
+}
+
+// isTokenSubset devuelve true si todos los tokens del subset aparecen en el
+// set (comparando por root). Requiere len(subset) >= 2 para evitar matches
+// triviales.
+func isTokenSubset(subset []string, set map[string]bool) bool {
+	if len(subset) < 2 {
+		return false
+	}
+	for _, t := range subset {
+		if !set[tokenRoot(t)] {
+			return false
+		}
+	}
+	return true
+}
+
+// countCommonTokens cuenta cuántos roots únicos de a aparecen en b.
+func countCommonTokens(a, b []string) int {
+	bSet := toTokenSet(b)
+	seen := map[string]bool{}
+	n := 0
+	for _, t := range a {
+		r := tokenRoot(t)
+		if seen[r] {
+			continue
+		}
+		if bSet[r] {
+			n++
+			seen[r] = true
+		}
+	}
+	return n
+}
+
+// extractQuotedTexts extrae los segmentos entre comillas simples, dobles o
+// angulares. Se usan para detectar cuando un validador cita la pregunta del
+// plan para introducir su observación.
+var quotedRe = regexp.MustCompile(`['"«»‘’“”](.+?)['"«»‘’“”]`)
+
+func extractQuotedTexts(s string) []string {
+	matches := quotedRe.FindAllStringSubmatch(s, -1)
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if strings.TrimSpace(m[1]) != "" {
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
+// metaPhrases son frases tipicas cuando un validador glosa/paraphrasea una
+// pregunta del plan diciendo "esto es de producto" en vez de plantear algo
+// nuevo. Se usan como señal de que el finding probablemente es eco.
+var metaPhrases = []string{
+	"decision de producto",
+	"decisión de producto",
+	"escalar al humano",
+	"escalar al usuario",
+	"producto del dueño",
+	"producto del cli",
+	"parte del modelo",
+	"modelo de estado",
+	"mantener como blocker",
+	"requerir decision del",
+	"decision del dueño",
+}
+
+func containsMetaPhrase(normalized string) bool {
+	for _, p := range metaPhrases {
+		if strings.Contains(normalized, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // isMetaFinding detecta cuando un finding del validador es una
-// meta-descripción ("las 3 preguntas bloqueantes...") en lugar de una
-// pregunta concreta de producto. Heurística liviana: empieza con
-// demostrativos o habla genéricamente de preguntas.
+// meta-descripción total ("las 3 preguntas bloqueantes...") en lugar de un
+// gap concreto. Estos findings nunca aportan info nueva, van directo al
+// descarte antes de cualquier dedupe contra el plan.
 func isMetaFinding(s string) bool {
 	s = strings.ToLower(strings.TrimSpace(s))
 	prefixes := []string{
@@ -1448,8 +1623,6 @@ func isMetaFinding(s string) bool {
 			return true
 		}
 	}
-	// También descartamos frases muy largas que mencionen "preguntas" como
-	// tema en vez de plantear una (típico: "las N preguntas definen...").
 	if strings.Contains(s, "preguntas bloqueantes") || strings.Contains(s, "preguntas que definen") {
 		return true
 	}
