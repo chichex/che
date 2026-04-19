@@ -351,10 +351,13 @@ func TestExecute_NoChanges_ExistingPR_Rollback(t *testing.T) {
 
 // setupExecuteEnv prepara un repo git real en env.RepoDir + quita el fake de
 // git (dejamos el git real del sistema para que worktree y commits funcionen).
+// El env var CHE_EXEC_SKIP_FETCH=1 salta el `git fetch origin main` que
+// ahora es obligatorio — los tests usan bare remotes locales sin red.
 func setupExecuteEnv(t *testing.T) *harness.Env {
 	t.Helper()
 	env := harness.New(t)
 	env.RemoveFake("git")
+	env.SetEnv("CHE_EXEC_SKIP_FETCH", "1")
 
 	// init repo + commit inicial.
 	runIn(t, env.RepoDir, "git", "init", "-q", "-b", "main")

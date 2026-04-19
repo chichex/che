@@ -2,6 +2,7 @@ package execute
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -94,14 +95,38 @@ func CreateWorktree(opts WorktreeOpts) (*Worktree, error) {
 		return &Worktree{Path: path, Branch: branch}, nil
 	}
 
-	// Worktree no existe. Primero fetch de la base para tener la referencia
-	// actualizada. Si hay remote `origin`, actualizamos; si no, no rompemos
-	// (puede ser un repo local sin remote — caso de tests).
-	_ = runGit(opts.RepoRoot, "fetch", "origin", base)
+	// Worktree no existe. Fetch obligatorio de la base desde origin para no
+	// partir de un main local stale (si la branch nueva se crea a partir de
+	// un main viejo, el PR queda con commits obsoletos). Override con
+	// CHE_EXEC_SKIP_FETCH=1 para tests e2e con bare remotes locales.
+	skipFetch := os.Getenv("CHE_EXEC_SKIP_FETCH") == "1"
+	if !skipFetch {
+		if err := runGit(opts.RepoRoot, "fetch", "origin", base); err != nil {
+			return nil, fmt.Errorf("git fetch origin %s: %w — para tests con bare remotes locales setear CHE_EXEC_SKIP_FETCH=1", base, err)
+		}
+	}
 
 	branchExists, err := branchExists(opts.RepoRoot, branch)
 	if err != nil {
 		return nil, err
+	}
+
+	// Ref desde la que partir para nuevas branches: preferimos origin/<base>
+	// (el estado real del remote tras el fetch) antes que el <base> local,
+	// que puede estar stale. Si no hay origin/<base> (repo sin ese ref),
+	// fallback al local.
+	startRef := "origin/" + base
+	hasRemoteBase, refErr := hasRef(opts.RepoRoot, startRef)
+	if refErr != nil {
+		return nil, refErr
+	}
+	if !hasRemoteBase {
+		// Si el usuario pidió saltar el fetch (tests), no emitimos el
+		// warning — es esperable que origin/<base> no exista.
+		if !skipFetch {
+			fmt.Fprintf(os.Stderr, "warning: %s no existe, cayendo a %s local (puede estar stale)\n", startRef, base)
+		}
+		startRef = base
 	}
 
 	if branchExists {
@@ -110,12 +135,26 @@ func CreateWorktree(opts WorktreeOpts) (*Worktree, error) {
 			return nil, fmt.Errorf("git worktree add (existing branch): %w", err)
 		}
 	} else {
-		if err := runGit(opts.RepoRoot, "worktree", "add", "-b", branch, path, base); err != nil {
+		if err := runGit(opts.RepoRoot, "worktree", "add", "-b", branch, path, startRef); err != nil {
 			return nil, fmt.Errorf("git worktree add: %w", err)
 		}
 	}
 
 	return &Worktree{Path: path, Branch: branch}, nil
+}
+
+// hasRef devuelve true si la referencia git existe en el repo.
+func hasRef(repoRoot, ref string) (bool, error) {
+	cmd := exec.Command("git", "-C", repoRoot, "rev-parse", "--verify", "--quiet", ref)
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			if ee.ExitCode() == 1 {
+				return false, nil
+			}
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // Cleanup elimina el worktree y (si keepBranch=false) borra la branch local.

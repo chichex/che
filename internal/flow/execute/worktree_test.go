@@ -29,9 +29,11 @@ func TestSlugify(t *testing.T) {
 }
 
 // setupTempRepo inicializa un repo git vacío con un commit inicial en main y
-// un remote local que apunta al mismo repo, devolviendo la ruta raíz.
+// un remote local que apunta al mismo repo, devolviendo la ruta raíz. Setea
+// CHE_EXEC_SKIP_FETCH=1 porque estos tests no tienen origin configurado.
 func setupTempRepo(t *testing.T) string {
 	t.Helper()
+	t.Setenv("CHE_EXEC_SKIP_FETCH", "1")
 	root := t.TempDir()
 	runOrFail(t, root, "git", "init", "-q", "-b", "main")
 	runOrFail(t, root, "git", "config", "user.email", "test@example.com")
@@ -140,3 +142,87 @@ func TestCreateWorktree_InvalidInputs(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateWorktree_FetchesOriginMainAndUsesRemoteRef: sin
+// CHE_EXEC_SKIP_FETCH, CreateWorktree debe hacer `git fetch origin main`
+// y crear la branch desde `origin/main` (no desde `main` local). Armamos
+// un setup con un bare remote local y un main remoto que tiene un commit
+// que no está en el main local — la branch nueva debería apuntar al head
+// remoto, no al local.
+func TestCreateWorktree_FetchesOriginMainAndUsesRemoteRef(t *testing.T) {
+	// No seteamos CHE_EXEC_SKIP_FETCH — queremos que el fetch ocurra.
+	// Unset defensivo por si el parent suite lo seteó.
+	t.Setenv("CHE_EXEC_SKIP_FETCH", "")
+
+	base := t.TempDir()
+	// Bare remote.
+	bare := filepath.Join(base, "origin.git")
+	runOrFail(t, "", "git", "init", "--bare", "-b", "main", "-q", bare)
+
+	// Clone A: inicializamos sin clone porque bare está vacío — usamos
+	// un repo standalone + remote add + push.
+	cloneA := filepath.Join(base, "a")
+	runOrFail(t, "", "git", "init", "-b", "main", "-q", cloneA)
+	runOrFail(t, cloneA, "git", "config", "user.email", "a@example.com")
+	runOrFail(t, cloneA, "git", "config", "user.name", "A")
+	runOrFail(t, cloneA, "git", "remote", "add", "origin", bare)
+	if err := os.WriteFile(filepath.Join(cloneA, "a.txt"), []byte("a1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runOrFail(t, cloneA, "git", "add", "a.txt")
+	runOrFail(t, cloneA, "git", "commit", "-q", "-m", "a1")
+	runOrFail(t, cloneA, "git", "push", "-q", "-u", "origin", "main")
+
+	// Repo bajo test: clone del bare, luego añadimos un commit remoto desde A
+	// que el repo local aún no ha fetcheado.
+	root := filepath.Join(base, "repo")
+	runOrFail(t, "", "git", "clone", "-q", bare, root)
+	runOrFail(t, root, "git", "config", "user.email", "test@example.com")
+	runOrFail(t, root, "git", "config", "user.name", "Test")
+
+	// Nuevo commit en A → push al bare. El repo local (root) aún no lo tiene.
+	if err := os.WriteFile(filepath.Join(cloneA, "a.txt"), []byte("a2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runOrFail(t, cloneA, "git", "commit", "-aq", "-m", "a2-remote")
+	runOrFail(t, cloneA, "git", "push", "-q", "origin", "main")
+
+	// Pre-check: el main local y el origin/main local (pre-fetch) apuntan
+	// al commit viejo (a1) — porque root fue clonado antes del segundo
+	// push desde A. El bare ya tiene a2.
+	localHead := mustRevParse(t, root, "HEAD")
+	remoteCommitInBare := mustRevParse(t, bare, "refs/heads/main")
+	if localHead == remoteCommitInBare {
+		t.Fatal("setup inválido: local y bare apuntan al mismo commit")
+	}
+
+	// CreateWorktree debe hacer fetch + usar origin/main (que ahora tiene a2).
+	wt, err := CreateWorktree(WorktreeOpts{
+		RepoRoot: root, IssueNum: 42, Slug: "fetch-test",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	defer wt.Cleanup(root, false)
+
+	// La branch debe apuntar al mismo commit que origin/main (el nuevo a2).
+	branchHead := mustRevParse(t, root, wt.Branch)
+	remoteHead := mustRevParse(t, root, "origin/main")
+	if branchHead != remoteHead {
+		t.Errorf("branch head %s != origin/main head %s — indicates the worktree was created from stale local main", branchHead, remoteHead)
+	}
+	if branchHead == localHead {
+		t.Errorf("branch head matches stale local main (a1) instead of origin/main (a2)")
+	}
+}
+
+func mustRevParse(t *testing.T, dir, ref string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", dir, "rev-parse", ref)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse %s: %v\n%s", ref, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
