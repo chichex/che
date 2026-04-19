@@ -2,10 +2,19 @@ package execute
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// writeExecutable escribe un script y lo marca ejecutable (0o755).
+func writeExecutable(path, content string) error {
+	return os.WriteFile(path, []byte(content), 0o755)
+}
+
+func getEnv(k string) string  { return os.Getenv(k) }
+func setEnv(k, v string) error { return os.Setenv(k, v) }
 
 func TestParseConsolidatedPlan_FullBody(t *testing.T) {
 	body := `## Plan consolidado (post-exploración)
@@ -296,6 +305,63 @@ func TestWaitValidators_AllFinish(t *testing.T) {
 	}
 	if strings.Contains(out, "timeout:") {
 		t.Errorf("unexpected timeout message: %s", out)
+	}
+}
+
+// TestFindOpenPRForBranch_MultipleMatches: si gh pr list devuelve >1 PRs,
+// findOpenPRForBranch debe fallar con un mensaje accionable en vez de
+// agarrar el primero silenciosamente. Usamos un PATH temporal con un
+// script shell que simula gh — es más barato que armar un harness acá.
+func TestFindOpenPRForBranch_MultipleMatches(t *testing.T) {
+	tmp := t.TempDir()
+	fakeGH := tmp + "/gh"
+	script := `#!/bin/sh
+cat <<EOF
+[{"url":"https://github.com/acme/demo/pull/10","number":10},{"url":"https://github.com/acme/demo/pull/11","number":11}]
+EOF
+`
+	if err := writeExecutable(fakeGH, script); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	// Prepend tmp al PATH.
+	oldPath := getEnv("PATH")
+	setEnv("PATH", tmp+":"+oldPath)
+	t.Cleanup(func() { setEnv("PATH", oldPath) })
+
+	_, err := findOpenPRForBranch("exec/42-foo")
+	if err == nil {
+		t.Fatalf("expected error on multiple matches")
+	}
+	if !strings.Contains(err.Error(), "múltiples PRs") {
+		t.Errorf("wrong error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "pull/10") || !strings.Contains(err.Error(), "pull/11") {
+		t.Errorf("error should include both URLs: %v", err)
+	}
+}
+
+// TestFindOpenPRForBranch_SingleMatch: caso feliz — 1 PR, devuelve la URL.
+func TestFindOpenPRForBranch_SingleMatch(t *testing.T) {
+	tmp := t.TempDir()
+	fakeGH := tmp + "/gh"
+	script := `#!/bin/sh
+cat <<EOF
+[{"url":"https://github.com/acme/demo/pull/7","number":7}]
+EOF
+`
+	if err := writeExecutable(fakeGH, script); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	oldPath := getEnv("PATH")
+	setEnv("PATH", tmp+":"+oldPath)
+	t.Cleanup(func() { setEnv("PATH", oldPath) })
+
+	got, err := findOpenPRForBranch("exec/42-foo")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "https://github.com/acme/demo/pull/7" {
+		t.Errorf("unexpected URL: %q", got)
 	}
 }
 

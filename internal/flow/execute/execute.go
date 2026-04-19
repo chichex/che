@@ -878,11 +878,17 @@ func runGitIn(dir string, args ...string) error {
 
 // ---- PR ops ----
 
-// findOpenPRForBranch busca un PR abierto cuyo head-branch sea el dado.
-// Devuelve la URL si lo encuentra, "" si no. Cualquier error de gh (red,
-// permisos) se propaga.
+// findOpenPRForBranch busca un PR abierto (contra main) cuyo head-branch sea
+// el dado. Devuelve la URL si lo encuentra, "" si no. Si hay más de uno,
+// devuelve error accionable: el caso es suficientemente raro como para
+// frenar en vez de agarrar uno silenciosamente. Filtrar por --base main
+// evita falsos positivos si la branch tiene un PR abierto contra otra base.
 func findOpenPRForBranch(branch string) (string, error) {
-	cmd := exec.Command("gh", "pr", "list", "--head", branch, "--state", "open", "--json", "url,number")
+	cmd := exec.Command("gh", "pr", "list",
+		"--head", branch,
+		"--base", "main",
+		"--state", "open",
+		"--json", "url,number")
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -899,6 +905,13 @@ func findOpenPRForBranch(branch string) (string, error) {
 	}
 	if len(prs) == 0 {
 		return "", nil
+	}
+	if len(prs) > 1 {
+		urls := make([]string, 0, len(prs))
+		for _, p := range prs {
+			urls = append(urls, p.URL)
+		}
+		return "", fmt.Errorf("múltiples PRs abiertos encontrados para head-branch %s (PRs: %v), resolver manualmente", branch, urls)
 	}
 	return prs[0].URL, nil
 }
