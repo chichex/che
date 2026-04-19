@@ -186,11 +186,15 @@ func TestExecute_Idempotency_UpdatesExistingPR(t *testing.T) {
 }
 
 // TestExecute_AgentFails_Rollback: claude falla → worktree limpio + label
-// vuelve a status:plan.
+// vuelve a status:plan. El defer re-fetchea el issue (ownership-aware) y ve
+// que sigue con status:executing, entonces aplica el rollback.
 func TestExecute_AgentFails_Rollback(t *testing.T) {
 	env := setupExecuteEnv(t)
 	scriptExecutePrechecks(env)
-	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("execute/gh_issue_view_ready.json", 0)
+	// 1er issue view: previo al lock (status:plan). 2do: durante rollback
+	// (status:executing — el lock sigue siendo nuestro, rollback procede).
+	env.ExpectGh(`^issue view 42`).Consumable().RespondStdoutFromFixture("execute/gh_issue_view_ready.json", 0)
+	env.ExpectGh(`^issue view 42`).Consumable().RespondStdoutFromFixture("execute/gh_issue_view_locked_executing.json", 0)
 	env.ExpectGh(`^pr list --head exec/42-`).RespondStdout("[]\n", 0)
 
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
@@ -218,12 +222,59 @@ func TestExecute_AgentFails_Rollback(t *testing.T) {
 	edits[1].AssertArgsContain(t, "--add-label", "status:plan")
 }
 
+// TestExecute_AgentFails_RollbackSkippedIfLockLost: claude falla y cuando
+// el defer re-fetchea el issue, ya no tiene status:executing (otra
+// instancia transitó). El rollback NO debe aplicar el label transition.
+func TestExecute_AgentFails_RollbackSkippedIfLockLost(t *testing.T) {
+	env := setupExecuteEnv(t)
+	scriptExecutePrechecks(env)
+	// 1er issue view: status:plan (para gate). 2do issue view (en rollback):
+	// ya no tiene status:executing (otra instancia se lo robó).
+	env.ExpectGh(`^issue view 42`).Consumable().RespondStdoutFromFixture("execute/gh_issue_view_ready.json", 0)
+	env.ExpectGh(`^issue view 42`).Consumable().RespondStdoutFromFixture("execute/gh_issue_view_no_longer_executing.json", 0)
+	env.ExpectGh(`^pr list --head exec/42-`).RespondStdout("[]\n", 0)
+
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	// Solo el 1er edit (lock) debería ocurrir; el 2do (rollback) NO.
+	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0)
+
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior ejecutando`).
+		RespondExitWithError(1, "claude exploded\n")
+
+	r := env.Run("execute", "--validators", "none", "42")
+	if r.ExitCode != 2 {
+		t.Fatalf("expected exit 2 (retry), got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+
+	inv := env.Invocations()
+	edits := inv.FindCalls("gh", "issue", "edit", "42")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 issue edit (only lock, rollback skipped), got %d", len(edits))
+	}
+	// El único edit debe ser el lock; inspeccionamos la secuencia
+	// consecutiva `--add-label status:plan` para descartar rollback.
+	rollbackCount := 0
+	for _, e := range edits {
+		for i := 0; i+1 < len(e.Args); i++ {
+			if e.Args[i] == "--add-label" && e.Args[i+1] == "status:plan" {
+				rollbackCount++
+			}
+		}
+	}
+	if rollbackCount != 0 {
+		t.Fatalf("expected 0 rollback edits (consecutive --add-label status:plan), got %d", rollbackCount)
+	}
+	harness.AssertContains(t, r.Stderr, "rollback abortado")
+}
+
 // TestExecute_NoChanges_Rollback: claude termina sin tocar archivos → retry +
-// rollback.
+// rollback. El 2do issue view del rollback ve status:executing intacto.
 func TestExecute_NoChanges_Rollback(t *testing.T) {
 	env := setupExecuteEnv(t)
 	scriptExecutePrechecks(env)
-	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("execute/gh_issue_view_ready.json", 0)
+	env.ExpectGh(`^issue view 42`).Consumable().RespondStdoutFromFixture("execute/gh_issue_view_ready.json", 0)
+	env.ExpectGh(`^issue view 42`).Consumable().RespondStdoutFromFixture("execute/gh_issue_view_locked_executing.json", 0)
 	env.ExpectGh(`^pr list --head exec/42-`).RespondStdout("[]\n", 0)
 
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)

@@ -290,6 +290,18 @@ func Run(issueRef string, opts Opts) ExitCode {
 		if wt != nil {
 			_ = wt.Cleanup(repoRoot, false)
 		}
+		// Rollback ownership-aware: re-fetch el issue y verificar que
+		// status:executing siga siendo nuestro lock antes de revertirlo.
+		// Si otra instancia ya transitó, pisaríamos su estado.
+		current, fetchErr := fetchIssue(issueRef)
+		if fetchErr != nil {
+			fmt.Fprintf(stderr, "warning: rollback no aplicado: no se pudo re-fetch el issue (%v) — revisá labels a mano\n", fetchErr)
+			return
+		}
+		if !current.HasLabel(labels.StatusExecuting) {
+			fmt.Fprintln(stderr, "rollback abortado: el issue ya no está en status:executing (owner=otro)")
+			return
+		}
 		if err := labels.Apply(issueRef, labels.StatusExecuting, labels.StatusPlan); err != nil {
 			fmt.Fprintf(stderr, "warning: rollback failed: %v — revisá labels del issue a mano\n", err)
 		}
