@@ -101,6 +101,20 @@ var AgentTimeout = func() time.Duration {
 	return 15 * time.Minute
 }()
 
+// ValidatorsWaitTimeout es cuánto esperamos a que las goroutines de
+// validadores terminen antes de retornar de Run. Es el timeout del wait,
+// no del agente validador en sí — cada validador individualmente está
+// acotado por AgentTimeout. Configurable con CHE_EXEC_VALIDATORS_WAIT_SECS
+// (default 600s = 10min).
+var ValidatorsWaitTimeout = func() time.Duration {
+	if s := strings.TrimSpace(os.Getenv("CHE_EXEC_VALIDATORS_WAIT_SECS")); s != "" {
+		if n, err := time.ParseDuration(s + "s"); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 10 * time.Minute
+}()
+
 // Opts agrupa los writers, la callback de progreso y el agente ejecutor.
 type Opts struct {
 	Stdout     io.Writer
@@ -346,10 +360,18 @@ func Run(issueRef string, opts Opts) ExitCode {
 		}
 	}
 
-	// Disparar validadores (fire-and-forget). NO esperamos por ellos.
+	// Disparar validadores y esperar con timeout acotado. Originalmente esto
+	// era fire-and-forget, pero cmd/execute.go hace os.Exit(code) apenas Run
+	// retorna — eso mataba las goroutines antes de que postearan comments.
+	// Ahora esperamos hasta ValidatorsWaitTimeout (env configurable); si
+	// expira, logeamos y retornamos igual (los validadores que queden siguen
+	// en background pero el proceso se va a cortar).
+	var validatorsDone <-chan int
+	validatorsTotal := 0
 	if !opts.SkipValidators && len(opts.Validators) > 0 {
 		progress(fmt.Sprintf("disparando %d validador(es) sobre el PR…", len(opts.Validators)))
-		fireValidators(prURL, issue, plan, opts.Validators)
+		validatorsDone = fireValidators(prURL, issue, plan, opts.Validators)
+		validatorsTotal = len(opts.Validators)
 	}
 
 	progress("transicionando issue a status:executed + awaiting-human…")
@@ -365,10 +387,41 @@ func Run(issueRef string, opts Opts) ExitCode {
 	}
 
 	succeeded = true
+
+	// Esperar a los validadores (si los hay) antes de retornar, para que el
+	// os.Exit del caller no los mate. Feedback incremental a stdout.
+	if validatorsDone != nil && validatorsTotal > 0 {
+		waitValidators(stdout, validatorsDone, validatorsTotal, ValidatorsWaitTimeout)
+	}
+
 	fmt.Fprintf(stdout, "Executed %s\n", issue.URL)
 	fmt.Fprintf(stdout, "PR: %s\n", prURL)
 	fmt.Fprintln(stdout, "Done.")
 	return ExitOK
+}
+
+// waitValidators lee del canal una señal por validador que terminó y emite
+// progreso "esperando validadores (k/total)…" hasta total o hasta timeout.
+// Si expira el timeout, imprime cuántos quedaron y retorna — los que sigan
+// corriendo van a morir cuando el proceso termine.
+func waitValidators(stdout io.Writer, done <-chan int, total int, timeout time.Duration) {
+	completed := 0
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for completed < total {
+		select {
+		case _, ok := <-done:
+			if !ok {
+				// Canal cerrado antes de tiempo (no debería pasar, pero defendernos).
+				return
+			}
+			completed++
+			fmt.Fprintf(stdout, "esperando validadores (%d/%d)…\n", completed, total)
+		case <-timer.C:
+			fmt.Fprintf(stdout, "timeout: %d/%d validadores completaron, el resto sigue corriendo en background\n", completed, total)
+			return
+		}
+	}
 }
 
 // ListCandidates devuelve los issues abiertos con ct:plan + status:plan que
@@ -867,11 +920,23 @@ func createDraftPR(wtPath, branch string, issue *Issue) (string, error) {
 
 // fireValidators lanza una goroutine por validator que invoca al agente con
 // el prompt de validación de diff y postea el resultado como PR comment.
-// NO esperamos: la función retorna inmediatamente.
-func fireValidators(prURL string, issue *Issue, plan *ConsolidatedPlan, validators []Validator) {
-	for _, v := range validators {
-		v := v
+// Devuelve un canal que recibe una señal (el índice del validator) cada vez
+// que una goroutine termina. El caller puede leer hasta len(validators)
+// señales y aplicar su propio timeout. El canal tiene buffer = len(validators)
+// así las goroutines nunca se bloquean si el caller deja de drenarlo.
+func fireValidators(prURL string, issue *Issue, plan *ConsolidatedPlan, validators []Validator) <-chan int {
+	done := make(chan int, len(validators))
+	for i, v := range validators {
+		i, v := i, v
 		go func() {
+			defer func() {
+				// Non-blocking send: si el canal está lleno (no debería con
+				// buffer = len(validators)), no nos colgamos.
+				select {
+				case done <- i:
+				default:
+				}
+			}()
 			prompt := buildValidatorPrompt(issue, plan)
 			ctx, cancel := context.WithTimeout(context.Background(), AgentTimeout)
 			defer cancel()
@@ -881,6 +946,7 @@ func fireValidators(prURL string, issue *Issue, plan *ConsolidatedPlan, validato
 			_ = postPRComment(prURL, body)
 		}()
 	}
+	return done
 }
 
 func buildValidatorPrompt(issue *Issue, plan *ConsolidatedPlan) string {

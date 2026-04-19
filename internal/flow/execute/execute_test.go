@@ -1,8 +1,10 @@
 package execute
 
 import (
+	"bytes"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseConsolidatedPlan_FullBody(t *testing.T) {
@@ -267,5 +269,56 @@ func TestExtractSection_IncludesDeeperHeaders(t *testing.T) {
 	got := extractSection(body, "## Plan consolidado")
 	if !strings.Contains(got, "### Criterios") {
 		t.Errorf("should include ### children: %q", got)
+	}
+}
+
+// TestWaitValidators_AllFinish: el wait drena N señales y retorna sin timeout,
+// emitiendo progreso acumulativo a stdout.
+func TestWaitValidators_AllFinish(t *testing.T) {
+	done := make(chan int, 2)
+	// Simulamos 2 validadores terminando en 10ms/20ms.
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		done <- 0
+		time.Sleep(10 * time.Millisecond)
+		done <- 1
+	}()
+	var buf bytes.Buffer
+	start := time.Now()
+	waitValidators(&buf, done, 2, 5*time.Second)
+	elapsed := time.Since(start)
+	if elapsed > 2*time.Second {
+		t.Fatalf("waitValidators took too long: %v", elapsed)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "(1/2)") || !strings.Contains(out, "(2/2)") {
+		t.Errorf("expected progress 1/2 and 2/2, got:\n%s", out)
+	}
+	if strings.Contains(out, "timeout:") {
+		t.Errorf("unexpected timeout message: %s", out)
+	}
+}
+
+// TestWaitValidators_Timeout: si el timeout expira antes de que terminen
+// todos, retorna sin bloquear y loguea cuántos quedaron.
+func TestWaitValidators_Timeout(t *testing.T) {
+	done := make(chan int, 2)
+	// Solo 1 de 2 termina dentro del timeout.
+	go func() {
+		done <- 0
+	}()
+	var buf bytes.Buffer
+	start := time.Now()
+	waitValidators(&buf, done, 2, 50*time.Millisecond)
+	elapsed := time.Since(start)
+	if elapsed > 1*time.Second {
+		t.Fatalf("waitValidators did not respect timeout: %v", elapsed)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "timeout:") {
+		t.Errorf("expected timeout message, got:\n%s", out)
+	}
+	if !strings.Contains(out, "1/2") {
+		t.Errorf("expected 1/2 completaron, got:\n%s", out)
 	}
 }
