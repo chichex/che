@@ -15,6 +15,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/chichex/che/internal/flow/execute"
 	"github.com/chichex/che/internal/flow/explore"
 	"github.com/chichex/che/internal/flow/idea"
 )
@@ -30,6 +31,10 @@ const (
 	screenExploreAgent
 	screenExploreValidators
 	screenExploreRunning
+	screenExecuteLoading
+	screenExecuteSelect
+	screenExecuteAgent
+	screenExecuteRunning
 	screenResult
 )
 
@@ -57,7 +62,7 @@ type menuItem struct {
 var menuItems = []menuItem{
 	{label: "Idea nueva", key: "1", action: screenIdeaInput},
 	{label: "Explorar", key: "2", action: screenExploreLoading},
-	{label: "Ejecutar", key: "3", disabled: true},
+	{label: "Ejecutar", key: "3", action: screenExecuteLoading},
 	{label: "Cerrar", key: "4", disabled: true},
 	{label: "Eliminar", key: "5", disabled: true},
 }
@@ -94,6 +99,13 @@ type Model struct {
 	exploreChosenAgent     explore.Agent
 	exploreValidatorCursor int
 	exploreValidatorCount  map[explore.Agent]int
+
+	// selector de execute: lista de issues en status:plan.
+	executeCandidates []execute.Candidate
+	executeCursor     int
+	executeChosenRef  string
+	executeAgentIdx   int
+	executeChosenAgent execute.Agent
 
 	// resultado final
 	resultLines []string
@@ -163,6 +175,15 @@ type exploreCandidatesLoadedMsg struct {
 	resumeItems []explore.Candidate
 	err         error
 }
+type executeCandidatesLoadedMsg struct {
+	items []execute.Candidate
+	err   error
+}
+type executeDoneMsg struct {
+	code   execute.ExitCode
+	stdout string
+	stderr string
+}
 type resumeInspectedMsg struct {
 	ref        string
 	agent      explore.Agent
@@ -186,6 +207,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case exploreDoneMsg:
 		return m.finishRun(int(msg.code), msg.code == explore.ExitOK, msg.stdout, msg.stderr), nil
+
+	case executeDoneMsg:
+		return m.finishRun(int(msg.code), msg.code == execute.ExitOK, msg.stdout, msg.stderr), nil
+
+	case executeCandidatesLoadedMsg:
+		if msg.err != nil {
+			m.screen = screenResult
+			m.resultOK = false
+			m.resultLines = []string{"error: " + msg.err.Error()}
+			return m, nil
+		}
+		if len(msg.items) == 0 {
+			m.screen = screenResult
+			m.resultOK = false
+			m.resultLines = []string{
+				"No hay issues con label ct:plan + status:plan listos para ejecutar.",
+				"Primero corré `che explore <issue>` sobre un issue en status:idea.",
+			}
+			return m, nil
+		}
+		m.executeCandidates = msg.items
+		m.executeCursor = 0
+		m.screen = screenExecuteSelect
+		return m, nil
 
 	case resumeInspectedMsg:
 		if msg.err != nil {
@@ -229,7 +274,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		if m.screen == screenIdeaRunning || m.screen == screenExploreRunning {
+		if m.screen == screenIdeaRunning || m.screen == screenExploreRunning || m.screen == screenExecuteRunning {
 			return m, tickCmd()
 		}
 		return m, nil
@@ -260,7 +305,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleMenuKey(msg)
 	case screenIdeaInput:
 		return m.handleIdeaInputKey(msg)
-	case screenIdeaRunning, screenExploreRunning, screenExploreLoading:
+	case screenIdeaRunning, screenExploreRunning, screenExploreLoading, screenExecuteRunning, screenExecuteLoading:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
@@ -271,6 +316,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleExploreAgentKey(msg)
 	case screenExploreValidators:
 		return m.handleExploreValidatorsKey(msg)
+	case screenExecuteSelect:
+		return m.handleExecuteSelectKey(msg)
+	case screenExecuteAgent:
+		return m.handleExecuteAgentKey(msg)
 	case screenResult:
 		return m.handleResultKey(msg)
 	}
@@ -316,8 +365,108 @@ func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 		m.exploreCursor = 0
 		m.exploreLoadErr = nil
 		return m, loadExploreCandidatesCmd()
+	case screenExecuteLoading:
+		m.screen = screenExecuteLoading
+		m.executeCandidates = nil
+		m.executeCursor = 0
+		return m, loadExecuteCandidatesCmd()
 	}
 	return m, nil
+}
+
+func loadExecuteCandidatesCmd() tea.Cmd {
+	return func() tea.Msg {
+		items, err := execute.ListCandidates()
+		return executeCandidatesLoadedMsg{items: items, err: err}
+	}
+}
+
+func (m Model) handleExecuteSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	total := len(m.executeCandidates)
+	switch k {
+	case "esc":
+		m.screen = screenMenu
+		m.executeCandidates = nil
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if total == 0 {
+			return m, nil
+		}
+		m.executeCursor = (m.executeCursor - 1 + total) % total
+		return m, nil
+	case "down", "j":
+		if total == 0 {
+			return m, nil
+		}
+		m.executeCursor = (m.executeCursor + 1) % total
+		return m, nil
+	case "enter":
+		if total == 0 {
+			return m, nil
+		}
+		chosen := m.executeCandidates[m.executeCursor]
+		m.executeChosenRef = fmt.Sprint(chosen.Number)
+		m.executeAgentIdx = 0
+		m.screen = screenExecuteAgent
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) handleExecuteAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	switch k {
+	case "esc":
+		m.screen = screenExecuteSelect
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		m.executeAgentIdx = (m.executeAgentIdx - 1 + len(execute.ValidAgents)) % len(execute.ValidAgents)
+		return m, nil
+	case "down", "j":
+		m.executeAgentIdx = (m.executeAgentIdx + 1) % len(execute.ValidAgents)
+		return m, nil
+	case "enter":
+		m.executeChosenAgent = execute.ValidAgents[m.executeAgentIdx]
+		return m.startExecuteFlow(m.executeChosenRef, m.executeChosenAgent)
+	}
+	for i := range execute.ValidAgents {
+		if k == fmt.Sprint(i+1) {
+			m.executeChosenAgent = execute.ValidAgents[i]
+			return m.startExecuteFlow(m.executeChosenRef, m.executeChosenAgent)
+		}
+	}
+	return m, nil
+}
+
+// startExecuteFlow arranca execute.Run en background sobre el issue elegido
+// con el agente seleccionado y sin validadores (default 'none' en la TUI —
+// el usuario interactivo típicamente quiere ver el PR listo, los validadores
+// se pueden disparar después desde CLI si hace falta).
+func (m Model) startExecuteFlow(issueRef string, agent execute.Agent) (tea.Model, tea.Cmd) {
+	m.screen = screenExecuteRunning
+	m.runStart = time.Now()
+	m.runLog = []string{}
+	m.progressCh = make(chan tea.Msg, 64)
+
+	go func(ch chan<- tea.Msg) {
+		var stdout, stderr bytes.Buffer
+		code := execute.Run(issueRef, execute.Opts{
+			Stdout: &stdout,
+			Stderr: &stderr,
+			Agent:  agent,
+			OnProgress: func(line string) {
+				ch <- progressMsg{line: line}
+			},
+		})
+		ch <- executeDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	}(m.progressCh)
+
+	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
 }
 
 func loadExploreCandidatesCmd() tea.Cmd {
@@ -527,6 +676,7 @@ func (m Model) handleResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.runLog = nil
 	m.exploreNew = nil
 	m.exploreResume = nil
+	m.executeCandidates = nil
 	return m, nil
 }
 
@@ -638,10 +788,81 @@ func (m Model) View() string {
 		return renderExploreValidators(m)
 	case screenExploreRunning:
 		return renderRunning(m, "Explorando issue…", "Ctrl+C cancela")
+	case screenExecuteLoading:
+		return renderExecuteLoading(m)
+	case screenExecuteSelect:
+		return renderExecuteSelect(m)
+	case screenExecuteAgent:
+		return renderExecuteAgent(m)
+	case screenExecuteRunning:
+		return renderRunning(m, "Ejecutando issue…", "Ctrl+C cancela")
 	case screenResult:
 		return renderResult(m)
 	}
 	return ""
+}
+
+func renderExecuteLoading(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Ejecutar un issue"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render("Buscando issues en status:plan…"))
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("Ctrl+C cancela"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func renderExecuteSelect(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Ejecutar"))
+	sb.WriteString("\n")
+	total := len(m.executeCandidates)
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("%d issue(s) listos para ejecutar", total)))
+	sb.WriteString("\n\n")
+	if total == 0 {
+		sb.WriteString("  " + mutedBadge("(ninguno)") + "\n")
+	} else {
+		for i, c := range m.executeCandidates {
+			prefix := "  "
+			style := menuItemStyle
+			if i == m.executeCursor {
+				prefix = "▸ "
+				style = menuSelectedStyle
+			}
+			num := menuNumberStyle.Render(fmt.Sprintf("#%d", c.Number))
+			line := prefix + num + "  " + c.Title
+			sb.WriteString(style.Render(line) + "\n")
+		}
+	}
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("↑/↓ navega · Enter elige · Esc vuelve · Ctrl+C sale"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func renderExecuteAgent(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Elegí ejecutor"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("Para ejecutar el issue #%s — ¿qué agente aplica el plan?", m.executeChosenRef)))
+	sb.WriteString("\n\n")
+	for i, a := range execute.ValidAgents {
+		prefix := "  "
+		style := menuItemStyle
+		if i == m.executeAgentIdx {
+			prefix = "▸ "
+			style = menuSelectedStyle
+		}
+		num := menuNumberStyle.Render(fmt.Sprintf("%d.", i+1))
+		name := strings.ToUpper(string(a)[:1]) + string(a)[1:]
+		line := prefix + num + " " + name
+		sb.WriteString(style.Render(line) + "\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("↑/↓ navega · 1-3 atajo · Enter elige · Esc vuelve · Ctrl+C sale"))
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 func renderMenu(m Model) string {
