@@ -121,8 +121,14 @@ func runAgentCmd(agent Agent, prompt string, progress func(string), progressPref
 	go streamPipe(&wg, stdoutPipe, &fullStdout, progress, progressPrefix)
 	go streamPipe(&wg, stderrPipe, &fullStderr, progress, progressPrefix+"stderr: ")
 
-	waitErr := cmd.Wait()
+	// IMPORTANTE: según docs de exec.Cmd.StdoutPipe, "it is thus incorrect
+	// to call Wait before all reads from the pipe have completed". Primero
+	// esperamos a que las goroutines drenen los pipes hasta EOF (llega
+	// cuando el proceso termina); recién después cmd.Wait() para recoger el
+	// exit code. Al revés se pierden bytes de stdout bajo carga y el JSON
+	// llega truncado al parser.
 	wg.Wait()
+	waitErr := cmd.Wait()
 
 	if ctx.Err() == context.DeadlineExceeded {
 		return fullStdout.String(), fmt.Errorf("%s timed out after %s (stderr: %s)",

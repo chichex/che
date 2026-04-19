@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 )
 
 // Matcher describes how chefake should respond when an invocation to a given
@@ -147,13 +148,16 @@ type scriptFile struct {
 	} `json:"default,omitempty"`
 }
 
-var matcherCounters sync.Map // bin -> *int
+var matcherCounters sync.Map // bin -> *atomic.Int64
 
+// nextMatcherID devuelve un ID único por bin ("gh-1", "gh-2", ...). Thread-safe
+// porque los tests paralelos pueden llamar al helper concurrentemente; usar
+// *atomic.Int64 evita la data race de incrementar un *int manualmente.
 func nextMatcherID(bin string) string {
-	v, _ := matcherCounters.LoadOrStore(bin, new(int64))
-	ptr := v.(*int64)
-	*ptr++
-	return fmt.Sprintf("%s-%d", bin, *ptr)
+	v, _ := matcherCounters.LoadOrStore(bin, new(atomic.Int64))
+	ptr := v.(*atomic.Int64)
+	n := ptr.Add(1)
+	return fmt.Sprintf("%s-%d", bin, n)
 }
 
 func appendMatcher(scriptDir, bin string, m Matcher) error {
