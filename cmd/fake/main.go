@@ -27,17 +27,21 @@ import (
 )
 
 type matcher struct {
-	ID            string   `json:"id"`
-	ArgsRegex     string   `json:"args_regex,omitempty"`
-	StdinContains string   `json:"stdin_contains,omitempty"`
-	Consume       bool     `json:"consume,omitempty"`
-	CaptureStdin  bool     `json:"capture_stdin,omitempty"`
-	Stdout        string   `json:"stdout,omitempty"`
-	StdoutFile    string   `json:"stdout_file,omitempty"`
-	Stderr        string   `json:"stderr,omitempty"`
-	Exit          int      `json:"exit,omitempty"`
-	Passthrough   bool     `json:"passthrough,omitempty"` // reserved for git passthrough mode
-	PassthroughTo string   `json:"passthrough_to,omitempty"`
+	ID            string            `json:"id"`
+	ArgsRegex     string            `json:"args_regex,omitempty"`
+	StdinContains string            `json:"stdin_contains,omitempty"`
+	Consume       bool              `json:"consume,omitempty"`
+	CaptureStdin  bool              `json:"capture_stdin,omitempty"`
+	Stdout        string            `json:"stdout,omitempty"`
+	StdoutFile    string            `json:"stdout_file,omitempty"`
+	Stderr        string            `json:"stderr,omitempty"`
+	Exit          int               `json:"exit,omitempty"`
+	Passthrough   bool              `json:"passthrough,omitempty"` // reserved for git passthrough mode
+	PassthroughTo string            `json:"passthrough_to,omitempty"`
+	// TouchFiles lista paths (relativos al cwd donde se ejecutó el fake) que
+	// el fake debe crear con el contenido dado al matchear. Usado por tests
+	// de execute para simular que el agente modificó archivos en el worktree.
+	TouchFiles map[string]string `json:"touch_files,omitempty"`
 }
 
 type script struct {
@@ -145,6 +149,16 @@ func main() {
 			os.Exit(2)
 		}
 		stdoutBody = string(data)
+	}
+
+	// Side effects: touch_files escribe archivos en cwd para simular que
+	// el agente produjo cambios.
+	for relPath, content := range matched.TouchFiles {
+		dir := filepath.Dir(relPath)
+		if dir != "." && dir != "" {
+			_ = os.MkdirAll(dir, 0o755)
+		}
+		_ = os.WriteFile(relPath, []byte(content), 0o644)
 	}
 
 	_, _ = io.WriteString(os.Stdout, stdoutBody)

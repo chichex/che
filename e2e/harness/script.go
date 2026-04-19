@@ -13,15 +13,16 @@ import (
 // Matcher describes how chefake should respond when an invocation to a given
 // identity (bin) satisfies the match rules.
 type Matcher struct {
-	ID            string `json:"id"`
-	ArgsRegex     string `json:"args_regex,omitempty"`
-	StdinContains string `json:"stdin_contains,omitempty"`
-	Consume       bool   `json:"consume,omitempty"`
-	CaptureStdin  bool   `json:"capture_stdin,omitempty"`
-	Stdout        string `json:"stdout,omitempty"`
-	StdoutFile    string `json:"stdout_file,omitempty"`
-	Stderr        string `json:"stderr,omitempty"`
-	Exit          int    `json:"exit"`
+	ID            string            `json:"id"`
+	ArgsRegex     string            `json:"args_regex,omitempty"`
+	StdinContains string            `json:"stdin_contains,omitempty"`
+	Consume       bool              `json:"consume,omitempty"`
+	CaptureStdin  bool              `json:"capture_stdin,omitempty"`
+	Stdout        string            `json:"stdout,omitempty"`
+	StdoutFile    string            `json:"stdout_file,omitempty"`
+	Stderr        string            `json:"stderr,omitempty"`
+	Exit          int               `json:"exit"`
+	TouchFiles    map[string]string `json:"touch_files,omitempty"`
 }
 
 // ExpectBuilder is the fluent API used to script a single matcher. Values
@@ -120,6 +121,17 @@ func (b *ExpectBuilder) RespondExitWithError(exitCode int, stderr string) *Match
 	b.m.Stderr = stderr
 	b.m.Exit = exitCode
 	return b.commit()
+}
+
+// TouchFile agenda la creación de un archivo con el contenido dado (relativo
+// al cwd donde corre el fake) al matchear. Usado por los tests de execute
+// para simular que el agente produjo cambios en el worktree.
+func (b *ExpectBuilder) TouchFile(relPath, content string) *ExpectBuilder {
+	if b.m.TouchFiles == nil {
+		b.m.TouchFiles = map[string]string{}
+	}
+	b.m.TouchFiles[relPath] = content
+	return b
 }
 
 // MatcherRef is returned from a Respond* call so the test can refer back to
