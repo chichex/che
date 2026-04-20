@@ -589,14 +589,13 @@ func (m Model) handleExploreAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // enterValidatorsScreen lleva a la pantalla de validadores. Si el mapa de
 // counts ya está seteado (caso de reanudación, donde lo pre-cargamos con el
-// panel del run anterior), lo preserva. Si está vacío, usa el default
-// codex+gemini para que el usuario arranque desde algo razonable.
+// panel del run anterior), lo preserva. Si está vacío, usa el default opus
+// para que el usuario arranque desde algo razonable.
 func (m Model) enterValidatorsScreen() Model {
 	m.exploreValidatorCursor = 0
 	if len(m.exploreValidatorCount) == 0 {
 		m.exploreValidatorCount = map[explore.Agent]int{
-			explore.AgentCodex:  1,
-			explore.AgentGemini: 1,
+			explore.AgentOpus: 1,
 		}
 	}
 	m.screen = screenExploreValidators

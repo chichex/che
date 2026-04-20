@@ -68,7 +68,7 @@ Este subcomando es la ruta no-interactiva (scripting/CI). La TUI de che
 func init() {
 	exploreCmd.Flags().StringVar(&exploreAgentFlag, "agent", string(explore.DefaultAgent),
 		"ejecutor a usar: opus | codex | gemini")
-	exploreCmd.Flags().StringVar(&exploreValidatorsFlag, "validators", "codex,gemini",
+	exploreCmd.Flags().StringVar(&exploreValidatorsFlag, "validators", "opus",
 		"1-3 validadores separados por coma (opus|codex|gemini, pueden repetir), o 'none' para skipear")
 	rootCmd.AddCommand(exploreCmd)
 }
