@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
 )
 
@@ -330,6 +331,70 @@ func TestPullRequest_HasLabel(t *testing.T) {
 	}
 	if pr.HasLabel("baz") {
 		t.Errorf("expected HasLabel(baz)=false")
+	}
+}
+
+func TestGroupCloseable(t *testing.T) {
+	mk := func(n int, lbls ...string) validate.PullRequest {
+		pr := validate.PullRequest{Number: n}
+		for _, l := range lbls {
+			pr.Labels = append(pr.Labels, struct {
+				Name string `json:"name"`
+			}{Name: l})
+		}
+		return pr
+	}
+	nums := func(cs []validate.Candidate) []int {
+		out := make([]int, 0, len(cs))
+		for _, c := range cs {
+			out = append(out, c.Number)
+		}
+		return out
+	}
+	cases := []struct {
+		name        string
+		in          []validate.PullRequest
+		wantReady   []int
+		wantBlocked []int
+	}{
+		{"empty", nil, nil, nil},
+		{"sin labels → ready", []validate.PullRequest{mk(1), mk(2)}, []int{1, 2}, nil},
+		{"approve → ready (target ideal)",
+			[]validate.PullRequest{mk(1, labels.ValidatedApprove)}, []int{1}, nil},
+		{"changes-requested → blocked",
+			[]validate.PullRequest{mk(1, labels.ValidatedChangesRequested)}, nil, []int{1}},
+		{"needs-human → blocked",
+			[]validate.PullRequest{mk(1, labels.ValidatedNeedsHuman)}, nil, []int{1}},
+		{"mix: preserva orden dentro de cada grupo",
+			[]validate.PullRequest{
+				mk(1, labels.ValidatedApprove),
+				mk(2, labels.ValidatedChangesRequested),
+				mk(3, labels.ValidatedNeedsHuman),
+				mk(4),
+			},
+			[]int{1, 4}, []int{2, 3}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := groupCloseable(c.in)
+			gotReady, gotBlocked := nums(got.Ready), nums(got.Blocked)
+			if len(gotReady) != len(c.wantReady) {
+				t.Fatalf("ready: want %v, got %v", c.wantReady, gotReady)
+			}
+			for i := range gotReady {
+				if gotReady[i] != c.wantReady[i] {
+					t.Errorf("ready[%d]: want %d, got %d", i, c.wantReady[i], gotReady[i])
+				}
+			}
+			if len(gotBlocked) != len(c.wantBlocked) {
+				t.Fatalf("blocked: want %v, got %v", c.wantBlocked, gotBlocked)
+			}
+			for i := range gotBlocked {
+				if gotBlocked[i] != c.wantBlocked[i] {
+					t.Errorf("blocked[%d]: want %d, got %d", i, c.wantBlocked[i], gotBlocked[i])
+				}
+			}
+		})
 	}
 }
 

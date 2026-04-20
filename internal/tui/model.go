@@ -125,13 +125,15 @@ type Model struct {
 	validateValidatorCursor int
 	validateValidatorCount  map[validate.Agent]int
 
-	// selector de close: reusa candidates de validate.ListOpenPRs (misma
-	// pregunta "¿qué PRs hay abiertos?"). No hay panel de validadores —
-	// close usa opus por diseño.
-	closeCandidates []validate.Candidate
-	closeCursor     int
-	closeChosenRef  string
-	closeChosenURL  string
+	// selector de close: dos grupos — Ready (sin verdict bloqueante) y
+	// Blocked (changes-requested / needs-human). Ambos se muestran; el
+	// cursor es un índice global sobre la concatenación Ready+Blocked.
+	// No hay panel de validadores — close usa opus por diseño.
+	closeReady     []validate.Candidate
+	closeBlocked   []validate.Candidate
+	closeCursor    int
+	closeChosenRef string
+	closeChosenURL string
 
 	// resultado final
 	resultLines []string
@@ -220,8 +222,9 @@ type validateDoneMsg struct {
 	stderr string
 }
 type closeCandidatesLoadedMsg struct {
-	items []validate.Candidate
-	err   error
+	ready   []validate.Candidate
+	blocked []validate.Candidate
+	err     error
 }
 type closeDoneMsg struct {
 	code   closing.ExitCode
@@ -268,7 +271,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resultLines = []string{"error: " + msg.err.Error()}
 			return m, nil
 		}
-		if len(msg.items) == 0 {
+		if len(msg.ready)+len(msg.blocked) == 0 {
 			m.screen = screenResult
 			m.resultOK = false
 			m.resultLines = []string{
@@ -277,7 +280,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		m.closeCandidates = msg.items
+		m.closeReady = msg.ready
+		m.closeBlocked = msg.blocked
 		m.closeCursor = 0
 		m.screen = screenCloseSelect
 		return m, nil
@@ -478,7 +482,8 @@ func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 		return m, loadValidateCandidatesCmd()
 	case screenCloseLoading:
 		m.screen = screenCloseLoading
-		m.closeCandidates = nil
+		m.closeReady = nil
+		m.closeBlocked = nil
 		m.closeCursor = 0
 		return m, loadCloseCandidatesCmd()
 	}
@@ -643,25 +648,33 @@ func validateValidatorsFromCounts(counts map[validate.Agent]int) []validate.Vali
 	return out
 }
 
-// loadCloseCandidatesCmd lista PRs abiertos del repo vía gh. Reusa el
-// loader de validate: la pregunta es la misma ("¿qué PRs hay abiertos?")
-// y ya excluye validated:approve (los que ya están aprobados igual pueden
-// cerrarse, pero al no aparecer en la TUI el usuario usa `che close <n>`
-// explícito — decisión de producto a revisar si molesta).
+// loadCloseCandidatesCmd lista PRs abiertos agrupados en ready/blocked
+// por verdict. Ambos grupos se muestran al usuario — close no esconde
+// nada; la agrupación es solo visual.
 func loadCloseCandidatesCmd() tea.Cmd {
 	return func() tea.Msg {
-		items, err := validate.ListOpenPRs()
-		return closeCandidatesLoadedMsg{items: items, err: err}
+		groups, err := closing.ListCloseable()
+		return closeCandidatesLoadedMsg{ready: groups.Ready, blocked: groups.Blocked, err: err}
 	}
+}
+
+// closeItemAt devuelve el candidate en el índice global (sobre la
+// concatenación Ready+Blocked) y si viene del grupo blocked.
+func (m Model) closeItemAt(idx int) (validate.Candidate, bool) {
+	if idx < len(m.closeReady) {
+		return m.closeReady[idx], false
+	}
+	return m.closeBlocked[idx-len(m.closeReady)], true
 }
 
 func (m Model) handleCloseSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
-	total := len(m.closeCandidates)
+	total := len(m.closeReady) + len(m.closeBlocked)
 	switch k {
 	case "esc":
 		m.screen = screenMenu
-		m.closeCandidates = nil
+		m.closeReady = nil
+		m.closeBlocked = nil
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
@@ -681,7 +694,7 @@ func (m Model) handleCloseSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if total == 0 {
 			return m, nil
 		}
-		chosen := m.closeCandidates[m.closeCursor]
+		chosen, _ := m.closeItemAt(m.closeCursor)
 		m.closeChosenRef = fmt.Sprint(chosen.Number)
 		m.closeChosenURL = chosen.URL
 		return m.startCloseFlow(m.closeChosenRef)
@@ -969,7 +982,8 @@ func (m Model) handleResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.exploreResume = nil
 	m.executeCandidates = nil
 	m.validateCandidates = nil
-	m.closeCandidates = nil
+	m.closeReady = nil
+	m.closeBlocked = nil
 	return m, nil
 }
 
@@ -1601,44 +1615,71 @@ func renderCloseSelect(m Model) string {
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("Cerrar"))
 	sb.WriteString("\n")
-	total := len(m.closeCandidates)
-	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("%d PR(s) abiertos — opus arregla conflictos/CI si hace falta, después mergea",
-		total)))
+
+	readyCount := len(m.closeReady)
+	blockedCount := len(m.closeBlocked)
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf(
+		"%d listo(s) · %d con verdict bloqueante — opus arregla conflictos/CI y mergea",
+		readyCount, blockedCount)))
 	sb.WriteString("\n\n")
-	if total == 0 {
-		sb.WriteString("  " + mutedBadge("(ninguno)") + "\n")
-	} else {
-		for i, c := range m.closeCandidates {
-			prefix := "  "
-			style := menuItemStyle
-			if i == m.closeCursor {
-				prefix = "▸ "
-				style = menuSelectedStyle
-			}
-			num := menuNumberStyle.Render(fmt.Sprintf("#%d", c.Number))
-			draft := ""
-			if c.IsDraft {
-				draft = " " + mutedBadge("draft")
-			}
-			rel := ""
-			if len(c.RelatedIssues) > 0 {
-				parts := make([]string, 0, len(c.RelatedIssues))
-				for _, n := range c.RelatedIssues {
-					parts = append(parts, fmt.Sprintf("#%d", n))
-				}
-				rel = " " + mutedBadge("closes "+strings.Join(parts, ", "))
-			}
-			line := prefix + num + "  " + c.Title + draft + rel
-			if c.Author != "" {
-				line += " " + comingSoonStyle.Render("— by @"+c.Author)
-			}
-			sb.WriteString(style.Render(line) + "\n")
+
+	idx := 0
+
+	if readyCount > 0 {
+		sb.WriteString("  " + mutedBadge("— Listos para cerrar —") + "\n")
+		for _, c := range m.closeReady {
+			sb.WriteString(closeCandidateLine(c, idx == m.closeCursor))
+			idx++
 		}
+	} else {
+		sb.WriteString("  " + mutedBadge("— Listos para cerrar —") + "  " + comingSoonStyle.Render("(ninguno)") + "\n")
 	}
+
 	sb.WriteString("\n")
-	sb.WriteString(hintStyle.Render("↑/↓ navega · Enter cierra · Esc vuelve · Ctrl+C sale"))
+
+	if blockedCount > 0 {
+		sb.WriteString("  " + mutedBadge("— Con verdict bloqueante (changes-requested / needs-human) —") + "\n")
+		for _, c := range m.closeBlocked {
+			sb.WriteString(closeCandidateLine(c, idx == m.closeCursor))
+			idx++
+		}
+	} else {
+		sb.WriteString("  " + mutedBadge("— Con verdict bloqueante —") + "  " + comingSoonStyle.Render("(ninguno)") + "\n")
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("↑/↓ navega · Enter cierra (warnea si bloqueante) · Esc vuelve · Ctrl+C sale"))
 	sb.WriteString("\n")
 	return sb.String()
+}
+
+// closeCandidateLine renderea una línea del selector de close, mismo
+// estilo que los otros selectores pero con badges de draft/closes.
+func closeCandidateLine(c validate.Candidate, selected bool) string {
+	prefix := "  "
+	style := menuItemStyle
+	if selected {
+		prefix = "▸ "
+		style = menuSelectedStyle
+	}
+	num := menuNumberStyle.Render(fmt.Sprintf("#%d", c.Number))
+	draft := ""
+	if c.IsDraft {
+		draft = " " + mutedBadge("draft")
+	}
+	rel := ""
+	if len(c.RelatedIssues) > 0 {
+		parts := make([]string, 0, len(c.RelatedIssues))
+		for _, n := range c.RelatedIssues {
+			parts = append(parts, fmt.Sprintf("#%d", n))
+		}
+		rel = " " + mutedBadge("closes "+strings.Join(parts, ", "))
+	}
+	line := prefix + num + "  " + c.Title + draft + rel
+	if c.Author != "" {
+		line += " " + comingSoonStyle.Render("— by @"+c.Author)
+	}
+	return style.Render(line) + "\n"
 }
 
 // Run lanza el TUI y bloquea hasta que el usuario cierre. version se muestra

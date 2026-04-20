@@ -468,6 +468,18 @@ func applyValidatedLabel(prRef string, pr *PullRequest, target string) error {
 // no necesitan reaparecer en la TUI (el usuario igual puede re-validar con
 // `che validate <n>` explícito si hiciera falta).
 func ListOpenPRs() ([]Candidate, error) {
+	raw, err := FetchOpenPullRequests()
+	if err != nil {
+		return nil, err
+	}
+	return filterValidatable(raw), nil
+}
+
+// FetchOpenPullRequests corre `gh pr list` sin filtrar y devuelve el raw
+// de PullRequest. Expuesto para que otros flows (ej. close) armen sus
+// propias listas con criterios de filter distintos sin duplicar el
+// shell-out ni el shape del parse.
+func FetchOpenPullRequests() ([]PullRequest, error) {
 	cmd := exec.Command("gh", "pr", "list",
 		"--state", "open",
 		"--json", "number,title,url,isDraft,author,headRefName,closingIssuesReferences,labels",
@@ -483,7 +495,25 @@ func ListOpenPRs() ([]Candidate, error) {
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("parse gh pr list output: %w", err)
 	}
-	return filterValidatable(raw), nil
+	return raw, nil
+}
+
+// ToCandidate proyecta un PullRequest al shape Candidate usado por la TUI.
+// Expuesto para que otros paquetes armen slices de Candidate sin acceder
+// al internals del struct.
+func ToCandidate(p PullRequest) Candidate {
+	related := make([]int, 0, len(p.ClosingIssuesReferences))
+	for _, r := range p.ClosingIssuesReferences {
+		related = append(related, r.Number)
+	}
+	return Candidate{
+		Number:        p.Number,
+		Title:         p.Title,
+		URL:           p.URL,
+		IsDraft:       p.IsDraft,
+		Author:        p.Author.Login,
+		RelatedIssues: related,
+	}
 }
 
 // filterValidatable convierte el raw de gh pr list a Candidates para la TUI,
@@ -496,18 +526,7 @@ func filterValidatable(raw []PullRequest) []Candidate {
 		if p.HasLabel(labels.ValidatedApprove) {
 			continue
 		}
-		related := make([]int, 0, len(p.ClosingIssuesReferences))
-		for _, r := range p.ClosingIssuesReferences {
-			related = append(related, r.Number)
-		}
-		res = append(res, Candidate{
-			Number:        p.Number,
-			Title:         p.Title,
-			URL:           p.URL,
-			IsDraft:       p.IsDraft,
-			Author:        p.Author.Login,
-			RelatedIssues: related,
-		})
+		res = append(res, ToCandidate(p))
 	}
 	return res
 }

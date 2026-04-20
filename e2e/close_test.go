@@ -54,24 +54,31 @@ func TestClose_ClosedPR_Exit3(t *testing.T) {
 	env.Invocations().AssertNotCalled(t, "claude")
 }
 
-// TestClose_ChangesRequestedLabel_Exit3: PR con validated:changes-requested
-// → exit 3 antes de tocar merge o invocar opus.
-func TestClose_ChangesRequestedLabel_Exit3(t *testing.T) {
+// TestClose_ChangesRequestedLabel_WarnsButProceeds: PR con verdict
+// bloqueante NO es un hard gate — el usuario lo pidió explícito, close
+// warnea y mergea igual. (Decisión de producto v0.0.31: che cierra lo
+// que el humano le diga sin filtrar por verdict.)
+func TestClose_ChangesRequestedLabel_WarnsButProceeds(t *testing.T) {
 	env := setupCloseEnv(t)
 	scriptClosePrechecks(env)
 
 	env.ExpectGh(`^pr view 7`).RespondStdoutFromFixture("close/gh_pr_view_changes_requested.json", 0)
+	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
+	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
 	r := env.Run("close", "7")
-	if r.ExitCode != 3 {
-		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	if r.ExitCode != 0 {
+		t.Fatalf("expected exit 0 (proceeds with warning), got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
+	// El warning aparece en stderr pero no bloquea.
 	harness.AssertContains(t, r.Stderr, "changes-requested")
-	env.Invocations().AssertNotCalled(t, "claude")
-	// Needle compuesto "pr merge" evita falsos positivos con "mergeable"
-	// (substring) en llamadas a `gh pr view --json ...,mergeable,...`.
-	if merges := env.Invocations().FindCalls("gh", "pr merge "); len(merges) != 0 {
-		t.Fatalf("expected 0 gh pr merge calls on blocked PR, got %d", len(merges))
+	harness.AssertContains(t, r.Stderr, "warning")
+	// Sí debe haber mergeado.
+	if merges := env.Invocations().FindCalls("gh", "pr merge 7 --merge"); len(merges) != 1 {
+		t.Fatalf("expected 1 gh pr merge call, got %d", len(merges))
 	}
 }
 

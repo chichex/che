@@ -229,6 +229,57 @@ func hasConflicts(pr *PullRequest) bool {
 		strings.EqualFold(pr.MergeStateStatus, "DIRTY")
 }
 
+// CloseablePRs agrupa los PRs abiertos del repo para la TUI de close en
+// dos categorías: Ready (sin verdict bloqueante — el camino feliz) y
+// Blocked (tienen validated:changes-requested o validated:needs-human).
+// La TUI las renderiza como secciones separadas para que el usuario las
+// distinga visualmente, pero puede elegir cualquiera — close no impone
+// un gate, solo warnea.
+type CloseablePRs struct {
+	Ready   []validate.Candidate
+	Blocked []validate.Candidate
+}
+
+// ListCloseable devuelve los PRs abiertos del repo, agrupados entre los
+// que están listos para cerrar (aprobados o sin validar) y los que tienen
+// un verdict bloqueante de che validate.
+//
+// Ambos grupos aparecen — che close no esconde ni rechaza los bloqueantes,
+// el humano decide. La agrupación existe solo para UX.
+func ListCloseable() (CloseablePRs, error) {
+	raw, err := validate.FetchOpenPullRequests()
+	if err != nil {
+		return CloseablePRs{}, err
+	}
+	return groupCloseable(raw), nil
+}
+
+// groupCloseable separa el raw de PRs en ready/blocked según labels.
+// Función pura, testeable sin shell-out.
+func groupCloseable(raw []validate.PullRequest) CloseablePRs {
+	out := CloseablePRs{}
+	for _, p := range raw {
+		c := validate.ToCandidate(p)
+		if hasBlockingLabel(p) {
+			out.Blocked = append(out.Blocked, c)
+		} else {
+			out.Ready = append(out.Ready, c)
+		}
+	}
+	return out
+}
+
+// hasBlockingLabel devuelve true si el PR tiene un validated:* que suele
+// bloquear el merge. Se usa en la TUI para agrupar y en Run para warnear.
+func hasBlockingLabel(p validate.PullRequest) bool {
+	for _, l := range p.Labels {
+		if l.Name == labels.ValidatedChangesRequested || l.Name == labels.ValidatedNeedsHuman {
+			return true
+		}
+	}
+	return false
+}
+
 // ---- Run ----
 
 // Run ejecuta el flow completo sobre un PR. Decisiones:
@@ -285,9 +336,8 @@ func Run(prRef string, opts Opts) ExitCode {
 	}
 
 	if blocking := BlockingVerdict(pr); blocking != "" {
-		fmt.Fprintf(stderr, "error: PR #%d tiene label %s — close no mergea PRs con changes-requested/needs-human. Resolvé los findings y re-validá antes.\n",
+		fmt.Fprintf(stderr, "⚠ warning: PR #%d tiene label %s — procedo igual porque así lo pediste.\n",
 			pr.Number, blocking)
-		return ExitSemantic
 	}
 
 	if pr.IsDraft {
