@@ -27,8 +27,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chichex/che/internal/comments"
 	"github.com/chichex/che/internal/labels"
 )
+
+// validatorRole es el valor del campo `role` en el header claude-cli de los
+// comments de validadores que postea execute. Lo usa nextValidatorIter para
+// filtrar los comments de tandas anteriores al calcular el iter.
+const validatorRole = "validator"
 
 // ExitCode es el código de salida semántico para el caller.
 type ExitCode int
@@ -542,8 +548,18 @@ func Run(issueRef string, opts Opts) ExitCode {
 	validatorsCtx, validatorsCancel := context.WithCancel(ctx)
 	defer validatorsCancel()
 	if !opts.SkipValidators && len(opts.Validators) > 0 {
-		progress(fmt.Sprintf("disparando %d validador(es) sobre el PR…", len(opts.Validators)))
-		validatorsDone = fireValidators(validatorsCtx, prURL, issue, plan, opts.Validators)
+		// Cuando reusamos un PR existente puede haber comments de tandas
+		// previas; leemos sus headers para numerar esta tanda con el próximo
+		// iter. Si la lectura falla o no hay comments previos, caemos a 1 —
+		// un iter mal numerado no justifica abortar el run.
+		iter := 1
+		if existing, err := fetchPRComments(ctx, prURL); err == nil {
+			iter = nextValidatorIter(existing)
+		} else {
+			fmt.Fprintf(stderr, "warning: no pude leer comments previos del PR para numerar iter (%v); usando iter=1\n", err)
+		}
+		progress(fmt.Sprintf("disparando %d validador(es) sobre el PR (iter=%d)…", len(opts.Validators), iter))
+		validatorsDone = fireValidators(validatorsCtx, prURL, issue, plan, opts.Validators, iter)
 		validatorsTotal = len(opts.Validators)
 	}
 
@@ -1309,10 +1325,14 @@ func createDraftPR(ctx context.Context, wtPath, branch string, issue *Issue) (st
 // señales y aplicar su propio timeout. El canal tiene buffer = len(validators)
 // así las goroutines nunca se bloquean si el caller deja de drenarlo.
 //
+// iter es el número de tanda que se estampa en el header — el caller lo
+// resuelve con nextValidatorIter sobre los comments previos del PR; sin eso,
+// al reusar un PR en un segundo run quedarían comments indistinguibles.
+//
 // parent es el context del flow; cualquier cancelación (señal o timeout del
 // wait superior) mata los subprocesos de validación con SIGTERM al process
 // group y permite a las goroutines retornar sin colgarse.
-func fireValidators(parent context.Context, prURL string, issue *Issue, plan *ConsolidatedPlan, validators []Validator) <-chan int {
+func fireValidators(parent context.Context, prURL string, issue *Issue, plan *ConsolidatedPlan, validators []Validator, iter int) <-chan int {
 	done := make(chan int, len(validators))
 	for i, v := range validators {
 		i, v := i, v
@@ -1347,11 +1367,70 @@ func fireValidators(parent context.Context, prURL string, issue *Issue, plan *Co
 			if parent.Err() != nil {
 				return
 			}
-			body := fmt.Sprintf("## Validator %s#%d\n\n%s\n", v.Agent, v.Instance, strings.TrimSpace(string(out)))
-			_ = postPRComment(parent, prURL, body)
+			_ = postPRComment(parent, prURL, renderValidatorComment(iter, v, string(out)))
 		}()
 	}
 	return done
+}
+
+// renderValidatorComment arma el body del PR comment de un validator con el
+// header estructurado al principio. Pura y sin side-effects: así un test
+// puede assertarlo sin disparar goroutines ni ejecutar gh.
+func renderValidatorComment(iter int, v Validator, agentOut string) string {
+	header := comments.Header{
+		Flow:     "execute",
+		Iter:     iter,
+		Agent:    string(v.Agent),
+		Instance: v.Instance,
+		Role:     validatorRole,
+	}.Format()
+	return fmt.Sprintf("%s\n## Validator %s#%d\n\n%s\n", header, v.Agent, v.Instance, strings.TrimSpace(agentOut))
+}
+
+// PRComment es un comment del PR con el subset mínimo que nos interesa para
+// calcular iter. Coincide con lo que devuelve `gh pr view --json comments`.
+type PRComment struct {
+	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+// nextValidatorIter devuelve el próximo iter a usar para los comments de
+// validadores en el PR. Es max(iter) + 1 mirando sólo los comments de che
+// con flow=execute y role=validator; si no hay, devuelve 1. Así una segunda
+// corrida sobre el mismo PR queda separada de la primera.
+func nextValidatorIter(existing []PRComment) int {
+	max := 0
+	for _, c := range existing {
+		h := comments.Parse(c.Body)
+		if h.Flow != "execute" || h.Role != validatorRole {
+			continue
+		}
+		if h.Iter > max {
+			max = h.Iter
+		}
+	}
+	return max + 1
+}
+
+// fetchPRComments lee los comments actuales del PR. Usa `gh pr view --json
+// comments` (misma forma que validate.FetchPRComments). El ctx permite
+// cancelarlo rápido si entra una señal.
+func fetchPRComments(ctx context.Context, prURL string) ([]PRComment, error) {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "view", prURL, "--json", "comments")
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("gh pr view comments: %s", strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, err
+	}
+	var wrap struct {
+		Comments []PRComment `json:"comments"`
+	}
+	if err := json.Unmarshal(out, &wrap); err != nil {
+		return nil, fmt.Errorf("parse gh pr view comments: %w", err)
+	}
+	return wrap.Comments, nil
 }
 
 func buildValidatorPrompt(issue *Issue, plan *ConsolidatedPlan) string {
