@@ -952,22 +952,41 @@ func buildPrompt(issue *Issue) string {
 
 Te voy a pasar un issue de GitHub ya clasificado (type, size, criterios iniciales). Tu tarea NO es implementar ni planear al detalle — es abrir el espacio de diseño:
 1. Parafrasear el issue para confirmar entendimiento.
-2. Listar las preguntas abiertas que hay que responder antes de ejecutar.
-3. Identificar riesgos con likelihood e impact.
-4. Proponer 2-4 caminos de implementación distintos con pros, cons y effort estimado.
-5. Marcar EXACTAMENTE UN camino como recomendado.
-6. Indicar el próximo paso concreto.
+2. Tomar decisiones técnicas por tu cuenta y declararlas como assumptions.
+3. Listar las preguntas abiertas que SOLO el humano puede contestar.
+4. Identificar riesgos con likelihood e impact.
+5. Proponer 2-4 caminos de implementación distintos con pros, cons y effort estimado.
+6. Marcar EXACTAMENTE UN camino como recomendado.
+7. Indicar el próximo paso concreto.
+
+IMPORTANTE — Clasificá todo lo que no sabés antes de decidir si preguntar:
+
+- kind="product": ambigüedad IRREDUCIBLE del dominio o del producto. Política del proyecto, trade-off de UX/negocio, alcance opinado. El código y el body del issue no la resuelven. SOLO estas van como "question" y pausan el flow.
+- kind="technical": decisión de ingeniería (API shape, orden de refactor, naming de helpers, trade-off de implementación, preservar vs extender un callback, alcance de un refactor mecánico). NO es una question. Tomá vos la decisión y anotala como "assumption" con una justificación de 1-2 líneas.
+- kind="documented": la respuesta ya está en el body del issue, en el código del repo, en design docs, memory, README o criterios de aceptación. Si te descubrís por preguntar algo documentado, LEELO y resolvé; no generes ni question ni assumption para esto.
+
+Regla práctica: si alguien con contexto del proyecto podría contestar con un grep, leyendo el body del issue, o aplicando best practice razonable, NO es una "question". Es una decisión tuya que va como "assumption" (o ni siquiera — no todo vale la pena declarar).
+
+No escales al humano cosas como:
+  * "¿preservamos este callback al migrar?" (technical — decidilo con best practice)
+  * "¿el test va con go-parser o grep en CI?" (technical — elegí una)
+  * "¿migramos también la función X que el issue no pide?" (documented — si no lo pide, no lo hacés)
+  * "¿las 3 implementaciones pasan los mismos args?" (documented — hacé grep y resolvé)
 
 Valores válidos:
 - likelihood/impact: low, medium, high
 - effort: XS (minutos), S (horas), M (1-2 días), L (1 semana), XL (varias semanas)
+- kind: product, technical, documented
 
 Devolvé EXCLUSIVAMENTE un objeto JSON con este shape — sin texto antes ni después, sin markdown code fences:
 
 {
   "summary": "Paráfrasis accionable del issue en 1-2 oraciones",
   "questions": [
-    {"q": "Pregunta abierta concreta", "why": "Por qué importa para el diseño", "blocker": true}
+    {"q": "Pregunta abierta concreta para el humano", "why": "Por qué NO puede responderse con código ni con el body", "blocker": true, "kind": "product"}
+  ],
+  "assumptions": [
+    {"what": "Decisión técnica que tomaste", "why": "Justificación breve (código leído, best practice, precedente del repo)"}
   ],
   "risks": [
     {"risk": "Descripción del riesgo", "likelihood": "medium", "impact": "high", "mitigation": "Cómo evitarlo"}
@@ -979,7 +998,9 @@ Devolvé EXCLUSIVAMENTE un objeto JSON con este shape — sin texto antes ni des
 }
 
 Reglas:
-- questions[] tiene al menos 1 item. Si no se te ocurre ninguna, el análisis es superficial — forzate a pensar.
+- questions[] puede estar vacío si no hay ambigüedad de producto real. Un array vacío es preferible a rellenar con preguntas técnicas inventadas.
+- assumptions[] idealmente tiene 2-5 items si tomaste decisiones técnicas. Cero assumptions con cero questions es sospechoso: o el issue es trivial, o no estás mirando lo suficiente.
+- Toda question DEBE tener kind="product". Si te sale kind="technical" o "documented", MOVELA a assumptions (o descartala si ya está documentada).
 - risks[] tiene al menos 1 item.
 - paths[] tiene entre 2 y 4 items. Un solo camino = no estás explorando, solo planeando.
 - EXACTAMENTE UN path con "recommended": true. Los otros con false.
@@ -1000,11 +1021,29 @@ func validate(r *Response) error {
 	if strings.TrimSpace(r.Summary) == "" {
 		return fmt.Errorf("summary is empty")
 	}
-	if len(r.Questions) == 0 {
-		return fmt.Errorf("questions[] is empty")
-	}
+	// questions[] puede estar vacío: con el prompt de clasificación
+	// (product/technical/documented) es legítimo que el ejecutor cierre
+	// todo como assumptions y no escale nada al humano.
 	if len(r.Risks) == 0 {
 		return fmt.Errorf("risks[] is empty")
+	}
+	for i, q := range r.Questions {
+		if strings.TrimSpace(q.Q) == "" {
+			return fmt.Errorf("question %d: q is empty", i)
+		}
+		if k := normalizeKind(q.Kind); k != "" && k != KindProduct {
+			// El ejecutor clasificó una question como technical/documented
+			// pero la dejó en questions[]. Esto es inconsistente con el
+			// prompt — las que no son product deben ir como assumption o
+			// ser descartadas. Rechazamos para que el ejecutor se corrija
+			// en vez de filtrar silenciosamente.
+			return fmt.Errorf("question %d: kind=%q en questions[] — mover a assumptions[] o remover (solo product va acá)", i, q.Kind)
+		}
+	}
+	for i, a := range r.Assumptions {
+		if strings.TrimSpace(a.What) == "" {
+			return fmt.Errorf("assumption %d: what is empty", i)
+		}
 	}
 	if len(r.Paths) < 2 || len(r.Paths) > 4 {
 		return fmt.Errorf("paths[] must have 2-4 items, got %d", len(r.Paths))
@@ -1052,7 +1091,19 @@ func renderComment(r *Response, agent Agent, iter int) string {
 	sb.WriteString(r.Summary)
 	sb.WriteString("\n\n")
 
+	if len(r.Assumptions) > 0 {
+		sb.WriteString("### Decisiones técnicas tomadas\n")
+		sb.WriteString("_El ejecutor resolvió esto por su cuenta (decisión de ingeniería, no de producto). Si alguna no te cuadra, marcala en un comment y re-corré._\n\n")
+		for _, a := range r.Assumptions {
+			sb.WriteString(fmt.Sprintf("- **%s** — %s\n", a.What, a.Why))
+		}
+		sb.WriteString("\n")
+	}
+
 	sb.WriteString("### Preguntas abiertas\n")
+	if len(r.Questions) == 0 {
+		sb.WriteString("_Sin ambigüedades de producto irreducibles; el ejecutor no necesita input humano para arrancar._\n")
+	}
 	for _, q := range r.Questions {
 		marker := "-"
 		if q.Blocker {
@@ -1299,15 +1350,38 @@ func buildValidatorPrompt(issue *Issue, execResp *Response) string {
 
 Chequeá específicamente:
 1. ¿Faltan riesgos relevantes? (scope creep, acoplamiento, rollback, UX, testing)
-2. ¿Faltan preguntas abiertas importantes? (decisiones no tomadas)
-3. ¿Los paths son arquitectónicamente distintos o son variantes del mismo tema?
-4. ¿Los pros/cons de cada path son realistas? ¿el recommended tiene justificación?
-5. ¿Algún punto requiere decisión de PRODUCTO del humano (no técnica)? Marcalo con needs_human=true.
+2. ¿Las preguntas del ejecutor son realmente para el humano, o debió decidirlas él?
+3. ¿Las assumptions del ejecutor son razonables o alguna está mal justificada?
+4. ¿Los paths son arquitectónicamente distintos o son variantes del mismo tema?
+5. ¿Los pros/cons de cada path son realistas? ¿el recommended tiene justificación?
+6. ¿Hay algo genuinamente irreducible que requiera decisión de PRODUCTO del humano?
+
+IMPORTANTE — Clasificación de questions del ejecutor:
+
+Para cada pregunta en questions[] del plan, clasificala en tu review:
+
+- Si kind="product" y la pregunta es legítima (ambigüedad de dominio/UX/negocio que ni el código ni el body resuelven): aceptala. Opcionalmente marcá needs_human=true en un finding si pensás que quedó mal formulada.
+- Si kind="technical" o kind="documented" (o sin kind pero claramente cae en una de esas dos categorías): ES UN BUG DEL EJECUTOR. Generá un finding con:
+    * severity="minor"
+    * area="questions"
+    * kind="technical" o "documented" según corresponda
+    * needs_human=false (NUNCA true — no escales al humano por decisiones técnicas)
+    * issue: "la pregunta X debió decidirse por el ejecutor porque <la respuesta está en <archivo/body>|es best practice <Y>|es decisión de ingeniería>"
+    * suggestion: la respuesta concreta o el path donde está la info.
+
+NO propongas agregar más preguntas al humano por decisiones técnicas. Si el ejecutor no decidió algo que debería haber decidido, la respuesta es "decidilo vos o el ejecutor", no "pidámosle al humano".
+
+Clasificación de tus propios findings:
+
+- kind="product": gap real de producto. Puede ir con needs_human=true.
+- kind="technical": gap técnico (falta manejo de error, path no compila, riesgo no cubierto). needs_human=false. Es feedback para el ejecutor.
+- kind="documented": el ejecutor ignoró algo que está en el body/código/docs. needs_human=false. Es bug del plan.
 
 Valores válidos:
-- verdict: "approve" (plan suficiente), "changes_requested" (hay que corregir cosas técnicas), "needs_human" (hay preguntas de producto que ni vos ni el ejecutor pueden contestar)
+- verdict: "approve" (plan suficiente), "changes_requested" (hay que corregir cosas técnicas), "needs_human" (hay preguntas de producto irreducibles)
 - severity: "blocker", "major", "minor"
-- area: "questions", "risks", "paths", "summary", "other"
+- area: "questions", "assumptions", "risks", "paths", "summary", "other"
+- kind: "product", "technical", "documented"
 
 Devolvé EXCLUSIVAMENTE un objeto JSON con este shape — sin texto antes ni después, sin markdown code fences:
 
@@ -1321,16 +1395,18 @@ Devolvé EXCLUSIVAMENTE un objeto JSON con este shape — sin texto antes ni des
       "where": "risks[]",
       "issue": "Descripción concreta del gap",
       "suggestion": "Cómo arreglarlo (opcional)",
-      "needs_human": false
+      "needs_human": false,
+      "kind": "technical"
     }
   ]
 }
 
 Reglas:
 - Si el plan está bien, verdict=approve y findings=[].
-- needs_human=true SOLO cuando la respuesta depende de una decisión del dueño del producto (ej: "¿idempotente o no?", "¿timeout o esperar para siempre?"). Cosas técnicas (falta manejo de error, el path no compila) van con needs_human=false.
-- Un finding con needs_human=true debería escalar el verdict global a "needs_human" si es blocker.
+- needs_human=true requiere kind=product Y que la respuesta dependa de decisión del dueño del producto (ej: "¿idempotente o no?", "¿timeout o esperar para siempre?"). Cualquier otro caso debe ir con needs_human=false.
+- Un finding kind=product needs_human=true escala el verdict global a "needs_human". Un finding technical o documented NUNCA escala a "needs_human" aunque sea blocker.
 - No inventes gaps — si el plan cubre un riesgo aunque sea brevemente, no lo marques como faltante.
+- Si el ejecutor NO listó questions y sus assumptions cubren las decisiones técnicas con justificación razonable, eso no es un gap: es lo correcto.
 
 Issue #` + fmt.Sprint(issue.Number) + `:
 Título: ` + issue.Title + `
@@ -1377,10 +1453,18 @@ func renderValidatorComment(r validatorResult, iter int) string {
 	sb.WriteString("### Findings\n")
 	for _, f := range resp.Findings {
 		marker := "-"
-		if f.NeedsHuman {
+		// Solo marcamos con 🧑 los findings que realmente pausan el flow
+		// (kind=product + needs_human). Un finding technical/documented con
+		// needs_human=true es inconsistente: lo mostramos como aviso pero
+		// sin el icono de "espera al humano" para no confundir.
+		if f.escalatesToHuman() {
 			marker = "- 🧑"
 		}
-		sb.WriteString(fmt.Sprintf("%s **[%s · %s]** %s", marker, f.Severity, f.Area, f.Issue))
+		kindTag := ""
+		if k := f.FindingKind(); k != KindProduct {
+			kindTag = " · " + k
+		}
+		sb.WriteString(fmt.Sprintf("%s **[%s · %s%s]** %s", marker, f.Severity, f.Area, kindTag, f.Issue))
 		if f.Where != "" {
 			sb.WriteString(" _(en: " + f.Where + ")_")
 		}
@@ -1915,12 +1999,13 @@ func buildValidatorResumePrompt(issue *Issue, state conversationState) string {
 	return `Sos un validador técnico senior. En una iteración anterior, otros validadores (incluido vos posiblemente) marcaron que el plan necesitaba input humano para ciertas preguntas de producto. El humano contestó. Tu tarea ahora es verificar si las respuestas cubren los gaps, y si queda algo sin responder.
 
 Reglas de esta iteración:
-1. Si las respuestas humanas cubren todas las preguntas que tenían needs_human=true en iter anterior, devolvé verdict=approve.
-2. Si quedan gaps técnicos menores (no bloqueantes ni de producto), devolvé verdict=changes_requested con findings específicos. Esto NO bloquea convergencia.
-3. Si las respuestas son ambiguas, parciales o contradicen algo del plan, devolvé verdict=needs_human con un finding needs_human=true explicando QUÉ falta responder — NO repitas las preguntas si ya fueron contestadas.
-4. Sé riguroso pero no inventes gaps — si la respuesta humana es clara aunque breve, aceptala.
+1. Si las respuestas humanas cubren todas las preguntas kind=product que tenían needs_human=true en iter anterior, devolvé verdict=approve.
+2. Si quedan gaps técnicos menores (no bloqueantes ni de producto), devolvé verdict=changes_requested con findings kind=technical. Esto NO bloquea convergencia.
+3. Si las respuestas son ambiguas, parciales o contradicen algo del plan Y la ambigüedad es de producto, devolvé verdict=needs_human con un finding kind=product needs_human=true explicando QUÉ falta responder — NO repitas las preguntas si ya fueron contestadas.
+4. NO pidas más input humano por decisiones técnicas. Si detectás algo que el ejecutor debería resolver (API shape, orden de implementación, naming), marcalo con kind=technical needs_human=false.
+5. Sé riguroso pero no inventes gaps — si la respuesta humana es clara aunque breve, aceptala.
 
-Valores válidos: mismo enum que antes (verdict, severity, area).
+Valores válidos: mismo enum que antes (verdict, severity, area) + kind=product|technical|documented.
 
 Devolvé EXCLUSIVAMENTE un objeto JSON con el shape:
 
@@ -1928,7 +2013,7 @@ Devolvé EXCLUSIVAMENTE un objeto JSON con el shape:
   "verdict": "approve",
   "summary": "Tu opinión global en 1-2 oraciones",
   "findings": [
-    {"severity": "minor", "area": "paths", "where": "...", "issue": "...", "suggestion": "...", "needs_human": false}
+    {"severity": "minor", "area": "paths", "where": "...", "issue": "...", "suggestion": "...", "needs_human": false, "kind": "technical"}
   ]
 }
 
@@ -2026,7 +2111,8 @@ func buildConsolidationPrompt(issue *Issue, state conversationState, finalResult
 
 Reglas:
 - Incorporá las respuestas del humano como DECISIONES firmes (no como "a definir").
-- Los findings de los validadores son cosas a cubrir: los blockers/majors van como steps o acceptance_criteria, los minors van como risks_to_mitigate.
+- Incorporá las assumptions del plan original como decisiones tomadas (salvo que el humano o un validador las contradiga explícitamente).
+- Los findings de los validadores son cosas a cubrir: blockers/majors van como steps o acceptance_criteria, minors van como risks_to_mitigate. Los findings con kind=technical y kind=documented son feedback del ejecutor — incorporá la corrección; no los arrastres como preguntas abiertas.
 - Elegí UN approach (el recommended del plan original ajustado por las decisiones del humano si cambió algo).
 - Sé concreto: si el humano dijo "no aplica X", sacá X del alcance; si dijo "preferimos A sobre B", elegí A y descartá B.
 - No incluyas preguntas abiertas ni ambigüedades — si algo quedó gris, elegí la opción más conservadora y anotá en risks_to_mitigate.
