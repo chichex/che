@@ -479,6 +479,18 @@ func resolveWorktree(repoRoot string, issueNum int, headBranch string) (*execute
 	if strings.TrimSpace(headBranch) == "" {
 		return nil, false, fmt.Errorf("PR sin head branch — no puedo crear worktree")
 	}
+
+	// Antes que nada: si la branch ya está checkouteada en algún worktree
+	// (ej. el que dejó execute en .worktrees/issue-<N>), reusamos ese path
+	// — git no permite dos worktrees en la misma branch, así que intentar
+	// crear uno nuevo fallaría. Busqueda por branch (no por path) porque
+	// el path de execute puede no coincidir con el que calcula iterate.
+	if p, err := findWorktreePathByBranch(repoRoot, headBranch); err != nil {
+		return nil, false, err
+	} else if p != "" {
+		return &execute.Worktree{Path: p, Branch: headBranch}, false, nil
+	}
+
 	path := worktreePathFor(repoRoot, issueNum, headBranch)
 
 	existing, err := existingWorktreeBranch(repoRoot, path)
@@ -539,6 +551,48 @@ func sanitizeBranchSlug(branch string) string {
 		return "pr"
 	}
 	return branch
+}
+
+// findWorktreePathByBranch parsea `git worktree list --porcelain` y
+// devuelve el path del worktree que tiene branch checkouteada, o "" si
+// ninguno. Es el dual de existingWorktreeBranch (que busca por path).
+// Se usa para reusar el worktree que creó execute aunque esté en un path
+// que iterate/close calcularían distinto.
+func findWorktreePathByBranch(repoRoot, branch string) (string, error) {
+	out, err := exec.Command("git", "-C", repoRoot, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("git worktree list: %s", strings.TrimSpace(string(ee.Stderr)))
+		}
+		return "", err
+	}
+	var curPath, curBranch string
+	flush := func() string {
+		if curPath != "" && curBranch == branch {
+			return curPath
+		}
+		return ""
+	}
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			if p := flush(); p != "" {
+				return p, nil
+			}
+			curPath, curBranch = "", ""
+			continue
+		}
+		if strings.HasPrefix(trimmed, "worktree ") {
+			curPath = strings.TrimPrefix(trimmed, "worktree ")
+		} else if strings.HasPrefix(trimmed, "branch ") {
+			curBranch = strings.TrimPrefix(trimmed, "branch refs/heads/")
+		}
+	}
+	if p := flush(); p != "" {
+		return p, nil
+	}
+	return "", nil
 }
 
 func existingWorktreeBranch(repoRoot, path string) (string, error) {

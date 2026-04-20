@@ -593,7 +593,7 @@ func precheckGhAuth() error {
 // formatos de ref que gh (número, URL, owner/repo#N).
 func FetchPR(ref string) (*PullRequest, error) {
 	cmd := exec.Command("gh", "pr", "view", ref,
-		"--json", "number,title,url,state,isDraft,author,headRefName,labels")
+		"--json", "number,title,url,state,isDraft,author,headRefName,labels,closingIssuesReferences")
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
