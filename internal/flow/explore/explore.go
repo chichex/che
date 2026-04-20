@@ -315,18 +315,49 @@ func (i *Issue) LabelNames() []string {
 }
 
 // Response es lo que claude devuelve después de analizar el issue.
+//
+// Assumptions son decisiones técnicas que el ejecutor tomó por su cuenta
+// (aspecto de API, orden de refactor, helper naming, trade-offs que no
+// requieren voto humano). Las listamos en el comment del executor para que
+// el dueño tenga visibilidad sin interrumpirle. Si un validador difiere, lo
+// marca como finding technical — no escala al humano.
 type Response struct {
-	Summary   string     `json:"summary"`
-	Questions []Question `json:"questions"`
-	Risks     []Risk     `json:"risks"`
-	Paths     []Path     `json:"paths"`
-	NextStep  string     `json:"next_step"`
+	Summary     string       `json:"summary"`
+	Questions   []Question   `json:"questions"`
+	Assumptions []Assumption `json:"assumptions,omitempty"`
+	Risks       []Risk       `json:"risks"`
+	Paths       []Path       `json:"paths"`
+	NextStep    string       `json:"next_step"`
 }
 
+// Question es una pregunta abierta del ejecutor.
+//
+// Kind clasifica la pregunta para que el flow decida si realmente
+// corresponde interrumpir al humano:
+//   - "product": ambigüedad de dominio/producto irreducible que ni el código
+//     ni el body del issue resuelven. Solo estas van al human-request.
+//   - "technical": decisión de ingeniería (API shape, orden de refactor,
+//     naming). El ejecutor debería tomarla por su cuenta; si aparece como
+//     question es un bug del ejecutor y el validador la marca como tal.
+//   - "documented": la respuesta ya está en el body del issue, en el código,
+//     o en artefactos del repo. Bug del ejecutor: debió leer, no preguntar.
+//
+// Si Kind está vacío (fixtures viejas / modelos que no emiten el campo),
+// asumimos "product" — comportamiento conservador compatible con el shape
+// anterior, donde toda question blocker iba al humano.
 type Question struct {
 	Q       string `json:"q"`
 	Why     string `json:"why"`
 	Blocker bool   `json:"blocker"`
+	Kind    string `json:"kind,omitempty"`
+}
+
+// Assumption es una decisión técnica que el ejecutor tomó sin consultar al
+// humano. Se renderiza en el comment del executor como rastro de decisión
+// (no bloquea el flow ni requiere respuesta).
+type Assumption struct {
+	What string `json:"what"`
+	Why  string `json:"why"`
 }
 
 type Risk struct {
@@ -353,6 +384,60 @@ var (
 	validSeverities = map[string]bool{"blocker": true, "major": true, "minor": true}
 )
 
+// Valores válidos de Kind para Question/Finding. "product" es el único que
+// habilita escape humano; los otros dos son feedback interno del loop.
+const (
+	KindProduct    = "product"
+	KindTechnical  = "technical"
+	KindDocumented = "documented"
+)
+
+// validKinds es la allowlist de Kind explícitos. No usamos el helper en
+// validación estricta (aceptamos missing) pero sirve para normalizar inputs
+// que vengan con mayúsculas o variantes.
+var validKinds = map[string]bool{
+	KindProduct:    true,
+	KindTechnical:  true,
+	KindDocumented: true,
+}
+
+// normalizeKind baja a lowercase y si el valor no está en la allowlist lo
+// trata como vacío (→ default "product" arriba). Así absorbemos variantes
+// del LLM sin romper, pero tampoco propagamos etiquetas fantasía.
+func normalizeKind(k string) string {
+	k = strings.ToLower(strings.TrimSpace(k))
+	if validKinds[k] {
+		return k
+	}
+	return ""
+}
+
+// kindOrDefault devuelve el Kind efectivo, aplicando el default "product"
+// cuando el campo viene vacío. Centralizar esta lógica evita que un caller
+// olvide el fallback y trate una question sin Kind como technical por error.
+func kindOrDefault(k string) string {
+	if n := normalizeKind(k); n != "" {
+		return n
+	}
+	return KindProduct
+}
+
+// QuestionKind expone el Kind efectivo de una Question — default "product"
+// para compat con fixtures/modelos que no emiten el campo.
+func (q Question) QuestionKind() string { return kindOrDefault(q.Kind) }
+
+// FindingKind expone el Kind efectivo de un Finding — default "product".
+func (f Finding) FindingKind() string { return kindOrDefault(f.Kind) }
+
+// escalatesToHuman devuelve true cuando un finding realmente debe pausar el
+// flow esperando respuesta del humano. Combina needs_human + kind==product:
+// si el validador emite needs_human=true con kind=technical/documented, es
+// un bug del validador (o del shape anterior al kind) y lo ignoramos para
+// no reintroducir la paranoia que este flow busca quitar.
+func (f Finding) escalatesToHuman() bool {
+	return f.NeedsHuman && f.FindingKind() == KindProduct
+}
+
 // ValidatorResponse es el output estructurado que devuelve cada validador
 // después de leer el plan del ejecutor.
 type ValidatorResponse struct {
@@ -363,7 +448,19 @@ type ValidatorResponse struct {
 
 // Finding es una observación concreta que un validador encontró sobre el plan.
 // NeedsHuman indica que requiere decisión de producto del humano, no de otro
-// agente — dispara el escape humano que pausa el flow.
+// agente — dispara el escape humano que pausa el flow SIEMPRE Y CUANDO el
+// Kind sea "product" (ver QuestionKindProduct).
+//
+// Kind clasifica el finding para decidir si realmente escala al humano:
+//   - "product": decisión de producto/dominio irreducible. Es el único caso
+//     donde NeedsHuman=true realmente pausa el flow.
+//   - "technical": decisión de ingeniería. Si el validador difiere del
+//     ejecutor, lo deja como feedback — NO escala. NeedsHuman debe ser false.
+//   - "documented": la respuesta ya está en el body/código/docs. Bug del
+//     ejecutor o del validador anterior. NO escala.
+//
+// Si Kind está vacío (fixtures viejas), se asume "product" — backwards
+// compat con el shape pre-clasificación.
 type Finding struct {
 	Severity   string `json:"severity"`
 	Area       string `json:"area"`
@@ -371,6 +468,7 @@ type Finding struct {
 	Issue      string `json:"issue"`
 	Suggestion string `json:"suggestion,omitempty"`
 	NeedsHuman bool   `json:"needs_human"`
+	Kind       string `json:"kind,omitempty"`
 }
 
 // validatorResult agrupa qué validador corrió, qué devolvió y si falló.
@@ -381,17 +479,23 @@ type validatorResult struct {
 }
 
 // hasHumanGaps revisa si alguno de los validators pidió input humano, ya sea
-// vía verdict=needs_human o vía un finding con needs_human=true.
+// vía verdict=needs_human o vía un finding con needs_human=true. Solo cuenta
+// findings con Kind=product — un validador que emite needs_human=true sobre
+// algo technical/documented es inconsistente y lo ignoramos (ese finding se
+// ve en el comment, pero no para de pausar al humano).
+//
+// El verdict=needs_human también requiere acompañamiento de al menos un
+// finding que realmente escale. Si el validador dijo needs_human pero todos
+// los findings son technical o documented, se trata como changes_requested
+// de facto. Eso previene el patrón "verdict needs_human con preguntas
+// técnicas" que vimos en issue #10.
 func hasHumanGaps(results []validatorResult) bool {
 	for _, r := range results {
 		if r.Response == nil {
 			continue
 		}
-		if r.Response.Verdict == "needs_human" {
-			return true
-		}
 		for _, f := range r.Response.Findings {
-			if f.NeedsHuman {
+			if f.escalatesToHuman() {
 				return true
 			}
 		}
@@ -1349,16 +1453,24 @@ func renderHumanRequest(issueNumber int, plan *Response, results []validatorResu
 }
 
 // collectPlanBlockers devuelve las preguntas del plan marcadas como
-// blocker=true; son las principales a contestar.
+// blocker=true y clasificadas como "product" (o sin Kind, que por default
+// se trata como product — back-compat con fixtures/modelos viejos). Las
+// preguntas con Kind=technical o documented NO entran al human-request
+// aunque estén marcadas como blocker: son decisiones que el ejecutor
+// debería haber tomado por su cuenta.
 func collectPlanBlockers(plan *Response) []Question {
 	if plan == nil {
 		return nil
 	}
 	var out []Question
 	for _, q := range plan.Questions {
-		if q.Blocker && strings.TrimSpace(q.Q) != "" {
-			out = append(out, q)
+		if !q.Blocker || strings.TrimSpace(q.Q) == "" {
+			continue
 		}
+		if q.QuestionKind() != KindProduct {
+			continue
+		}
+		out = append(out, q)
 	}
 	return out
 }
@@ -1386,7 +1498,10 @@ func collectValidatorQuestions(results []validatorResult, planQs []Question) []e
 		}
 		label := fmt.Sprintf("%s#%d", r.Validator.Agent, r.Validator.Instance)
 		for _, f := range r.Response.Findings {
-			if !f.NeedsHuman {
+			// Solo escalan los findings que realmente necesitan humano Y son
+			// de producto. Technical/documented se ven en el comment del
+			// validador pero no obligan al humano a contestarlas.
+			if !f.escalatesToHuman() {
 				continue
 			}
 			if isMetaFinding(f.Issue) {

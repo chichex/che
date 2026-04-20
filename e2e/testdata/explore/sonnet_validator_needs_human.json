@@ -8,7 +8,8 @@
       "where": "alcance del flow",
       "issue": "¿El loop de corrección es bounded (máx 3 iteraciones) o el usuario siempre elige cuándo cortar?",
       "suggestion": "",
-      "needs_human": true
+      "needs_human": true,
+      "kind": "product"
     },
     {
       "severity": "blocker",
@@ -16,7 +17,8 @@
       "where": "escape humano",
       "issue": "¿Qué hacemos si el validador marca needs_human y el usuario no contesta en N días — timeout, skip, o queda pendiente para siempre?",
       "suggestion": "",
-      "needs_human": true
+      "needs_human": true,
+      "kind": "product"
     }
   ]
 }
