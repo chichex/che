@@ -131,13 +131,17 @@ func (p *PullRequest) HasLabel(name string) bool {
 // Check es el subset de un item de `gh pr checks --json ...` que usamos.
 // Los estados posibles incluyen: SUCCESS, FAILURE, PENDING, IN_PROGRESS,
 // SKIPPED, NEUTRAL, CANCELLED, TIMED_OUT, ACTION_REQUIRED.
+//
+// Los campos que pedimos a `gh pr checks --json` están acotados a los que
+// el CLI de gh acepta: name, state, link, workflow, startedAt, completedAt,
+// description, bucket, event. Campos como "completed" o "conclusion" NO
+// son aceptados por gh (aunque aparecen en la API REST) — pedirlos falla
+// con "Unknown JSON field". De los soportados sólo usamos los 4 primeros.
 type Check struct {
-	Name       string `json:"name"`
-	State      string `json:"state"`
-	Link       string `json:"link"`
-	Workflow   string `json:"workflow"`
-	Completed  bool   `json:"completed"`
-	Conclusion string `json:"conclusion"`
+	Name     string `json:"name"`
+	State    string `json:"state"`
+	Link     string `json:"link"`
+	Workflow string `json:"workflow"`
 }
 
 // CIState es el estado agregado de todos los checks del PR.
@@ -853,7 +857,7 @@ func FetchPR(ref string) (*PullRequest, error) {
 // objeto con key "checks" — parseamos ambas.
 func FetchChecks(ref string) ([]Check, error) {
 	cmd := exec.Command("gh", "pr", "checks", ref,
-		"--json", "name,state,link,workflow,completed,conclusion")
+		"--json", "name,state,link,workflow")
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
