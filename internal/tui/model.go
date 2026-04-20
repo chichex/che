@@ -1015,7 +1015,15 @@ func renderValidateSelect(m Model) string {
 			if c.IsDraft {
 				draft = " " + mutedBadge("draft")
 			}
-			line := prefix + num + "  " + c.Title + draft
+			rel := ""
+			if len(c.RelatedIssues) > 0 {
+				parts := make([]string, 0, len(c.RelatedIssues))
+				for _, n := range c.RelatedIssues {
+					parts = append(parts, fmt.Sprintf("#%d", n))
+				}
+				rel = " " + mutedBadge("closes "+strings.Join(parts, ", "))
+			}
+			line := prefix + num + "  " + c.Title + draft + rel
 			if c.Author != "" {
 				line += " " + comingSoonStyle.Render("— by @"+c.Author)
 			}
