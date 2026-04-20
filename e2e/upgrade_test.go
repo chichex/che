@@ -63,6 +63,10 @@ func TestUpgrade_BrewPath_Success(t *testing.T) {
 	env := harness.New(t)
 	env.StartReleasesServer().SetLatest("v9.9.9", nil)
 	env.WithInstallPath(env.FakeBrewCaskBin(env.CurrentVersion()))
+	// `brew update` es pre-requisito (v0.0.30): sin esto brew puede
+	// re-instalar del cache local del tap, que no refleja la release
+	// recién publicada.
+	env.ExpectBrew(`^update$`).RespondStdout("Already up-to-date.\n", 0)
 	env.ExpectBrew(`^uninstall --cask che$`).RespondStdout("Uninstalling che...\n", 0)
 	env.ExpectBrew(`^install --cask chichex/tap/che$`).RespondStdout("Installed\n", 0)
 
@@ -71,8 +75,9 @@ func TestUpgrade_BrewPath_Success(t *testing.T) {
 	harness.AssertContains(t, out, "brew")
 
 	inv := env.Invocations()
-	inv.AssertCalled(t, "brew", 2)
-	inv.CallOf("brew", 2).AssertArgsContain(t, "install", "--cask", "chichex/tap/che")
+	inv.AssertCalled(t, "brew", 3)
+	inv.CallOf("brew", 1).AssertArgsContain(t, "update")
+	inv.CallOf("brew", 3).AssertArgsContain(t, "install", "--cask", "chichex/tap/che")
 }
 
 // TestUpgrade_DirectPath_Success: target binary is ~/.local/bin/che. Upgrade

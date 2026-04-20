@@ -171,6 +171,15 @@ func detectInstall(path string) installMethod {
 
 func upgradeViaBrew(stdout, stderr io.Writer, tag string) error {
 	fmt.Fprintln(stdout, "Detected brew install, upgrading via brew…")
+	// `brew update` antes de uninstall/install: sin esto, brew usa el
+	// estado local del tap (cacheado como git repo bajo
+	// $(brew --repository)/Library/Taps/chichex/homebrew-tap) y puede
+	// re-instalar la versión vieja. Caso real visto en v0.0.29: el
+	// cask.rb ya apuntaba a 0.0.29 en el remote, pero brew bajó 0.0.28
+	// porque el git del tap no había hecho fetch después de la release.
+	if err := runPassthrough(stdout, stderr, "brew", "update"); err != nil {
+		fmt.Fprintf(stderr, "warning: brew update failed (%v) — sigo igual, puede que la versión nueva no esté sincronizada\n", err)
+	}
 	if err := runPassthrough(stdout, stderr, "brew", "uninstall", "--cask", "che"); err != nil {
 		fmt.Fprintf(stderr, "error: brew uninstall failed: %v\n", err)
 		os.Exit(2)
