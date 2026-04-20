@@ -18,6 +18,7 @@ import (
 	"github.com/chichex/che/internal/flow/execute"
 	"github.com/chichex/che/internal/flow/explore"
 	"github.com/chichex/che/internal/flow/idea"
+	"github.com/chichex/che/internal/flow/validate"
 )
 
 type screen int
@@ -35,6 +36,10 @@ const (
 	screenExecuteSelect
 	screenExecuteAgent
 	screenExecuteRunning
+	screenValidateLoading
+	screenValidateSelect
+	screenValidateValidators
+	screenValidateRunning
 	screenResult
 )
 
@@ -63,8 +68,9 @@ var menuItems = []menuItem{
 	{label: "Idea nueva", key: "1", action: screenIdeaInput},
 	{label: "Explorar", key: "2", action: screenExploreLoading},
 	{label: "Ejecutar", key: "3", action: screenExecuteLoading},
-	{label: "Cerrar", key: "4", disabled: true},
-	{label: "Eliminar", key: "5", disabled: true},
+	{label: "Validar", key: "4", action: screenValidateLoading},
+	{label: "Cerrar", key: "5", disabled: true},
+	{label: "Eliminar", key: "6", disabled: true},
 }
 
 const maxLogLines = 40
@@ -106,6 +112,14 @@ type Model struct {
 	executeChosenRef  string
 	executeAgentIdx   int
 	executeChosenAgent execute.Agent
+
+	// selector de validate: lista de PRs abiertos + panel de validadores.
+	validateCandidates     []validate.Candidate
+	validateCursor         int
+	validateChosenRef      string
+	validateChosenURL      string
+	validateValidatorCursor int
+	validateValidatorCount  map[validate.Agent]int
 
 	// resultado final
 	resultLines []string
@@ -184,6 +198,15 @@ type executeDoneMsg struct {
 	stdout string
 	stderr string
 }
+type validateCandidatesLoadedMsg struct {
+	items []validate.Candidate
+	err   error
+}
+type validateDoneMsg struct {
+	code   validate.ExitCode
+	stdout string
+	stderr string
+}
 type resumeInspectedMsg struct {
 	ref        string
 	agent      explore.Agent
@@ -210,6 +233,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case executeDoneMsg:
 		return m.finishRun(int(msg.code), msg.code == execute.ExitOK, msg.stdout, msg.stderr), nil
+
+	case validateDoneMsg:
+		return m.finishRun(int(msg.code), msg.code == validate.ExitOK, msg.stdout, msg.stderr), nil
+
+	case validateCandidatesLoadedMsg:
+		if msg.err != nil {
+			m.screen = screenResult
+			m.resultOK = false
+			m.resultLines = []string{"error: " + msg.err.Error()}
+			return m, nil
+		}
+		if len(msg.items) == 0 {
+			m.screen = screenResult
+			m.resultOK = false
+			m.resultLines = []string{
+				"No hay PRs abiertos en este repo.",
+				"Abrí un PR antes (por ej. con `che execute`) y volvé a intentar.",
+			}
+			return m, nil
+		}
+		m.validateCandidates = msg.items
+		m.validateCursor = 0
+		m.screen = screenValidateSelect
+		return m, nil
 
 	case executeCandidatesLoadedMsg:
 		if msg.err != nil {
@@ -274,7 +321,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		if m.screen == screenIdeaRunning || m.screen == screenExploreRunning || m.screen == screenExecuteRunning {
+		if m.screen == screenIdeaRunning || m.screen == screenExploreRunning ||
+			m.screen == screenExecuteRunning || m.screen == screenValidateRunning {
 			return m, tickCmd()
 		}
 		return m, nil
@@ -305,7 +353,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleMenuKey(msg)
 	case screenIdeaInput:
 		return m.handleIdeaInputKey(msg)
-	case screenIdeaRunning, screenExploreRunning, screenExploreLoading, screenExecuteRunning, screenExecuteLoading:
+	case screenIdeaRunning, screenExploreRunning, screenExploreLoading, screenExecuteRunning, screenExecuteLoading,
+		screenValidateRunning, screenValidateLoading:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
@@ -320,6 +369,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleExecuteSelectKey(msg)
 	case screenExecuteAgent:
 		return m.handleExecuteAgentKey(msg)
+	case screenValidateSelect:
+		return m.handleValidateSelectKey(msg)
+	case screenValidateValidators:
+		return m.handleValidateValidatorsKey(msg)
 	case screenResult:
 		return m.handleResultKey(msg)
 	}
@@ -370,6 +423,11 @@ func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 		m.executeCandidates = nil
 		m.executeCursor = 0
 		return m, loadExecuteCandidatesCmd()
+	case screenValidateLoading:
+		m.screen = screenValidateLoading
+		m.validateCandidates = nil
+		m.validateCursor = 0
+		return m, loadValidateCandidatesCmd()
 	}
 	return m, nil
 }
@@ -441,6 +499,118 @@ func (m Model) handleExecuteAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// loadValidateCandidatesCmd lista PRs abiertos del repo vía gh.
+func loadValidateCandidatesCmd() tea.Cmd {
+	return func() tea.Msg {
+		items, err := validate.ListOpenPRs()
+		return validateCandidatesLoadedMsg{items: items, err: err}
+	}
+}
+
+func (m Model) handleValidateSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	total := len(m.validateCandidates)
+	switch k {
+	case "esc":
+		m.screen = screenMenu
+		m.validateCandidates = nil
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if total == 0 {
+			return m, nil
+		}
+		m.validateCursor = (m.validateCursor - 1 + total) % total
+		return m, nil
+	case "down", "j":
+		if total == 0 {
+			return m, nil
+		}
+		m.validateCursor = (m.validateCursor + 1) % total
+		return m, nil
+	case "enter":
+		if total == 0 {
+			return m, nil
+		}
+		chosen := m.validateCandidates[m.validateCursor]
+		m.validateChosenRef = fmt.Sprint(chosen.Number)
+		m.validateChosenURL = chosen.URL
+		// Default: opus=1 (coherente con flag default).
+		m.validateValidatorCount = map[validate.Agent]int{validate.AgentOpus: 1}
+		m.validateValidatorCursor = 0
+		m.screen = screenValidateValidators
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m Model) handleValidateValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	switch k {
+	case "esc":
+		m.screen = screenValidateSelect
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		m.validateValidatorCursor = (m.validateValidatorCursor - 1 + len(validate.ValidAgents)) % len(validate.ValidAgents)
+		return m, nil
+	case "down", "j":
+		m.validateValidatorCursor = (m.validateValidatorCursor + 1) % len(validate.ValidAgents)
+		return m, nil
+	case " ", "space", "x":
+		a := validate.ValidAgents[m.validateValidatorCursor]
+		m.validateValidatorCount[a] = (m.validateValidatorCount[a] + 1) % (maxValidatorsPerAgent + 1)
+		return m, nil
+	case "enter":
+		validators := validateValidatorsFromCounts(m.validateValidatorCount)
+		total := len(validators)
+		// validate REQUIERE al menos 1 validador (a diferencia de explore).
+		if total < 1 || total > 3 {
+			return m, nil
+		}
+		return m.startValidateFlow(m.validateChosenRef, validators)
+	}
+	return m, nil
+}
+
+// validateValidatorsFromCounts traduce el mapa de counts del TUI a una lista
+// de validate.Validator con instance correcto en el orden canónico.
+func validateValidatorsFromCounts(counts map[validate.Agent]int) []validate.Validator {
+	var out []validate.Validator
+	for _, a := range validate.ValidAgents {
+		n := counts[a]
+		for i := 1; i <= n; i++ {
+			out = append(out, validate.Validator{Agent: a, Instance: i})
+		}
+	}
+	return out
+}
+
+// startValidateFlow arranca validate.Run en background sobre el PR elegido.
+func (m Model) startValidateFlow(prRef string, validators []validate.Validator) (tea.Model, tea.Cmd) {
+	m.screen = screenValidateRunning
+	m.runStart = time.Now()
+	m.runLog = []string{}
+	m.progressCh = make(chan tea.Msg, 64)
+
+	go func(ch chan<- tea.Msg) {
+		var stdout, stderr bytes.Buffer
+		code := validate.Run(prRef, validate.Opts{
+			Stdout:     &stdout,
+			Stderr:     &stderr,
+			Validators: validators,
+			OnProgress: func(line string) {
+				ch <- progressMsg{line: line}
+			},
+		})
+		ch <- validateDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	}(m.progressCh)
+
+	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
 }
 
 // startExecuteFlow arranca execute.Run en background sobre el issue elegido
@@ -676,6 +846,7 @@ func (m Model) handleResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.exploreNew = nil
 	m.exploreResume = nil
 	m.executeCandidates = nil
+	m.validateCandidates = nil
 	return m, nil
 }
 
@@ -795,10 +966,126 @@ func (m Model) View() string {
 		return renderExecuteAgent(m)
 	case screenExecuteRunning:
 		return renderRunning(m, "Ejecutando issue…", "Ctrl+C cancela")
+	case screenValidateLoading:
+		return renderValidateLoading(m)
+	case screenValidateSelect:
+		return renderValidateSelect(m)
+	case screenValidateValidators:
+		return renderValidateValidators(m)
+	case screenValidateRunning:
+		return renderRunning(m, "Validando PR…", "Ctrl+C cancela")
 	case screenResult:
 		return renderResult(m)
 	}
 	return ""
+}
+
+// ---- validate renders ----
+
+func renderValidateLoading(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Validar un PR"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render("Buscando PRs abiertos…"))
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("Ctrl+C cancela"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func renderValidateSelect(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Validar"))
+	sb.WriteString("\n")
+	total := len(m.validateCandidates)
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("%d PR(s) abiertos", total)))
+	sb.WriteString("\n\n")
+	if total == 0 {
+		sb.WriteString("  " + mutedBadge("(ninguno)") + "\n")
+	} else {
+		for i, c := range m.validateCandidates {
+			prefix := "  "
+			style := menuItemStyle
+			if i == m.validateCursor {
+				prefix = "▸ "
+				style = menuSelectedStyle
+			}
+			num := menuNumberStyle.Render(fmt.Sprintf("#%d", c.Number))
+			draft := ""
+			if c.IsDraft {
+				draft = " " + mutedBadge("draft")
+			}
+			line := prefix + num + "  " + c.Title + draft
+			if c.Author != "" {
+				line += " " + comingSoonStyle.Render("— by @"+c.Author)
+			}
+			sb.WriteString(style.Render(line) + "\n")
+		}
+	}
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("↑/↓ navega · Enter elige · Esc vuelve · Ctrl+C sale"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func renderValidateValidators(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Elegí validadores"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("PR #%s — marcá con space (al menos 1, máximo 3)",
+		m.validateChosenRef)))
+	sb.WriteString("\n\n")
+
+	total := 0
+	for i, a := range validate.ValidAgents {
+		count := m.validateValidatorCount[a]
+		total += count
+		box := renderCheckbox(count)
+		prefix := "  "
+		style := menuItemStyle
+		if i == m.validateValidatorCursor {
+			prefix = "▸ "
+			style = menuSelectedStyle
+		}
+		name := strings.ToUpper(string(a)[:1]) + string(a)[1:]
+		line := prefix + box + "  " + name
+		// Reusamos las descripciones de explore.validatorAgentDescriptions,
+		// que están indexadas por explore.Agent — los strings subyacentes son
+		// iguales así que mapeamos manualmente.
+		descKey := explore.Agent(string(a))
+		if desc, ok := validatorAgentDescriptions[descKey]; ok {
+			line += "  " + comingSoonStyle.Render("— "+desc)
+		}
+		sb.WriteString(style.Render(line) + "\n")
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString("  " + renderValidateValidatorTotal(total) + "\n")
+
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("↑/↓ navega · Space cycle 0/1/2 · Enter manda · Esc vuelve · Ctrl+C sale"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+// renderValidateValidatorTotal es como renderValidatorTotal pero con la regla
+// de validate: el total=0 es inválido (validate sin validadores no corre).
+func renderValidateValidatorTotal(total int) string {
+	mark := "✓"
+	note := ""
+	valid := total >= 1 && total <= 3
+	if total == 0 {
+		mark = "✗"
+		note = "  (elegí al menos 1)"
+	} else if total > 3 {
+		mark = "✗"
+		note = "  (máximo 3 validadores)"
+	}
+	style := successStyle
+	if !valid {
+		style = errorStyle
+	}
+	return style.Render(fmt.Sprintf("Total: %d %s", total, mark)) + comingSoonStyle.Render(note)
 }
 
 func renderExecuteLoading(m Model) string {

@@ -1,0 +1,9 @@
+{
+  "number": 7,
+  "title": "feat(execute): nuevo flow de ejecución",
+  "url": "https://github.com/acme/demo/pull/7",
+  "state": "OPEN",
+  "isDraft": true,
+  "headRefName": "exec/42-nuevo-flow",
+  "author": {"login": "acme-bot"}
+}
