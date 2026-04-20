@@ -2,6 +2,7 @@ package e2e_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -124,9 +125,9 @@ func waitForInvocation(t *testing.T, env *harness.Env, bin string, timeout time.
 }
 
 // assertCleanupApplied verifica el estado final después de un cleanup por
-// señal: el directorio del worktree no existe, la llamada de rollback a gh
-// issue edit con --add-label status:plan ocurrió, el fake claude no está
-// corriendo, y el stderr tiene algún mensaje identificable.
+// señal: el directorio del worktree no existe, la branch local fue borrada,
+// el rollback de label ocurrió, el stderr tiene un mensaje identificable y
+// no quedan procesos huérfanos del fake agent.
 func assertCleanupApplied(t *testing.T, env *harness.Env, stderr string) {
 	t.Helper()
 
@@ -136,7 +137,19 @@ func assertCleanupApplied(t *testing.T, env *harness.Env, stderr string) {
 		t.Fatalf("worktree %s still exists after signal cleanup (err=%v)", wtPath, err)
 	}
 
-	// 2) Rollback de label ejecutado: debe haber un issue edit consecutivo
+	// 2) Branch local borrada: `git branch --list exec/42-*` no debe matchear.
+	//    El PR documenta "cleanup determinista" — si la branch queda viva el
+	//    próximo execute sobre el mismo issue se va a apropiar de ella.
+	cmd := exec.Command("git", "-C", env.RepoDir, "branch", "--list", "exec/42-*")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git branch --list: %v", err)
+	}
+	if strings.TrimSpace(string(out)) != "" {
+		t.Fatalf("local branch exec/42-* still present after cleanup:\n%s", out)
+	}
+
+	// 3) Rollback de label ejecutado: debe haber un issue edit consecutivo
 	//    con --add-label status:plan.
 	edits := env.Invocations().FindCalls("gh", "issue", "edit", "42")
 	foundRollback := false
@@ -151,15 +164,32 @@ func assertCleanupApplied(t *testing.T, env *harness.Env, stderr string) {
 		t.Fatalf("expected rollback to status:plan in edits\n%v", edits)
 	}
 
-	// 3) Mensaje al usuario: el stderr debería indicar que limpió local.
+	// 4) Mensaje al usuario: el stderr debería indicar que limpió local.
 	if !strings.Contains(stderr, "limpiando localmente") && !strings.Contains(stderr, "señal recibida") {
 		t.Fatalf("expected signal cleanup message in stderr, got:\n%s", stderr)
 	}
 
-	// 4) No quedan procesos huérfanos: buscamos el PID del fake claude.
-	//    Es difícil chequear directamente sin ptree; confiamos en que el
-	//    Wait devolvió con exit 130 (implica cmd.Wait retornó → el fake
-	//    murió antes o al mismo tiempo que el parent).
+	// 5) No quedan procesos huérfanos del fake claude: si `cmd.Wait` retornó
+	//    (exit 130) eso solo garantiza que el PID directo murió — los
+	//    descendientes del process group podrían seguir vivos si el kill -pgid
+	//    no funcionó. Chequeamos explícitamente que no haya un `claude` (el
+	//    symlink del fake) corriendo con el FakeBin del env como ancestro.
+	if leaked := findLeakedFakes(env, "claude"); leaked != "" {
+		t.Fatalf("orphan claude fake still running after signal cleanup:\n%s", leaked)
+	}
+}
+
+// findLeakedFakes busca procesos vivos cuyo path ejecutable apunte al fake
+// `bin` del env (symlink en FakeBin). Retorna la salida de `ps` que matchea
+// o "" si no hay. Usamos `pgrep -f` con el prefijo del FakeBin para evitar
+// falsos positivos con `claude`/`codex` reales instalados en la máquina.
+func findLeakedFakes(env *harness.Env, bin string) string {
+	// pgrep -fl <pattern> devuelve pid + command line; matcheamos por el
+	// path del symlink ya que el fake se ejecuta como "<FakeBin>/<bin>".
+	pattern := filepath.Join(env.FakeBin, bin)
+	cmd := exec.Command("pgrep", "-fl", pattern)
+	out, _ := cmd.Output() // exit 1 = no matches, lo tratamos como "clean".
+	return strings.TrimSpace(string(out))
 }
 
 // TestExecute_SIGINT_DuringValidatorsWait: arrancamos el flow completo
