@@ -1,9 +1,13 @@
 package validate
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/chichex/che/internal/labels"
 )
 
 func TestParsePRRef(t *testing.T) {
@@ -255,6 +259,137 @@ func TestRenderValidatorComment_TitleVisibility(t *testing.T) {
 	}
 	if !strings.Contains(out, "<!-- claude-cli: flow=validate iter=2 agent=opus instance=1 role=validator -->") {
 		t.Fatalf("header missing. Got:\n%s", out)
+	}
+}
+
+func TestConsolidateVerdict(t *testing.T) {
+	mk := func(verdict string) validatorResult {
+		return validatorResult{Response: &Response{Verdict: verdict}}
+	}
+	errRes := validatorResult{Err: errors.New("timeout")}
+
+	cases := []struct {
+		name    string
+		results []validatorResult
+		want    string
+	}{
+		{"empty", nil, ""},
+		{"all errors", []validatorResult{errRes, errRes}, ""},
+		{"single approve", []validatorResult{mk("approve")}, "approve"},
+		{"single changes_requested", []validatorResult{mk("changes_requested")}, "changes_requested"},
+		{"single needs_human", []validatorResult{mk("needs_human")}, "needs_human"},
+		{"approve + changes_requested → changes_requested",
+			[]validatorResult{mk("approve"), mk("changes_requested")}, "changes_requested"},
+		{"changes_requested + needs_human → needs_human",
+			[]validatorResult{mk("changes_requested"), mk("needs_human")}, "needs_human"},
+		{"approve + needs_human → needs_human",
+			[]validatorResult{mk("approve"), mk("needs_human")}, "needs_human"},
+		{"all three → needs_human",
+			[]validatorResult{mk("approve"), mk("changes_requested"), mk("needs_human")}, "needs_human"},
+		{"approve + error → approve (error ignored)",
+			[]validatorResult{mk("approve"), errRes}, "approve"},
+		{"error + changes_requested → changes_requested",
+			[]validatorResult{errRes, mk("changes_requested")}, "changes_requested"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := consolidateVerdict(c.results)
+			if got != c.want {
+				t.Fatalf("want %q, got %q", c.want, got)
+			}
+		})
+	}
+}
+
+func TestVerdictToLabel(t *testing.T) {
+	cases := map[string]string{
+		"approve":           labels.ValidatedApprove,
+		"changes_requested": labels.ValidatedChangesRequested,
+		"needs_human":       labels.ValidatedNeedsHuman,
+		"":                  "",
+		"bogus":             "",
+	}
+	for in, want := range cases {
+		if got := verdictToLabel(in); got != want {
+			t.Errorf("verdictToLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestFilterValidatable(t *testing.T) {
+	mk := func(n int, lbls ...string) PullRequest {
+		pr := PullRequest{Number: n, Title: fmt.Sprintf("PR %d", n)}
+		for _, l := range lbls {
+			pr.Labels = append(pr.Labels, struct {
+				Name string `json:"name"`
+			}{Name: l})
+		}
+		return pr
+	}
+
+	cases := []struct {
+		name    string
+		in      []PullRequest
+		wantNum []int
+	}{
+		{"empty", nil, nil},
+		{"sin labels", []PullRequest{mk(1), mk(2)}, []int{1, 2}},
+		{
+			"validated:approve excluido",
+			[]PullRequest{mk(1, labels.ValidatedApprove), mk(2)},
+			[]int{2},
+		},
+		{
+			"changes-requested incluido",
+			[]PullRequest{mk(1, labels.ValidatedChangesRequested)},
+			[]int{1},
+		},
+		{
+			"needs-human incluido",
+			[]PullRequest{mk(1, labels.ValidatedNeedsHuman)},
+			[]int{1},
+		},
+		{
+			"mix: solo approve se excluye",
+			[]PullRequest{
+				mk(1, labels.ValidatedApprove),
+				mk(2, labels.ValidatedChangesRequested),
+				mk(3, labels.ValidatedNeedsHuman),
+				mk(4),
+			},
+			[]int{2, 3, 4},
+		},
+		{
+			"otros labels no interfieren",
+			[]PullRequest{mk(1, "status:executed", "ct:plan")},
+			[]int{1},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := filterValidatable(c.in)
+			if len(got) != len(c.wantNum) {
+				t.Fatalf("want %d candidates, got %d", len(c.wantNum), len(got))
+			}
+			for i, n := range c.wantNum {
+				if got[i].Number != n {
+					t.Errorf("candidate %d: want number %d, got %d", i, n, got[i].Number)
+				}
+			}
+		})
+	}
+}
+
+func TestPullRequest_HasLabel(t *testing.T) {
+	pr := &PullRequest{}
+	pr.Labels = append(pr.Labels, struct {
+		Name string `json:"name"`
+	}{Name: labels.ValidatedApprove})
+	if !pr.HasLabel(labels.ValidatedApprove) {
+		t.Errorf("expected HasLabel(approve)=true")
+	}
+	if pr.HasLabel(labels.ValidatedNeedsHuman) {
+		t.Errorf("expected HasLabel(needs-human)=false")
 	}
 }
 

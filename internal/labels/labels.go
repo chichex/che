@@ -33,6 +33,23 @@ const (
 	CtPlan = "ct:plan"
 )
 
+// Validated labels que che validate aplica sobre un PR reflejando el verdict
+// consolidado de los validadores. Mutan entre iteraciones: antes de aplicar
+// uno, se quitan los otros dos (son mutuamente excluyentes).
+const (
+	ValidatedApprove          = "validated:approve"
+	ValidatedChangesRequested = "validated:changes-requested"
+	ValidatedNeedsHuman       = "validated:needs-human"
+)
+
+// AllValidated lista los labels validated:* — usado por validate para saber
+// cuáles remover antes de aplicar el nuevo.
+var AllValidated = []string{
+	ValidatedApprove,
+	ValidatedChangesRequested,
+	ValidatedNeedsHuman,
+}
+
 // Transition representa un cambio de estado expresado como labels a remover
 // y labels a agregar. El orden no importa: `gh issue edit` aplica todo en
 // una sola llamada.

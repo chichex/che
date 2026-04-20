@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/chichex/che/internal/labels"
 )
 
 // ExitCode es el código de salida semántico para el caller.
@@ -162,6 +164,19 @@ type PullRequest struct {
 	ClosingIssuesReferences []struct {
 		Number int `json:"number"`
 	} `json:"closingIssuesReferences"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+// HasLabel devuelve true si el PR ya tiene el label name.
+func (p *PullRequest) HasLabel(name string) bool {
+	for _, l := range p.Labels {
+		if l.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Candidate es la vista mínima para la TUI al listar PRs abiertos.
@@ -363,19 +378,99 @@ func Run(prRef string, opts Opts) ExitCode {
 		return ExitRetry
 	}
 
+	if verdict := consolidateVerdict(results); verdict != "" {
+		target := verdictToLabel(verdict)
+		progress("aplicando label " + target + " al PR…")
+		if err := applyValidatedLabel(prRef, pr, target); err != nil {
+			fmt.Fprintf(stderr, "warning: no pude aplicar label %s al PR: %v\n", target, err)
+		}
+	}
+
 	fmt.Fprintln(stdout, renderReport(results))
 	fmt.Fprintf(stdout, "che ya dejó los comments en el PR %s\n", pr.URL)
 	return ExitOK
+}
+
+// consolidateVerdict devuelve el verdict consolidado (peor caso) de todos los
+// validadores. Precedencia: needs_human > changes_requested > approve.
+// Los resultados con error se ignoran — si todos erraron, devuelve "".
+func consolidateVerdict(results []validatorResult) string {
+	rank := map[string]int{"approve": 1, "changes_requested": 2, "needs_human": 3}
+	worst := ""
+	for _, r := range results {
+		if r.Err != nil || r.Response == nil {
+			continue
+		}
+		if rank[r.Response.Verdict] > rank[worst] {
+			worst = r.Response.Verdict
+		}
+	}
+	return worst
+}
+
+// verdictToLabel mapea un verdict JSON (snake_case) al label correspondiente
+// (kebab-case).
+func verdictToLabel(verdict string) string {
+	switch verdict {
+	case "approve":
+		return labels.ValidatedApprove
+	case "changes_requested":
+		return labels.ValidatedChangesRequested
+	case "needs_human":
+		return labels.ValidatedNeedsHuman
+	}
+	return ""
+}
+
+// applyValidatedLabel asegura que el label target exista en el repo y lo
+// aplica al PR, removiendo primero cualquier otro label validated:* presente
+// (son mutuamente excluyentes). Idempotente: si el target ya está y no hay
+// otros para remover, no hace nada.
+func applyValidatedLabel(prRef string, pr *PullRequest, target string) error {
+	if target == "" {
+		return fmt.Errorf("empty target label")
+	}
+	if err := labels.Ensure(target); err != nil {
+		return err
+	}
+	args := []string{"pr", "edit", prRef}
+	changes := false
+	for _, l := range labels.AllValidated {
+		if l == target {
+			continue
+		}
+		if pr.HasLabel(l) {
+			args = append(args, "--remove-label", l)
+			changes = true
+		}
+	}
+	if !pr.HasLabel(target) {
+		args = append(args, "--add-label", target)
+		changes = true
+	}
+	if !changes {
+		return nil
+	}
+	cmd := exec.Command("gh", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gh pr edit: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // ListOpenPRs devuelve los PRs abiertos del repo actual (todos, sin filtrar
 // por autor ni branch prefix). Limita a 50 — la TUI se vuelve inmanejable con
 // más. Decisión de producto cerrada: validate actúa sobre cualquier PR abierto,
 // no solo los creados por che execute.
+//
+// Excluye PRs que ya tienen label validated:approve — son verdict final y
+// no necesitan reaparecer en la TUI (el usuario igual puede re-validar con
+// `che validate <n>` explícito si hiciera falta).
 func ListOpenPRs() ([]Candidate, error) {
 	cmd := exec.Command("gh", "pr", "list",
 		"--state", "open",
-		"--json", "number,title,url,isDraft,author,headRefName,closingIssuesReferences",
+		"--json", "number,title,url,isDraft,author,headRefName,closingIssuesReferences,labels",
 		"--limit", "50")
 	out, err := cmd.Output()
 	if err != nil {
@@ -388,8 +483,19 @@ func ListOpenPRs() ([]Candidate, error) {
 	if err := json.Unmarshal(out, &raw); err != nil {
 		return nil, fmt.Errorf("parse gh pr list output: %w", err)
 	}
+	return filterValidatable(raw), nil
+}
+
+// filterValidatable convierte el raw de gh pr list a Candidates para la TUI,
+// dejando afuera los PRs que ya tienen validated:approve. Los otros
+// validated:* (changes-requested, needs-human) se mantienen visibles: el
+// humano podría re-validar después de un push nuevo.
+func filterValidatable(raw []PullRequest) []Candidate {
 	res := make([]Candidate, 0, len(raw))
 	for _, p := range raw {
+		if p.HasLabel(labels.ValidatedApprove) {
+			continue
+		}
 		related := make([]int, 0, len(p.ClosingIssuesReferences))
 		for _, r := range p.ClosingIssuesReferences {
 			related = append(related, r.Number)
@@ -403,7 +509,7 @@ func ListOpenPRs() ([]Candidate, error) {
 			RelatedIssues: related,
 		})
 	}
-	return res, nil
+	return res
 }
 
 // ParsePRRef acepta varios formatos de ref y devuelve una forma que gh
@@ -468,7 +574,7 @@ func precheckGhAuth() error {
 // formatos de ref que gh (número, URL, owner/repo#N).
 func FetchPR(ref string) (*PullRequest, error) {
 	cmd := exec.Command("gh", "pr", "view", ref,
-		"--json", "number,title,url,state,isDraft,author,headRefName")
+		"--json", "number,title,url,state,isDraft,author,headRefName,labels")
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {

@@ -69,6 +69,10 @@ func TestValidate_GoldenPath_OpusApproves(t *testing.T) {
 	env.ExpectGh(`^pr comment 7 --body-file`).Consumable().RespondStdout("ok\n", 0)
 	env.ExpectGh(`^pr comment 7 --body-file`).Consumable().RespondStdout("ok\n", 0)
 
+	// Label consolidado (approve) — ensure + pr edit con add-label.
+	env.ExpectGh(`^label create validated:approve --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^pr edit 7 --add-label validated:approve$`).RespondStdout("ok\n", 0)
+
 	out := env.MustRun("validate", "--validators", "opus", "7")
 	harness.AssertContains(t, out, "che ya dejó los comments")
 	harness.AssertContains(t, out, "opus#1: approve")
@@ -80,6 +84,14 @@ func TestValidate_GoldenPath_OpusApproves(t *testing.T) {
 	comments := inv.FindCalls("gh", "pr", "comment", "7", "--body-file")
 	if len(comments) != 2 {
 		t.Fatalf("expected 2 pr comment calls (validator + summary), got %d", len(comments))
+	}
+	ensures := inv.FindCalls("gh", "label", "create", "validated:approve", "--force")
+	if len(ensures) != 1 {
+		t.Fatalf("expected 1 label create for validated:approve, got %d", len(ensures))
+	}
+	edits := inv.FindCalls("gh", "pr", "edit", "7", "--add-label", "validated:approve")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 pr edit adding validated:approve, got %d", len(edits))
 	}
 }
 
@@ -121,6 +133,9 @@ func TestValidate_Iter2_IncrementsFromPreviousComments(t *testing.T) {
 	env.ExpectGh(`^pr comment 7 --body-file`).Consumable().RespondStdout("ok\n", 0)
 	env.ExpectGh(`^pr comment 7 --body-file`).Consumable().RespondStdout("ok\n", 0)
 
+	env.ExpectGh(`^label create validated:approve --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^pr edit 7 --add-label validated:approve$`).RespondStdout("ok\n", 0)
+
 	out := env.MustRun("validate", "--validators", "opus", "7")
 	// El stdout debe estar ok — lo interesante es que al menos uno de los
 	// body-files posteados contenga iter=2 en el header HTML. Como los fakes
@@ -156,6 +171,10 @@ func TestValidate_MultipleValidators_AllPosted(t *testing.T) {
 	env.ExpectGh(`^pr comment 7 --body-file`).Consumable().RespondStdout("ok\n", 0)
 	env.ExpectGh(`^pr comment 7 --body-file`).Consumable().RespondStdout("ok\n", 0)
 
+	// Label consolidado: peor verdict = changes_requested (gana sobre approve).
+	env.ExpectGh(`^label create validated:changes-requested --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^pr edit 7 --add-label validated:changes-requested$`).RespondStdout("ok\n", 0)
+
 	out := env.MustRun("validate", "--validators", "codex,gemini", "7")
 	harness.AssertContains(t, out, "codex#1")
 	harness.AssertContains(t, out, "gemini#1")
@@ -171,6 +190,10 @@ func TestValidate_MultipleValidators_AllPosted(t *testing.T) {
 	comments := inv.FindCalls("gh", "pr", "comment", "7", "--body-file")
 	if len(comments) != 3 {
 		t.Fatalf("expected 3 pr comment calls (2 validators + summary), got %d", len(comments))
+	}
+	edits := inv.FindCalls("gh", "pr", "edit", "7", "--add-label", "validated:changes-requested")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 pr edit with validated:changes-requested, got %d", len(edits))
 	}
 }
 
