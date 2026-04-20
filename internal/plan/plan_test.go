@@ -220,6 +220,98 @@ func TestParse_AmbiguousMultipleHeaders(t *testing.T) {
 	}
 }
 
+func TestParse_NotAmbiguousWhenHeaderInIdeaBody(t *testing.T) {
+	// "## Plan consolidado" aparece dentro de la idea original como texto
+	// citado (no como header real de nivel 2 al comienzo de línea). El
+	// parser NO debería marcar esto como ambiguo.
+	body := `## Plan consolidado (post-exploración)
+
+**Resumen:** r
+
+**Goal:** g
+
+### Pasos
+1. paso único
+
+---
+
+## Idea original
+
+El usuario dice: "quiero el siguiente '## Plan consolidado' dentro del texto porque hablo de planes consolidados en la idea original".
+`
+	p, err := Parse(body)
+	if err != nil {
+		t.Fatalf("unexpected ErrAmbiguousPlan on in-body occurrence: %v", err)
+	}
+	if p.Summary != "r" {
+		t.Errorf("summary: %q", p.Summary)
+	}
+}
+
+func TestParse_NotAmbiguousWhenHeaderInFencedCode(t *testing.T) {
+	// "## Plan consolidado" aparece dentro de un code fence como ejemplo.
+	// No es un header real y el parser NO debería marcarlo como ambiguo.
+	body := "## Plan consolidado\n\n" +
+		"**Resumen:** r\n\n" +
+		"**Goal:** g\n\n" +
+		"### Approach\n" +
+		"Ejemplo de cómo NO escribir el body:\n\n" +
+		"```markdown\n" +
+		"## Plan consolidado\n" +
+		"no me metan texto acá\n" +
+		"```\n\n" +
+		"### Pasos\n" +
+		"1. paso único\n"
+	p, err := Parse(body)
+	if err != nil {
+		t.Fatalf("unexpected ErrAmbiguousPlan on fenced occurrence: %v", err)
+	}
+	if p.Summary != "r" {
+		t.Errorf("summary: %q", p.Summary)
+	}
+}
+
+func TestCountConsolidatedHeaders(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{
+			name: "single real header",
+			body: "## Plan consolidado\n\nfoo\n",
+			want: 1,
+		},
+		{
+			name: "two real headers",
+			body: "## Plan consolidado\n\nfoo\n\n## Plan consolidado (post-exploración)\nbar\n",
+			want: 2,
+		},
+		{
+			name: "occurrence in prose does not count",
+			body: "## Plan consolidado\n\nfoo\n\nel texto ## Plan consolidado está en una línea con contenido previo no cuenta.\n",
+			want: 1,
+		},
+		{
+			name: "occurrence in fenced code does not count",
+			body: "## Plan consolidado\n\nfoo\n\n```\n## Plan consolidado\n```\n",
+			want: 1,
+		},
+		{
+			name: "zero when no header",
+			body: "no hay header\n",
+			want: 0,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := countConsolidatedHeaders(c.body); got != c.want {
+				t.Errorf("got %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
 func TestParse_FallbackWhenNoHeader(t *testing.T) {
 	body := "Body sin plan consolidado, solo texto libre."
 	p, err := Parse(body)

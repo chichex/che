@@ -111,7 +111,8 @@ var ErrAmbiguousPlan = fmt.Errorf("body has multiple '## Plan consolidado' heade
 // Parse extrae las secciones del body consolidado que escribe `che explore`.
 //
 // Contract:
-//   - Si el body contiene >1 ocurrencia de "## Plan consolidado" devuelve
+//   - Si el body contiene >1 header Markdown real "## Plan consolidado"
+//     (ignorando ocurrencias dentro de texto o de bloques fenced) devuelve
 //     ErrAmbiguousPlan (wrapped) — el caller debe abortar con mensaje
 //     accionable.
 //   - En cualquier otro caso (body vacío, header ausente, header único sin
@@ -123,8 +124,10 @@ func Parse(body string) (*ConsolidatedPlan, error) {
 	body = strings.TrimSpace(body)
 
 	// Ambigüedad: múltiples headers del plan consolidado. No podemos elegir,
-	// el caller debe abortar.
-	if strings.Count(body, consolidatedHeader) > 1 {
+	// el caller debe abortar. Contamos solo headers Markdown reales (al
+	// comienzo de línea, fuera de fences) — la cadena dentro del cuerpo de
+	// la idea original o de un ejemplo en un code fence no cuenta.
+	if countConsolidatedHeaders(body) > 1 {
 		return nil, ErrAmbiguousPlan
 	}
 
@@ -184,14 +187,38 @@ func Parse(body string) (*ConsolidatedPlan, error) {
 	return p, nil
 }
 
+// countConsolidatedHeaders cuenta apariciones del header "## Plan consolidado"
+// que son Markdown headers reales: línea empezando por el prefijo (sin
+// indentación) y fuera de bloques fenced (``` ... ```). Esto evita contar
+// la cadena cuando aparece dentro del cuerpo de la idea original o como
+// ejemplo dentro de un code fence.
+func countConsolidatedHeaders(body string) int {
+	count := 0
+	inFence := false
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		if strings.HasPrefix(line, consolidatedHeader) {
+			count++
+		}
+	}
+	return count
+}
+
 // extractSection devuelve el texto entre un header (ej. "## X") y el próximo
 // header de nivel <= al del header dado. Devuelve "" si no encuentra.
 //
-// Limitación conocida: no ignora líneas dentro de bloques ```code fenced. Si
-// el contenido de una sección incluye un header como texto dentro de un
-// fence (ej. ```### ejemplo``` en Approach), el extractor puede truncar la
-// sección ahí. Los fixtures de round-trip cubren este caso con fenced code
-// que contiene `###` y lo manejamos explícitamente cuando es detectable.
+// Fenced code blocks: el extractor trackea un toggle inFence en líneas que
+// empiezan con ``` (con o sin lenguaje, ej. ```go) y NO corta la sección en
+// headers que aparezcan dentro del fence — sólo headers reales en el flow
+// del markdown terminan la extracción. Los edge cases que quedan fuera son
+// fences mal balanceados (sin cierre) o fences indentados con tabs/espacios
+// raros; en esos casos el comportamiento es best-effort.
 func extractSection(body, header string) string {
 	idx := strings.Index(body, header)
 	if idx < 0 {
