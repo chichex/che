@@ -473,6 +473,57 @@ func TestExplore_Validators_NeedsHuman_AwaitingLabel(t *testing.T) {
 	}
 }
 
+// TestExplore_Validators_TechnicalNeedsHuman_DoesNotPause: un validator
+// devuelve verdict=needs_human pero TODOS sus findings son kind=technical o
+// kind=documented (needs_human=false porque respetó la regla). El flow NO
+// debe pausar — transiciona a status:plan como si fuera changes_requested.
+// Esto bloquea el bug que motivó este feature: preguntas técnicas del
+// ejecutor siendo escaladas al humano.
+func TestExplore_Validators_TechnicalNeedsHuman_DoesNotPause(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`validador técnico`).
+		RespondStdoutFromFixture("explore/sonnet_validator_technical_needs_human.json", 0)
+	env.ExpectAgent("gemini").
+		WhenArgsMatch(`validador técnico`).
+		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
+	// 3 comments esperados (executor + 2 validators). NO debe haber un
+	// 4to "human-request" porque los findings technical/documented no
+	// escalan al humano.
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-e\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-c\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-g\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("explore", "42")
+	// Cierra en status:plan, no awaiting.
+	harness.AssertContains(t, out, "Explored")
+	if strings.Contains(out, "awaiting-human") {
+		t.Fatalf("flow should NOT pause when findings are technical/documented only; got: %s", out)
+	}
+
+	inv := env.Invocations()
+	// Exactamente 3 comments (executor + 2 validators), NO human-request.
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) != 3 {
+		t.Fatalf("expected 3 comments (executor + 2 validators, NO human-request), got %d", len(comments))
+	}
+	edits := inv.FindCalls("gh", "issue", "edit", "42")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 label edit (status:plan), got %d", len(edits))
+	}
+	edits[0].AssertArgsContain(t, "--add-label", "status:plan")
+	if strings.Contains(strings.Join(edits[0].Args, " "), "status:awaiting-human") {
+		t.Fatalf("status:awaiting-human should NOT be applied; got %v", edits[0].Args)
+	}
+}
+
 // TestExplore_Validators_Duplicate: codex,codex,gemini → 2 invocaciones a
 // codex (instance=1 e instance=2) + 1 a gemini. Verifica que el harness
 // soporta múltiples calls al mismo binario y que el flow distingue instancias.

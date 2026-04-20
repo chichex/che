@@ -121,3 +121,190 @@ func TestCollectValidatorQuestions_KeepsGenuine(t *testing.T) {
 		t.Fatalf("expected source=gemini#1, got %s", extras[0].source)
 	}
 }
+
+// TestCollectPlanBlockers_FiltersNonProductKinds: preguntas blocker con
+// kind=technical o kind=documented NO entran al human-request. Solo las
+// kind=product (o sin kind, back-compat) se listan.
+func TestCollectPlanBlockers_FiltersNonProductKinds(t *testing.T) {
+	plan := &Response{
+		Questions: []Question{
+			{Q: "¿Política de reintentos? Si falla, ¿retry silencioso o aborto?", Blocker: true, Kind: KindProduct},
+			{Q: "¿Migramos también transitionLabels? (alcance del refactor)", Blocker: true, Kind: KindTechnical},
+			{Q: "¿Preservamos el callback progress() al migrar a labels.Ensure?", Blocker: true, Kind: KindTechnical},
+			{Q: "¿El issue ya pide cerrar este punto? Lo dice el body.", Blocker: true, Kind: KindDocumented},
+			{Q: "Pregunta legacy sin kind (compat backwards)", Blocker: true},
+		},
+	}
+
+	got := collectPlanBlockers(plan)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 blockers (1 product explícito + 1 legacy sin kind = product default), got %d: %+v", len(got), got)
+	}
+	for _, q := range got {
+		if q.QuestionKind() != KindProduct {
+			t.Fatalf("expected only kind=product blockers, got %q for %q", q.QuestionKind(), q.Q)
+		}
+	}
+}
+
+// TestHasHumanGaps_IgnoresNonProductFindings: un validator con verdict
+// needs_human pero findings kind=technical NO debe pausar el flow.
+func TestHasHumanGaps_IgnoresNonProductFindings(t *testing.T) {
+	results := []validatorResult{
+		{
+			Validator: Validator{Agent: AgentCodex, Instance: 1},
+			Response: &ValidatorResponse{
+				Verdict: "needs_human",
+				Findings: []Finding{
+					{Severity: "blocker", Area: "questions", NeedsHuman: true, Kind: KindTechnical,
+						Issue: "El ejecutor debió decidir si preservar el callback progress()."},
+					{Severity: "minor", Area: "questions", NeedsHuman: true, Kind: KindDocumented,
+						Issue: "La respuesta está en el body del issue."},
+				},
+			},
+		},
+	}
+	if hasHumanGaps(results) {
+		t.Fatalf("expected hasHumanGaps=false cuando todos los findings son technical/documented")
+	}
+}
+
+// TestHasHumanGaps_TrueOnProductFinding: un solo finding kind=product con
+// needs_human=true sí debe escalar.
+func TestHasHumanGaps_TrueOnProductFinding(t *testing.T) {
+	results := []validatorResult{
+		{
+			Validator: Validator{Agent: AgentGemini, Instance: 1},
+			Response: &ValidatorResponse{
+				Verdict: "needs_human",
+				Findings: []Finding{
+					{Severity: "blocker", Area: "questions", NeedsHuman: true, Kind: KindProduct,
+						Issue: "¿Política de retención tras N días sin respuesta?"},
+					{Severity: "minor", Area: "questions", NeedsHuman: true, Kind: KindTechnical,
+						Issue: "Naming del helper (no escala pero se reporta)."},
+				},
+			},
+		},
+	}
+	if !hasHumanGaps(results) {
+		t.Fatalf("expected hasHumanGaps=true cuando hay al menos un finding product needs_human")
+	}
+}
+
+// TestHasHumanGaps_BackwardsCompat_MissingKind: findings viejos sin kind
+// deben tratarse como product para no romper fixtures previas.
+func TestHasHumanGaps_BackwardsCompat_MissingKind(t *testing.T) {
+	results := []validatorResult{
+		{
+			Validator: Validator{Agent: AgentOpus, Instance: 1},
+			Response: &ValidatorResponse{
+				Verdict: "needs_human",
+				Findings: []Finding{
+					{Severity: "blocker", Area: "questions", NeedsHuman: true,
+						Issue: "¿Cuándo cortamos el loop si no converge?"},
+				},
+			},
+		},
+	}
+	if !hasHumanGaps(results) {
+		t.Fatalf("expected hasHumanGaps=true para findings sin kind (default=product, compat)")
+	}
+}
+
+// TestCollectValidatorQuestions_DropsNonProductFindings: un finding
+// technical con needs_human=true (inconsistente) no debería aparecer en
+// las "observaciones adicionales" del human-request.
+func TestCollectValidatorQuestions_DropsNonProductFindings(t *testing.T) {
+	planQs := []Question{
+		{Q: "¿Política de rollback?", Blocker: true, Kind: KindProduct},
+	}
+	results := []validatorResult{
+		{
+			Validator: Validator{Agent: AgentCodex, Instance: 1},
+			Response: &ValidatorResponse{
+				Verdict: "changes_requested",
+				Findings: []Finding{
+					{Severity: "minor", Area: "questions", NeedsHuman: true, Kind: KindTechnical,
+						Issue: "La decisión sobre naming del helper es técnica, no de producto."},
+					{Severity: "major", Area: "questions", NeedsHuman: true, Kind: KindDocumented,
+						Issue: "Esto ya está resuelto en el body del issue."},
+				},
+			},
+		},
+	}
+
+	extras := collectValidatorQuestions(results, planQs)
+	if len(extras) != 0 {
+		t.Fatalf("expected 0 extras (technical + documented no escalan), got %d: %+v", len(extras), extras)
+	}
+}
+
+// TestValidateResponse_RejectsNonProductQuestion: el ejecutor que deja una
+// question con kind=technical en questions[] debe fallar la validación (es
+// un bug del ejecutor, no lo filtramos silencioso).
+func TestValidateResponse_RejectsNonProductQuestion(t *testing.T) {
+	r := &Response{
+		Summary: "Ok",
+		Questions: []Question{
+			{Q: "¿Decisión técnica que debería ser assumption?", Blocker: true, Kind: KindTechnical},
+		},
+		Risks: []Risk{{Risk: "x", Likelihood: "low", Impact: "low", Mitigation: "y"}},
+		Paths: []Path{
+			{Title: "A", Sketch: "x", Pros: []string{"p"}, Cons: []string{"c"}, Effort: "S", Recommended: true},
+			{Title: "B", Sketch: "x", Pros: []string{"p"}, Cons: []string{"c"}, Effort: "S", Recommended: false},
+		},
+		NextStep: "paso",
+	}
+	if err := validate(r); err == nil {
+		t.Fatalf("expected validate() to reject question with kind=technical; got nil")
+	}
+}
+
+// TestValidateResponse_AcceptsEmptyQuestions: con el prompt nuevo es válido
+// devolver questions=[] si el ejecutor cerró todo como assumptions.
+func TestValidateResponse_AcceptsEmptyQuestions(t *testing.T) {
+	r := &Response{
+		Summary:     "Ok",
+		Questions:   nil,
+		Assumptions: []Assumption{{What: "Usamos labels.Ensure directo", Why: "Best practice existente"}},
+		Risks:       []Risk{{Risk: "x", Likelihood: "low", Impact: "low", Mitigation: "y"}},
+		Paths: []Path{
+			{Title: "A", Sketch: "x", Pros: []string{"p"}, Cons: []string{"c"}, Effort: "S", Recommended: true},
+			{Title: "B", Sketch: "x", Pros: []string{"p"}, Cons: []string{"c"}, Effort: "S", Recommended: false},
+		},
+		NextStep: "paso",
+	}
+	if err := validate(r); err != nil {
+		t.Fatalf("expected validate() to accept empty questions[], got: %v", err)
+	}
+}
+
+// TestNormalizeKind_UnknownKindTreatedAsEmpty: un LLM que devuelve "prod" o
+// "tecnico" (variante) debe quedar como "" → default "product" al aplicar
+// kindOrDefault. Así no propagamos etiquetas fantasía que podrían romper
+// los filtros.
+func TestNormalizeKind_UnknownKindTreatedAsEmpty(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"product", "product"},
+		{"PRODUCT", "product"},
+		{"  technical ", "technical"},
+		{"documented", "documented"},
+		{"prod", ""},
+		{"tecnico", ""},
+		{"business", ""},
+	}
+	for _, c := range cases {
+		got := normalizeKind(c.in)
+		if got != c.want {
+			t.Errorf("normalizeKind(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+	// kindOrDefault cierra la compat: cualquier cosa no válida se trata
+	// como product (el default conservador).
+	if got := kindOrDefault("prod"); got != KindProduct {
+		t.Errorf("kindOrDefault(\"prod\") = %q, want %q", got, KindProduct)
+	}
+}
