@@ -876,8 +876,9 @@ func formatOpusLine(line string) (string, bool) {
 		Subtype string `json:"subtype"`
 		Message struct {
 			Content []struct {
-				Type string `json:"type"`
-				Name string `json:"name"`
+				Type  string                 `json:"type"`
+				Name  string                 `json:"name"`
+				Input map[string]interface{} `json:"input"`
 			} `json:"content"`
 		} `json:"message"`
 	}
@@ -892,7 +893,7 @@ func formatOpusLine(line string) (string, bool) {
 	case "assistant":
 		for _, c := range ev.Message.Content {
 			if c.Type == "tool_use" {
-				return "tool: " + c.Name, true
+				return describeOpusTool(c.Name, c.Input), true
 			}
 		}
 	case "result":
@@ -904,6 +905,47 @@ func formatOpusLine(line string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// describeOpusTool acompaña el nombre de la tool con un detalle
+// (path/command/pattern) para que los logs del stream-json sean útiles.
+// Copia del helper de execute/iterate.
+func describeOpusTool(name string, input map[string]interface{}) string {
+	detail := ""
+	switch name {
+	case "Read", "Write", "Edit", "NotebookEdit":
+		if v, ok := input["file_path"].(string); ok {
+			detail = v
+		}
+	case "Bash":
+		if v, ok := input["command"].(string); ok {
+			detail = truncateCmd(v, 80)
+		}
+	case "Glob", "Grep":
+		if v, ok := input["pattern"].(string); ok {
+			detail = v
+		}
+	case "Task":
+		if v, ok := input["description"].(string); ok {
+			detail = v
+		}
+	case "WebFetch":
+		if v, ok := input["url"].(string); ok {
+			detail = v
+		}
+	}
+	if detail == "" {
+		return "tool: " + name
+	}
+	return "tool: " + name + " " + detail
+}
+
+func truncateCmd(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
 }
 
 // ---- gh / git shellouts ----

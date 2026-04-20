@@ -185,6 +185,17 @@ func Run(prRef string, opts Opts) ExitCode {
 
 	prompt := BuildIteratePrompt(pr, iter, findingsBlocks)
 
+	// Snapshot del HEAD antes de invocar al agente. La detección de
+	// "¿opus produjo commits?" compara HEAD before/after en vez del
+	// tracking ref origin/<branch>: opus normalmente pushea por su
+	// cuenta (el prompt se lo pide), lo que avanza origin/<branch> y
+	// hace que HEAD..origin dé vacío, falseando el chequeo.
+	beforeHEAD, err := gitRevParse(wt.Path, "HEAD")
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
+	}
+
 	progress("invocando a opus para que aplique los cambios…")
 	if err := runAgent(wt.Path, prompt, progress); err != nil {
 		fmt.Fprintf(stderr, "error: opus falló: %v\n", err)
@@ -198,10 +209,7 @@ func Run(prRef string, opts Opts) ExitCode {
 		return ExitRetry
 	}
 
-	// Si opus no commiteó (puede que haya hecho commits él mismo, así que
-	// worktreeHasChanges solo captura staged/unstaged no-commiteados),
-	// también miramos si hay commits nuevos vs origin.
-	pushed, newCommits, err := pushIfAhead(wt.Path, pr.HeadBranch, hasChanges, progress)
+	pushed, newCommits, err := commitAndPushIfChanged(wt.Path, pr.HeadBranch, beforeHEAD, hasChanges, progress)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
@@ -443,8 +451,9 @@ func formatOpusLine(line string) (string, bool) {
 		Subtype string `json:"subtype"`
 		Message struct {
 			Content []struct {
-				Type string `json:"type"`
-				Name string `json:"name"`
+				Type  string                 `json:"type"`
+				Name  string                 `json:"name"`
+				Input map[string]interface{} `json:"input"`
 			} `json:"content"`
 		} `json:"message"`
 	}
@@ -459,7 +468,7 @@ func formatOpusLine(line string) (string, bool) {
 	case "assistant":
 		for _, c := range ev.Message.Content {
 			if c.Type == "tool_use" {
-				return "tool: " + c.Name, true
+				return describeOpusTool(c.Name, c.Input), true
 			}
 		}
 	case "result":
@@ -471,6 +480,48 @@ func formatOpusLine(line string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// describeOpusTool arma el detalle que acompaña al nombre de la tool:
+// path para edits/reads, comando truncado para Bash, patrón para
+// Glob/Grep. Copia del helper de execute — mismo formato para que el
+// usuario reconozca los logs de distintos flows.
+func describeOpusTool(name string, input map[string]interface{}) string {
+	detail := ""
+	switch name {
+	case "Read", "Write", "Edit", "NotebookEdit":
+		if v, ok := input["file_path"].(string); ok {
+			detail = v
+		}
+	case "Bash":
+		if v, ok := input["command"].(string); ok {
+			detail = truncate(v, 80)
+		}
+	case "Glob", "Grep":
+		if v, ok := input["pattern"].(string); ok {
+			detail = v
+		}
+	case "Task":
+		if v, ok := input["description"].(string); ok {
+			detail = v
+		}
+	case "WebFetch":
+		if v, ok := input["url"].(string); ok {
+			detail = v
+		}
+	}
+	if detail == "" {
+		return "tool: " + name
+	}
+	return "tool: " + name + " " + detail
+}
+
+func truncate(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
 }
 
 // ---- worktree resolution (copy-adapted de close) ----
@@ -713,17 +764,22 @@ func worktreeHasChanges(wtPath string) (bool, error) {
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
-// pushIfAhead determina si hay commits nuevos para pushear y si los
-// pushea. Devuelve (pushed, subjects, err):
-//   - pushed=true si hubo al menos un commit nuevo efectivamente pusheado.
-//   - subjects es la lista de mensajes de commits nuevos vs origin/<branch>.
-//   - Si hasDirty && !commits-ahead, hace `git add -A && git commit` con
-//     mensaje genérico antes de contar commits (pragmático: opus a veces
-//     deja cambios sin commitear a propósito esperando que el harness cierre).
-func pushIfAhead(wtPath, branch string, hasDirty bool, progress func(string)) (bool, []string, error) {
+// commitAndPushIfChanged detecta si opus produjo cambios reales usando
+// como invariante el SHA del HEAD antes/después de la invocación. Es
+// robusto vs:
+//   - Opus pushea por su cuenta durante su trabajo (el prompt se lo pide):
+//     origin/<branch> avanza pero before != after, así que seguimos
+//     detectando los commits correctamente.
+//   - Opus hace `git commit --amend` + `push --force-with-lease`:
+//     before != after (distinto SHA aunque parent igual), commits
+//     visibles.
+//   - Opus deja cambios sin commitear: hacemos auto-commit y volvemos a
+//     snapshotear HEAD.
+//
+// El push final es idempotente: si opus ya pusheó, `git push origin <branch>`
+// es no-op.
+func commitAndPushIfChanged(wtPath, branch, beforeHEAD string, hasDirty bool, progress func(string)) (bool, []string, error) {
 	if hasDirty {
-		// Opus dejó cambios sin commitear. Commiteamos a su nombre con
-		// mensaje genérico — mejor que perderlos.
 		progress("commiteando cambios no-commiteados que dejó opus…")
 		if err := runGitIn(wtPath, "add", "-A"); err != nil {
 			return false, nil, err
@@ -733,30 +789,50 @@ func pushIfAhead(wtPath, branch string, hasDirty bool, progress func(string)) (b
 		}
 	}
 
-	// Listar commits nuevos vs origin/<branch>.
-	// Si origin/<branch> no existe, contamos vs root (primer commit).
-	remoteRef := "origin/" + branch
-	if !hasRemoteRef(wtPath, remoteRef) {
-		// Sin remote: asumimos que todos los commits son nuevos. Pero
-		// eso es raro — el PR ya existe, así que origin/<branch> debería
-		// existir. Si no, skip.
-		progress(fmt.Sprintf("warning: no existe %s — no puedo determinar commits nuevos", remoteRef))
-		return false, nil, nil
-	}
-
-	subjects, err := commitSubjectsAhead(wtPath, remoteRef)
+	afterHEAD, err := gitRevParse(wtPath, "HEAD")
 	if err != nil {
 		return false, nil, err
 	}
-	if len(subjects) == 0 {
+	if afterHEAD == beforeHEAD {
 		return false, nil, nil
 	}
 
-	progress(fmt.Sprintf("pusheando %d commit(s) nuevo(s)…", len(subjects)))
+	subjects, err := commitSubjectsBetween(wtPath, beforeHEAD, afterHEAD)
+	if err != nil {
+		return false, nil, err
+	}
+
+	progress(fmt.Sprintf("pusheando a origin/%s (idempotente si opus ya pusheó)…", branch))
 	if err := runGitIn(wtPath, "push", "origin", branch); err != nil {
 		return false, nil, err
 	}
+
+	if len(subjects) == 0 {
+		// HEAD cambió pero no hay commits entre before..after — caso raro
+		// (¿amend sin cambios? ¿rebase?). Reportamos al menos el SHA.
+		subjects = []string{fmt.Sprintf("HEAD actualizado a %s", afterHEAD[:min(8, len(afterHEAD))])}
+	}
 	return true, subjects, nil
+}
+
+// gitRevParse devuelve el SHA de la ref en un worktree (no trimmed para
+// comparación exacta).
+func gitRevParse(wtPath, ref string) (string, error) {
+	out, err := exec.Command("git", "-C", wtPath, "rev-parse", ref).Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("git rev-parse %s: %s", ref, strings.TrimSpace(string(ee.Stderr)))
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func runGitIn(dir string, args ...string) error {
@@ -769,15 +845,12 @@ func runGitIn(dir string, args ...string) error {
 	return nil
 }
 
-func hasRemoteRef(wtPath, ref string) bool {
-	cmd := exec.Command("git", "-C", wtPath, "rev-parse", "--verify", "--quiet", ref)
-	return cmd.Run() == nil
-}
-
-// commitSubjectsAhead devuelve los subjects de los commits que están en
-// HEAD pero no en baseRef (oldest → newest).
-func commitSubjectsAhead(wtPath, baseRef string) ([]string, error) {
-	cmd := exec.Command("git", "-C", wtPath, "log", "--reverse", "--format=%s", baseRef+"..HEAD")
+// commitSubjectsBetween devuelve los subjects de los commits entre
+// before..after (oldest → newest). Si before no es ancestro de after
+// (ej. tras un amend en un HEAD sin más commits), git log puede devolver
+// vacío; el caller maneja ese caso.
+func commitSubjectsBetween(wtPath, before, after string) ([]string, error) {
+	cmd := exec.Command("git", "-C", wtPath, "log", "--reverse", "--format=%s", before+".."+after)
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
