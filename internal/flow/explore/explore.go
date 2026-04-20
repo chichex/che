@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/chichex/che/internal/labels"
 )
 
 // ExitCode es el código de salida semántico para el caller.
@@ -549,10 +551,10 @@ func Run(issueRef string, opts Opts) ExitCode {
 
 	// Ramificación por modo. awaiting-human → resume; status:plan → error
 	// de "ya explorado"; default → new.
-	if issue.HasLabel("status:awaiting-human") {
+	if issue.HasLabel(labels.StatusAwaitingHuman) {
 		return runResume(issueRef, issue, opts, progress, stdout, stderr)
 	}
-	if issue.HasLabel("status:plan") {
+	if issue.HasLabel(labels.StatusPlan) {
 		fmt.Fprintf(stderr, "error: issue #%d was already explored (status:plan present)\n", issue.Number)
 		return ExitSemantic
 	}
@@ -692,7 +694,7 @@ func runResume(issueRef string, issue *Issue, opts Opts, progress func(string), 
 	}
 
 	progress("asegurando label status:plan…")
-	if err := ensureLabel("status:plan", progress); err != nil {
+	if err := ensureLabel(labels.StatusPlan, progress); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
@@ -718,7 +720,7 @@ func pauseForHuman(issueRef string, issue *Issue, plan *Response, results []vali
 		return ExitRetry
 	}
 	progress("asegurando label status:awaiting-human…")
-	if err := ensureLabel("status:awaiting-human", progress); err != nil {
+	if err := ensureLabel(labels.StatusAwaitingHuman, progress); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
@@ -735,7 +737,7 @@ func pauseForHuman(issueRef string, issue *Issue, plan *Response, results []vali
 // transiciona status:idea → status:plan y devuelve ExitOK.
 func finalizeToPlan(issueRef string, issue *Issue, _ *Response, results []validatorResult, _ Agent, _ []Validator, commentURL string, progress func(string), stdout, stderr io.Writer) ExitCode {
 	progress("asegurando label status:plan…")
-	if err := ensureLabel("status:plan", progress); err != nil {
+	if err := ensureLabel(labels.StatusPlan, progress); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		fmt.Fprintf(stderr, "warning: comentario posteado (%s) pero label no se pudo crear/actualizar; corré de nuevo\n", commentURL)
 		return ExitRetry
@@ -797,7 +799,7 @@ func ListCandidates() ([]Candidate, error) {
 	}
 	out := make([]Candidate, 0, len(raw))
 	for _, i := range raw {
-		if i.HasLabel("status:plan") || i.HasLabel("status:awaiting-human") {
+		if i.HasLabel(labels.StatusPlan) || i.HasLabel(labels.StatusAwaitingHuman) {
 			continue
 		}
 		out = append(out, Candidate{Number: i.Number, Title: i.Title})
@@ -815,7 +817,7 @@ func ListAwaiting() ([]Candidate, error) {
 	}
 	out := make([]Candidate, 0, len(raw))
 	for _, i := range raw {
-		if !i.HasLabel("status:awaiting-human") {
+		if !i.HasLabel(labels.StatusAwaitingHuman) {
 			continue
 		}
 		out = append(out, Candidate{Number: i.Number, Title: i.Title})
@@ -847,7 +849,7 @@ func InspectResume(ref string) (Agent, []Validator, error) {
 // ct:plan y deja el filtrado a los callers específicos.
 func listIssuesWithCtPlan() ([]Issue, error) {
 	cmd := exec.Command("gh", "issue", "list",
-		"--label", "ct:plan",
+		"--label", labels.CtPlan,
 		"--state", "open",
 		"--json", "number,title,labels",
 		"--limit", "50")
@@ -893,7 +895,7 @@ func gateBasic(i *Issue) error {
 	if i.State != "OPEN" {
 		return fmt.Errorf("issue #%d is closed", i.Number)
 	}
-	if !i.HasLabel("ct:plan") {
+	if !i.HasLabel(labels.CtPlan) {
 		return fmt.Errorf("issue #%d is missing label ct:plan (not created by `che idea`?)", i.Number)
 	}
 	return nil
@@ -1201,16 +1203,11 @@ func postComment(ref, body string) (string, error) {
 }
 
 // ensureLabel garantiza que un label exista en el repo antes de aplicarlo.
-// Usa `gh label create --force` que es idempotente (crea si no existe,
-// actualiza si existe — nunca falla por duplicado).
+// Delega en labels.Ensure (idempotente). El wrapper solo emite el progress
+// antes de la llamada.
 func ensureLabel(name string, progress func(string)) error {
 	progress("asegurando label " + name)
-	cmd := exec.Command("gh", "label", "create", name, "--force")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ensuring label %s: %s", name, strings.TrimSpace(string(out)))
-	}
-	return nil
+	return labels.Ensure(name)
 }
 
 // transitionLabels saca `status:idea` y agrega `status:plan`. NO toca
@@ -1218,8 +1215,8 @@ func ensureLabel(name string, progress func(string)) error {
 // `ct:exec` (eso lo hace `che execute` al arrancar).
 func transitionLabels(ref string) error {
 	cmd := exec.Command("gh", "issue", "edit", ref,
-		"--remove-label", "status:idea",
-		"--add-label", "status:plan")
+		"--remove-label", labels.StatusIdea,
+		"--add-label", labels.StatusPlan)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gh issue edit: %s", strings.TrimSpace(string(out)))
@@ -1232,7 +1229,7 @@ func transitionLabels(ref string) error {
 // pausa esperando respuesta del humano). No toca otros labels.
 func setLabelAwaitingHuman(ref string) error {
 	cmd := exec.Command("gh", "issue", "edit", ref,
-		"--add-label", "status:awaiting-human")
+		"--add-label", labels.StatusAwaitingHuman)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gh issue edit: %s", strings.TrimSpace(string(out)))
@@ -2256,9 +2253,9 @@ func editIssueBody(ref, body string) error {
 // en la misma operación, cerrando el ciclo.
 func closeAwaitingHuman(ref string) error {
 	cmd := exec.Command("gh", "issue", "edit", ref,
-		"--remove-label", "status:awaiting-human",
-		"--remove-label", "status:idea",
-		"--add-label", "status:plan")
+		"--remove-label", labels.StatusAwaitingHuman,
+		"--remove-label", labels.StatusIdea,
+		"--add-label", labels.StatusPlan)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gh issue edit: %s", strings.TrimSpace(string(out)))
