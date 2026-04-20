@@ -258,10 +258,13 @@ type CommentHeader struct {
 
 // ParseCommentHeader lee la primera línea del body y, si es un HTML comment
 // de che, devuelve la metadata. Si no lo es, devuelve un CommentHeader vacío.
-// Delega el parseo al helper compartido internal/comments.
+// Delega el parseo al helper compartido internal/comments: si comments.Parse
+// devuelve el zero value (no hay header o está malformado), acá también
+// devolvemos el zero value — así no dependemos de qué campos puntuales
+// considera "marcadores" el helper.
 func ParseCommentHeader(body string) CommentHeader {
 	h := comments.Parse(body)
-	if h.Role == "" && h.Flow == "" {
+	if h == (comments.Header{}) {
 		return CommentHeader{}
 	}
 	return CommentHeader{
