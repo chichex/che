@@ -139,6 +139,67 @@ func TestParseValidators(t *testing.T) {
 	}
 }
 
+func TestIsPlanEmpty(t *testing.T) {
+	cases := []struct {
+		name string
+		p    *ConsolidatedPlan
+		want bool
+	}{
+		{
+			name: "nil plan",
+			p:    nil,
+			want: true,
+		},
+		{
+			name: "all fields empty (body vacío fallback)",
+			p:    &ConsolidatedPlan{},
+			want: true,
+		},
+		{
+			name: "summary-only fallback (header sin sub-secciones)",
+			p:    &ConsolidatedPlan{Summary: "## Plan consolidado\n\n(lorem sin sub-secciones)"},
+			want: true,
+		},
+		{
+			name: "only approach (no goal/steps/AC)",
+			p:    &ConsolidatedPlan{Summary: "s", Approach: "a"},
+			want: true,
+		},
+		{
+			name: "has goal",
+			p:    &ConsolidatedPlan{Goal: "hacer X"},
+			want: false,
+		},
+		{
+			name: "has steps",
+			p:    &ConsolidatedPlan{Steps: []string{"paso"}},
+			want: false,
+		},
+		{
+			name: "has acceptance criteria",
+			p:    &ConsolidatedPlan{AcceptanceCriteria: []string{"crit"}},
+			want: false,
+		},
+		{
+			name: "full plan",
+			p: &ConsolidatedPlan{
+				Summary:            "s",
+				Goal:               "g",
+				AcceptanceCriteria: []string{"c"},
+				Steps:              []string{"p"},
+			},
+			want: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isPlanEmpty(c.p); got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 func TestBuildPromptIncludesPlanSections(t *testing.T) {
 	issue := &Issue{Number: 42, Title: "Implementar foo"}
 	plan := &ConsolidatedPlan{
