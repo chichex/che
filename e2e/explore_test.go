@@ -345,10 +345,10 @@ func TestExplore_URLAsRef(t *testing.T) {
 	env.MustRun("explore", "--validators", "none", "https://github.com/acme/demo/issues/42")
 }
 
-// TestExplore_Validators_DefaultBothApprove: default --validators codex,gemini
-// con ambos aprobando → label status:plan, 1 comment de executor + 2 de
-// validators, reporte en stdout con ✓ para cada uno.
-func TestExplore_Validators_DefaultBothApprove(t *testing.T) {
+// TestExplore_Validators_DefaultOpusApproves: default --validators opus
+// aprobando → label status:plan, 1 comment de executor + 1 de validator,
+// reporte en stdout con ✓ para opus.
+func TestExplore_Validators_DefaultOpusApproves(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
 	scriptExplorePrechecks(env)
@@ -356,33 +356,26 @@ func TestExplore_Validators_DefaultBothApprove(t *testing.T) {
 	env.ExpectAgent("claude").
 		WhenArgsMatch(`ingeniero senior`).
 		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
-	env.ExpectAgent("codex").
-		WhenArgsMatch(`validador técnico`).
-		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
-	env.ExpectAgent("gemini").
+	env.ExpectAgent("claude").
 		WhenArgsMatch(`validador técnico`).
 		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
 	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-executor\n", 0)
-	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-codex\n", 0)
-	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-gemini\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-opus\n", 0)
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
 	out := env.MustRun("explore", "42")
 	harness.AssertContains(t, out, "Explored")
-	harness.AssertContains(t, out, "codex#1")
-	harness.AssertContains(t, out, "gemini#1")
+	harness.AssertContains(t, out, "opus#1")
 	harness.AssertContains(t, out, "approve")
 
 	inv := env.Invocations()
-	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) != 3 {
-		t.Fatalf("expected 3 issue comment (executor + 2 validators), got %d", len(comments))
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) != 2 {
+		t.Fatalf("expected 2 issue comments (executor + 1 validator), got %d", len(comments))
 	}
-	if codexCalls := inv.For("codex"); len(codexCalls) != 1 {
-		t.Fatalf("expected 1 codex call, got %d", len(codexCalls))
-	}
-	if geminiCalls := inv.For("gemini"); len(geminiCalls) != 1 {
-		t.Fatalf("expected 1 gemini call, got %d", len(geminiCalls))
+	// 2 claude calls: ejecutor + validator opus.
+	if claudeCalls := inv.For("claude"); len(claudeCalls) != 2 {
+		t.Fatalf("expected 2 claude calls (executor + opus validator), got %d", len(claudeCalls))
 	}
 	edits := inv.FindCalls("gh", "issue", "edit", "42")
 	if len(edits) != 1 {
@@ -415,7 +408,7 @@ func TestExplore_Validators_ChangesRequested_StillPlan(t *testing.T) {
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
-	out := env.MustRun("explore", "42")
+	out := env.MustRun("explore", "--validators", "codex,gemini", "42")
 	harness.AssertContains(t, out, "changes_requested")
 	harness.AssertContains(t, out, "Explored")
 
@@ -455,7 +448,7 @@ func TestExplore_Validators_NeedsHuman_AwaitingLabel(t *testing.T) {
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
-	out := env.MustRun("explore", "42")
+	out := env.MustRun("explore", "--validators", "codex,gemini", "42")
 	harness.AssertContains(t, out, "needs_human")
 	harness.AssertContains(t, out, "awaiting-human")
 
@@ -502,7 +495,7 @@ func TestExplore_Validators_TechnicalNeedsHuman_DoesNotPause(t *testing.T) {
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
-	out := env.MustRun("explore", "42")
+	out := env.MustRun("explore", "--validators", "codex,gemini", "42")
 	// Cierra en status:plan, no awaiting.
 	harness.AssertContains(t, out, "Explored")
 	if strings.Contains(out, "awaiting-human") {
@@ -633,7 +626,7 @@ func TestExplore_Validators_InvalidResponse_Exit3(t *testing.T) {
 	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
 	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("x\n", 0)
 
-	r := env.Run("explore", "42")
+	r := env.Run("explore", "--validators", "codex,gemini", "42")
 	if r.ExitCode != 3 {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
@@ -671,7 +664,7 @@ func TestExplore_Resume_HappyPath_ConsolidatesAndClosesLoop(t *testing.T) {
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 --remove-label`).RespondStdout("ok\n", 0)
 
-	out := env.MustRun("explore", "42")
+	out := env.MustRun("explore", "--validators", "codex,gemini", "42")
 	harness.AssertContains(t, out, "Resumed and consolidated")
 
 	inv := env.Invocations()
@@ -714,7 +707,7 @@ func TestExplore_Resume_StillNeedsHuman_PostsNewRequest(t *testing.T) {
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 --add-label`).RespondStdout("ok\n", 0)
 
-	out := env.MustRun("explore", "42")
+	out := env.MustRun("explore", "--validators", "codex,gemini", "42")
 	harness.AssertContains(t, out, "awaiting-human")
 
 	inv := env.Invocations()
