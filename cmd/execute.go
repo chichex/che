@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/chichex/che/internal/flow/execute"
 	"github.com/spf13/cobra"
@@ -51,12 +54,29 @@ Este subcomando es la ruta no-interactiva (scripting/CI). La TUI de che
 			os.Stderr.WriteString("error: invalid --validators: " + err.Error() + "\n")
 			os.Exit(int(execute.ExitSemantic))
 		}
+		// Signal handling propio: SIGINT/SIGTERM cancelan el ctx y execute
+		// aplica cleanup síncrono (label rollback, worktree remove, branch
+		// local). El exit code 130 distingue "cancelado por el usuario" del
+		// exit 1/2/3 de error semántico o remediable.
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+
 		code := execute.Run(args[0], execute.Opts{
 			Stdout:     cmd.OutOrStdout(),
 			Stderr:     cmd.ErrOrStderr(),
 			Agent:      agent,
 			Validators: validators,
+			Ctx:        ctx,
 		})
+		// Si la señal llegó antes de que Run marcara ExitCancelled
+		// (p.ej. la TUI nunca entraría acá; este branch es para CLI y
+		// coordina "cancelado a nivel proceso" → exit 130 aunque Run
+		// haya retornado otro code por el orden del cleanup).
+		if ctx.Err() != nil {
+			cmd.SilenceUsage = true
+			cmd.SilenceErrors = true
+			os.Exit(int(execute.ExitCancelled))
+		}
 		if code != execute.ExitOK {
 			cmd.SilenceUsage = true
 			cmd.SilenceErrors = true

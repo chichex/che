@@ -42,6 +42,11 @@ type matcher struct {
 	// el fake debe crear con el contenido dado al matchear. Usado por tests
 	// de execute para simular que el agente modificó archivos en el worktree.
 	TouchFiles map[string]string `json:"touch_files,omitempty"`
+	// BlockSeconds hace que el fake duerma N segundos después de emitir
+	// stdout/stderr antes de salir. Usado por tests de signal handling para
+	// simular un agente que tarda (el parent manda SIGTERM y el default
+	// handler de Go termina el proceso, interrumpiendo el sleep).
+	BlockSeconds int `json:"block_seconds,omitempty"`
 }
 
 type script struct {
@@ -163,11 +168,17 @@ func main() {
 
 	_, _ = io.WriteString(os.Stdout, stdoutBody)
 	_, _ = io.WriteString(os.Stderr, matched.Stderr)
+	// Flush explícito: si el matcher bloquea después, el parent necesita
+	// haber recibido el sentinel antes de mandar la señal.
+	_ = os.Stdout.Sync()
 
 	if matched.Consume {
 		markConsumed(scriptPath, matchedIdx)
 	}
 
+	// Log ANTES del bloqueo para que el test pueda verificar la invocación
+	// aunque el parent termine al fake por señal durante el sleep (los
+	// defers de Go no corren con el handler default de SIGTERM/SIGINT).
 	logInvocation(scriptDir, invocation{
 		Ts: start.UTC().Format(time.RFC3339Nano), Seq: seq, Bin: identity, Args: args,
 		StdinSHA: stdinSHA, StdinBytes: len(stdin),
@@ -175,6 +186,14 @@ func main() {
 		Exit: matched.Exit, MatchedID: matched.ID,
 		DurationMs: time.Since(start).Milliseconds(),
 	})
+
+	if matched.BlockSeconds > 0 {
+		// Sleep interruptible: el handler default de Go para
+		// SIGTERM/SIGINT termina el proceso, así que el bloqueo se corta
+		// apenas el parent mata el pgid.
+		time.Sleep(time.Duration(matched.BlockSeconds) * time.Second)
+	}
+
 	os.Exit(matched.Exit)
 }
 

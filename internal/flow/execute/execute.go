@@ -14,14 +14,17 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/chichex/che/internal/labels"
@@ -31,10 +34,16 @@ import (
 type ExitCode int
 
 const (
-	ExitOK       ExitCode = 0
-	ExitRetry    ExitCode = 2 // error remediable (red, gh/git falla, rollback aplicado)
-	ExitSemantic ExitCode = 3 // ref vacío, issue sin ct:plan, ya ejecutándose, agente inválido
+	ExitOK        ExitCode = 0
+	ExitRetry     ExitCode = 2   // error remediable (red, gh/git falla, rollback aplicado)
+	ExitSemantic  ExitCode = 3   // ref vacío, issue sin ct:plan, ya ejecutándose, agente inválido
+	ExitCancelled ExitCode = 130 // SIGINT/SIGTERM recibido; cleanup local aplicado
 )
+
+// agentKillGrace es el tiempo que esperamos al agente después de mandarle
+// SIGTERM a su process group antes de escalar a SIGKILL. Corto a propósito:
+// queremos exit determinista aunque el agente ignore SIGTERM.
+const agentKillGrace = 5 * time.Second
 
 // Agent identifica qué ejecutor usar. Replica el enum de explore para no
 // acoplar los paquetes; cuando se extraiga `internal/flow/common/`, los dos
@@ -135,6 +144,12 @@ type Opts struct {
 	// SkipValidators puede usarse en tests/CI para omitir el disparo de
 	// validadores aunque se hayan pasado en Validators.
 	SkipValidators bool
+	// Ctx permite al caller proveer un context cancelable (típicamente
+	// signal.NotifyContext para SIGINT/SIGTERM). Si es nil, Run instala su
+	// propio handler de señales. La TUI lo usa para compartir un context con
+	// cancel explícito desde el key handler de Ctrl+C sin depender de un
+	// signal real.
+	Ctx context.Context
 }
 
 // Validator es una re-declaración del enum de explore para no acoplar los
@@ -227,6 +242,19 @@ func Run(issueRef string, opts Opts) ExitCode {
 		progress = func(string) {}
 	}
 
+	// Instalar signal handling si el caller no pasó un context. cmd/execute.go
+	// instala el suyo (para mapear SIGINT → exit 130 explícito); la TUI pasa
+	// un context propio con cancel programático desde el key handler. Si
+	// nadie pasó nada, hacemos el default seguro acá.
+	ctx := opts.Ctx
+	var stopSignals context.CancelFunc
+	if ctx == nil {
+		var parent context.Context
+		parent, stopSignals = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		ctx = parent
+		defer stopSignals()
+	}
+
 	issueRef = strings.TrimSpace(issueRef)
 	if issueRef == "" {
 		fmt.Fprintln(stderr, "error: issue ref is empty")
@@ -243,27 +271,36 @@ func Run(issueRef string, opts Opts) ExitCode {
 	}
 
 	progress("chequeando repo git y auth de GitHub…")
-	repoRoot, err := repoToplevel()
+	repoRoot, err := repoToplevel(ctx)
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
-	if err := precheckGitHubRemote(); err != nil {
+	if err := precheckGitHubRemote(ctx); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
-	if err := precheckGhAuth(); err != nil {
+	if err := precheckGhAuth(ctx); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
-	if err := precheckPRScopes(); err != nil {
+	if err := precheckPRScopes(ctx); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
 
+	// Si ya entró una señal mientras corrían los prechecks, abortamos sin
+	// tocar nada (no hay lock todavía).
+	if ctx.Err() != nil {
+		return ExitCancelled
+	}
+
 	progress("obteniendo issue desde GitHub…")
-	issue, err := fetchIssue(issueRef)
+	issue, err := fetchIssue(ctx, issueRef)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ExitCancelled
+		}
 		fmt.Fprintf(stderr, "error: fetching issue: %v\n", err)
 		return ExitRetry
 	}
@@ -286,33 +323,91 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitRetry
 	}
 
-	// Defer de rollback: si algo falla, volver a plan.
+	// Defer de rollback: si algo falla (incluyendo señal), limpiar localmente
+	// y volver a plan. El defer es idempotente — puede correrse dos veces
+	// sin romper — y usa context.Background() para los subprocesos del
+	// cleanup, así la cancelación del parent no aborta el rollback.
+	// Orden fijo (importante para que un segundo Ctrl+C vea progreso):
+	//   1) label executing → plan (lo primero, así el issue queda libre para
+	//      otra corrida incluso si el resto del cleanup se interrumpe)
+	//   2) git worktree remove --force (aguanta cambios sin commitear del
+	//      agente)
+	//   3) git branch -D (último; menos crítico, la branch sin worktree no
+	//      bloquea nada funcional)
 	var (
-		succeeded bool
-		wt        *Worktree
+		succeeded       bool
+		wt              *Worktree
+		prCreated       bool // si true, no tocamos el rollback remoto; se documenta al user
+		executedApplied bool // si true, el label ya transitó a executed — no lo revertimos
+		cleanupDone     bool
 	)
+	// cleanupLocal limpia el estado local: label rollback (si no se
+	// transicionó a executed todavía), worktree remove, branch local delete.
+	// Idempotente (cleanupDone) y usa context.Background() para que una
+	// señal durante el cleanup no aborte el cleanup en sí. Orden fijo
+	// (importante para que un segundo Ctrl+C vea progreso):
+	//   1) label executing → plan (lo primero, así el issue queda libre
+	//      para otra corrida incluso si el resto se interrumpe). Salta
+	//      si executedApplied=true (ya transitamos más allá).
+	//   2) git worktree remove --force (aguanta cambios sin commitear del
+	//      agente).
+	//   3) git branch -D (último; menos crítico, la branch sin worktree no
+	//      bloquea nada funcional).
+	cleanupLocal := func(cause string) {
+		if cleanupDone {
+			return
+		}
+		cleanupDone = true
+
+		// Señal: avisamos al user qué estamos haciendo para que el bloqueo
+		// síncrono del cleanup no parezca un cuelgue.
+		if cause != "" {
+			if executedApplied {
+				fmt.Fprintf(stderr, "%s — limpiando localmente (worktree, branch; label queda en executed)…\n", cause)
+			} else {
+				fmt.Fprintf(stderr, "%s — limpiando localmente (label → plan, worktree, branch)…\n", cause)
+			}
+		}
+
+		// 1) Label rollback primero. Ownership-aware: re-fetch el issue y
+		//    verificar que status:executing siga siendo nuestro lock.
+		//    Si ya transitamos a executed, saltamos este paso (el issue
+		//    quedó consistente; el worktree es solo scratch local).
+		if !executedApplied {
+			rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer rollbackCancel()
+			current, fetchErr := fetchIssue(rollbackCtx, issueRef)
+			if fetchErr != nil {
+				fmt.Fprintf(stderr, "warning: rollback no aplicado: no se pudo re-fetch el issue (%v) — revisá labels a mano\n", fetchErr)
+			} else if !current.HasLabel(labels.StatusExecuting) {
+				fmt.Fprintln(stderr, "rollback abortado: el issue ya no está en status:executing (owner=otro)")
+			} else {
+				if err := labels.Apply(issueRef, labels.StatusExecuting, labels.StatusPlan); err != nil {
+					fmt.Fprintf(stderr, "warning: rollback failed: %v — revisá labels del issue a mano\n", err)
+				}
+			}
+		}
+
+		// 2) Worktree remove (force).
+		if wt != nil {
+			_ = wt.Cleanup(repoRoot, false)
+		}
+
+		// 3) Si el PR remoto ya quedó creado, avisamos al usuario que la
+		//    branch remota + PR draft quedaron colgados para retry manual.
+		if prCreated {
+			fmt.Fprintln(stderr, "nota: la branch remota y el PR draft quedan intactos (best-effort); cerralos o reanudá con otro `che execute`")
+		}
+	}
 	defer func() {
 		if succeeded {
 			return
 		}
-		if wt != nil {
-			_ = wt.Cleanup(repoRoot, false)
+		reason := ""
+		if ctx.Err() != nil {
+			reason = "señal recibida"
 		}
-		// Rollback ownership-aware: re-fetch el issue y verificar que
-		// status:executing siga siendo nuestro lock antes de revertirlo.
-		// Si otra instancia ya transitó, pisaríamos su estado.
-		current, fetchErr := fetchIssue(issueRef)
-		if fetchErr != nil {
-			fmt.Fprintf(stderr, "warning: rollback no aplicado: no se pudo re-fetch el issue (%v) — revisá labels a mano\n", fetchErr)
-			return
-		}
-		if !current.HasLabel(labels.StatusExecuting) {
-			fmt.Fprintln(stderr, "rollback abortado: el issue ya no está en status:executing (owner=otro)")
-			return
-		}
-		if err := labels.Apply(issueRef, labels.StatusExecuting, labels.StatusPlan); err != nil {
-			fmt.Fprintf(stderr, "warning: rollback failed: %v — revisá labels del issue a mano\n", err)
-		}
+		cleanupLocal(reason)
 	}()
 
 	slug := Slugify(issue.Title)
@@ -330,21 +425,30 @@ func Run(issueRef string, opts Opts) ExitCode {
 	// Antes de invocar al agente, chequeamos si ya hay un PR abierto para
 	// esta branch — si lo hay, estamos en modo "re-ejecutar" (idempotente)
 	// y vamos a actualizarlo después de pushear los nuevos commits.
-	existingPR, err := findOpenPRForBranch(wt.Branch)
+	existingPR, err := findOpenPRForBranch(ctx, wt.Branch)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ExitCancelled
+		}
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
 
 	progress(fmt.Sprintf("invocando a %s en el worktree…", agent))
-	if err := runAgent(agent, wt.Path, buildPrompt(issue, plan), progress); err != nil {
+	if err := runAgent(ctx, agent, wt.Path, buildPrompt(issue, plan), progress); err != nil {
+		if ctx.Err() != nil {
+			return ExitCancelled
+		}
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
 
 	progress("chequeando cambios en el worktree…")
-	hasChanges, err := worktreeHasChanges(wt.Path)
+	hasChanges, err := worktreeHasChanges(ctx, wt.Path)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ExitCancelled
+		}
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
@@ -364,13 +468,19 @@ func Run(issueRef string, opts Opts) ExitCode {
 	}
 
 	progress("armando commit en el worktree…")
-	if err := commitAll(wt.Path, fmt.Sprintf("feat(#%d): %s\n\nCloses #%d", issue.Number, issue.Title, issue.Number)); err != nil {
+	if err := commitAll(ctx, wt.Path, fmt.Sprintf("feat(#%d): %s\n\nCloses #%d", issue.Number, issue.Title, issue.Number)); err != nil {
+		if ctx.Err() != nil {
+			return ExitCancelled
+		}
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
 
 	progress("pusheando branch " + wt.Branch + "…")
-	if err := pushBranch(wt.Path, wt.Branch); err != nil {
+	if err := pushBranch(ctx, wt.Path, wt.Branch); err != nil {
+		if ctx.Err() != nil {
+			return ExitCancelled
+		}
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
@@ -379,13 +489,18 @@ func Run(issueRef string, opts Opts) ExitCode {
 	if existingPR != "" {
 		progress("actualizando PR existente " + existingPR + "…")
 		prURL = existingPR
+		prCreated = true
 	} else {
 		progress("creando PR draft contra main…")
-		prURL, err = createDraftPR(wt.Path, wt.Branch, issue)
+		prURL, err = createDraftPR(ctx, wt.Path, wt.Branch, issue)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ExitCancelled
+			}
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return ExitRetry
 		}
+		prCreated = true
 	}
 
 	// Disparar validadores y esperar con timeout acotado. Originalmente esto
@@ -396,9 +511,15 @@ func Run(issueRef string, opts Opts) ExitCode {
 	// en background pero el proceso se va a cortar).
 	var validatorsDone <-chan int
 	validatorsTotal := 0
+	// validatorsCtx es un subcontext que se cancela con el parent y nos
+	// permite matar los subprocesos de validación en cascada. Lo tenemos
+	// separado para cancelarlo explícitamente desde waitValidators si ctx
+	// expira durante el wait.
+	validatorsCtx, validatorsCancel := context.WithCancel(ctx)
+	defer validatorsCancel()
 	if !opts.SkipValidators && len(opts.Validators) > 0 {
 		progress(fmt.Sprintf("disparando %d validador(es) sobre el PR…", len(opts.Validators)))
-		validatorsDone = fireValidators(prURL, issue, plan, opts.Validators)
+		validatorsDone = fireValidators(validatorsCtx, prURL, issue, plan, opts.Validators)
 		validatorsTotal = len(opts.Validators)
 	}
 
@@ -407,20 +528,33 @@ func Run(issueRef string, opts Opts) ExitCode {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
+	executedApplied = true
 
 	progress("posteando comment en el issue con link al PR…")
-	if err := commentIssue(issueRef, renderIssueComment(prURL, opts.Validators)); err != nil {
+	if err := commentIssue(ctx, issueRef, renderIssueComment(prURL, opts.Validators)); err != nil {
 		// No es fatal — ya hicimos todo el trabajo. Lo logueamos y seguimos.
 		fmt.Fprintf(stderr, "warning: no se pudo comentar el issue: %v\n", err)
 	}
 
-	succeeded = true
-
 	// Esperar a los validadores (si los hay) antes de retornar, para que el
-	// os.Exit del caller no los mate. Feedback incremental a stdout.
+	// os.Exit del caller no los mate. Feedback incremental a stdout. Si el
+	// ctx se cancela durante el wait (señal post-PR), cancelamos los
+	// validadores y hacemos el cleanup local (worktree + branch local; el
+	// label queda en executed porque ya transitamos — executedApplied=true
+	// salta el rollback del label en cleanupLocal).
 	if validatorsDone != nil && validatorsTotal > 0 {
-		waitValidators(stdout, validatorsDone, validatorsTotal, ValidatorsWaitTimeout)
+		waitValidators(ctx, stdout, validatorsDone, validatorsTotal, ValidatorsWaitTimeout)
+		if ctx.Err() != nil {
+			validatorsCancel()
+			cleanupLocal("señal recibida durante wait de validadores")
+			fmt.Fprintf(stdout, "Executed %s\n", issue.URL)
+			fmt.Fprintf(stdout, "PR: %s\n", prURL)
+			fmt.Fprintln(stdout, "cancelado durante wait de validadores; issue ya quedó en status:executed")
+			return ExitCancelled
+		}
 	}
+
+	succeeded = true
 
 	fmt.Fprintf(stdout, "Executed %s\n", issue.URL)
 	fmt.Fprintf(stdout, "PR: %s\n", prURL)
@@ -431,8 +565,10 @@ func Run(issueRef string, opts Opts) ExitCode {
 // waitValidators lee del canal una señal por validador que terminó y emite
 // progreso "esperando validadores (k/total)…" hasta total o hasta timeout.
 // Si expira el timeout, imprime cuántos quedaron y retorna — los que sigan
-// corriendo van a morir cuando el proceso termine.
-func waitValidators(stdout io.Writer, done <-chan int, total int, timeout time.Duration) {
+// corriendo van a morir cuando el proceso termine. Si ctx se cancela
+// (señal externa), retorna inmediatamente; el caller se encarga de
+// cancelar los subprocesos de los validadores.
+func waitValidators(ctx context.Context, stdout io.Writer, done <-chan int, total int, timeout time.Duration) {
 	completed := 0
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -447,6 +583,9 @@ func waitValidators(stdout io.Writer, done <-chan int, total int, timeout time.D
 			fmt.Fprintf(stdout, "esperando validadores (%d/%d)…\n", completed, total)
 		case <-timer.C:
 			fmt.Fprintf(stdout, "timeout: %d/%d validadores completaron, el resto sigue corriendo en background\n", completed, total)
+			return
+		case <-ctx.Done():
+			fmt.Fprintf(stdout, "cancelado: %d/%d validadores completaron antes de la señal\n", completed, total)
 			return
 		}
 	}
@@ -484,16 +623,16 @@ func ListCandidates() ([]Candidate, error) {
 
 // ---- prechecks ----
 
-func repoToplevel() (string, error) {
-	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+func repoToplevel(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		return "", fmt.Errorf("git repo: not inside a git repository")
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
-func precheckGitHubRemote() error {
-	out, err := exec.Command("git", "remote", "get-url", "origin").Output()
+func precheckGitHubRemote(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, "git", "remote", "get-url", "origin").Output()
 	if err != nil {
 		return fmt.Errorf("github remote: no origin configured")
 	}
@@ -504,8 +643,8 @@ func precheckGitHubRemote() error {
 	return nil
 }
 
-func precheckGhAuth() error {
-	out, err := exec.Command("gh", "auth", "status").CombinedOutput()
+func precheckGhAuth(ctx context.Context) error {
+	out, err := exec.CommandContext(ctx, "gh", "auth", "status").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gh auth: %s", strings.TrimSpace(string(out)))
 	}
@@ -518,8 +657,8 @@ func precheckGhAuth() error {
 // los scopes concedidos en stderr. Antes se usaba `gh pr list --limit 1`,
 // que sólo requiere scope read — un token read-only pasaba el precheck y
 // fallaba tarde en `gh pr create`, después de gastar tokens LLM y pushear.
-func precheckPRScopes() error {
-	cmd := exec.Command("gh", "auth", "status", "-t")
+func precheckPRScopes(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, "gh", "auth", "status", "-t")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gh auth status: %s — probá `gh auth login`", strings.TrimSpace(string(out)))
@@ -565,8 +704,8 @@ func hasRepoScope(out string) bool {
 
 // ---- issue fetch / gate ----
 
-func fetchIssue(ref string) (*Issue, error) {
-	cmd := exec.Command("gh", "issue", "view", ref,
+func fetchIssue(ctx context.Context, ref string) (*Issue, error) {
+	cmd := exec.CommandContext(ctx, "gh", "issue", "view", ref,
 		"--json", "number,title,body,labels,url,state")
 	out, err := cmd.Output()
 	if err != nil {
@@ -812,13 +951,34 @@ Título: ` + issue.Title + `
 
 // runAgent invoca al CLI del agente con el prompt construido, corriendo con
 // cwd en el worktree para que cualquier herramienta de file edit afecte ese
-// directorio. Usa StdoutPipe + streaming igual que explore.
-func runAgent(agent Agent, cwd, prompt string, progress func(string)) error {
-	ctx, cancel := context.WithTimeout(context.Background(), AgentTimeout)
+// directorio. Usa StdoutPipe + streaming igual que explore. El parent ctx
+// se compone con el timeout del agente; cualquier cancelación (timeout o
+// señal) mata el process group entero para evitar subprocesos zombies —
+// claude/codex pueden fork-ar tool-use processes (bash, ripgrep, etc.) que
+// si solo matamos al PID directo siguen corriendo sueltos.
+func runAgent(parent context.Context, agent Agent, cwd, prompt string, progress func(string)) error {
+	ctx, cancel := context.WithTimeout(parent, AgentTimeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, agent.Binary(), agent.InvokeArgs(prompt)...)
 	cmd.Dir = cwd
+	// Setpgid aisla al agente (y su descendencia) en su propio process group;
+	// Cancel custom manda SIGTERM al -pgid en vez de al PID directo, así
+	// matamos el árbol entero. WaitDelay asegura SIGKILL si no termina
+	// después de agentKillGrace.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		pgid, err := syscall.Getpgid(cmd.Process.Pid)
+		if err != nil {
+			return cmd.Process.Signal(syscall.SIGTERM)
+		}
+		return syscall.Kill(-pgid, syscall.SIGTERM)
+	}
+	cmd.WaitDelay = agentKillGrace
+
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -845,7 +1005,13 @@ func runAgent(agent Agent, cwd, prompt string, progress func(string)) error {
 	wg.Wait()
 
 	waitErr := cmd.Wait()
-	if ctx.Err() == context.DeadlineExceeded {
+	// Cancel por señal del parent: no es "error del agente", es cancelación
+	// del usuario. Devolvemos un error distintivo que el caller traduce a
+	// ExitCancelled tras verificar parent.Err().
+	if parent.Err() != nil {
+		return fmt.Errorf("%s: cancelado por señal", agent)
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		// Incluimos el stderr acumulado cuando lo hay: un timeout puede
 		// venir acompañado de pistas (auth expirado, prompt rechazado,
 		// warnings del CLI) que el usuario necesita ver para distinguir
@@ -992,8 +1158,8 @@ func truncate(s string, max int) string {
 
 // worktreeHasChanges devuelve true si `git status --porcelain` devuelve
 // líneas (es decir, hay archivos modificados/nuevos).
-func worktreeHasChanges(wtPath string) (bool, error) {
-	cmd := exec.Command("git", "-C", wtPath, "status", "--porcelain")
+func worktreeHasChanges(ctx context.Context, wtPath string) (bool, error) {
+	cmd := exec.CommandContext(ctx, "git", "-C", wtPath, "status", "--porcelain")
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -1005,8 +1171,8 @@ func worktreeHasChanges(wtPath string) (bool, error) {
 }
 
 // commitAll hace `git add -A && git commit -F <tmp>` en el worktree.
-func commitAll(wtPath, message string) error {
-	if err := runGitIn(wtPath, "add", "-A"); err != nil {
+func commitAll(ctx context.Context, wtPath, message string) error {
+	if err := runGitIn(ctx, wtPath, "add", "-A"); err != nil {
 		return err
 	}
 	tmpDir, err := os.MkdirTemp("", "che-exec-commit-*")
@@ -1018,7 +1184,7 @@ func commitAll(wtPath, message string) error {
 	if err := os.WriteFile(msgFile, []byte(message), 0o644); err != nil {
 		return err
 	}
-	if err := runGitIn(wtPath, "commit", "-F", msgFile); err != nil {
+	if err := runGitIn(ctx, wtPath, "commit", "-F", msgFile); err != nil {
 		return err
 	}
 	return nil
@@ -1027,16 +1193,16 @@ func commitAll(wtPath, message string) error {
 // pushBranch empuja la branch a origin. Usa --force-with-lease para
 // re-ejecuciones idempotentes (caso de actualizar un PR existente) sin
 // pisar cambios ajenos.
-func pushBranch(wtPath, branch string) error {
-	if err := runGitIn(wtPath, "push", "--force-with-lease", "--set-upstream", "origin", branch); err != nil {
+func pushBranch(ctx context.Context, wtPath, branch string) error {
+	if err := runGitIn(ctx, wtPath, "push", "--force-with-lease", "--set-upstream", "origin", branch); err != nil {
 		return err
 	}
 	return nil
 }
 
-func runGitIn(dir string, args ...string) error {
+func runGitIn(ctx context.Context, dir string, args ...string) error {
 	full := append([]string{"-C", dir}, args...)
-	cmd := exec.Command("git", full...)
+	cmd := exec.CommandContext(ctx, "git", full...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(string(out)))
@@ -1051,8 +1217,8 @@ func runGitIn(dir string, args ...string) error {
 // devuelve error accionable: el caso es suficientemente raro como para
 // frenar en vez de agarrar uno silenciosamente. Filtrar por --base main
 // evita falsos positivos si la branch tiene un PR abierto contra otra base.
-func findOpenPRForBranch(branch string) (string, error) {
-	cmd := exec.Command("gh", "pr", "list",
+func findOpenPRForBranch(ctx context.Context, branch string) (string, error) {
+	cmd := exec.CommandContext(ctx, "gh", "pr", "list",
 		"--head", branch,
 		"--base", "main",
 		"--state", "open",
@@ -1085,7 +1251,7 @@ func findOpenPRForBranch(branch string) (string, error) {
 }
 
 // createDraftPR crea un PR draft contra main con Closes #<n> en el body.
-func createDraftPR(wtPath, branch string, issue *Issue) (string, error) {
+func createDraftPR(ctx context.Context, wtPath, branch string, issue *Issue) (string, error) {
 	tmpDir, err := os.MkdirTemp("", "che-exec-pr-*")
 	if err != nil {
 		return "", err
@@ -1100,7 +1266,7 @@ func createDraftPR(wtPath, branch string, issue *Issue) (string, error) {
 
 	title := fmt.Sprintf("feat(#%d): %s", issue.Number, issue.Title)
 
-	cmd := exec.Command("gh", "pr", "create",
+	cmd := exec.CommandContext(ctx, "gh", "pr", "create",
 		"--draft",
 		"--base", "main",
 		"--head", branch,
@@ -1125,7 +1291,11 @@ func createDraftPR(wtPath, branch string, issue *Issue) (string, error) {
 // que una goroutine termina. El caller puede leer hasta len(validators)
 // señales y aplicar su propio timeout. El canal tiene buffer = len(validators)
 // así las goroutines nunca se bloquean si el caller deja de drenarlo.
-func fireValidators(prURL string, issue *Issue, plan *ConsolidatedPlan, validators []Validator) <-chan int {
+//
+// parent es el context del flow; cualquier cancelación (señal o timeout del
+// wait superior) mata los subprocesos de validación con SIGTERM al process
+// group y permite a las goroutines retornar sin colgarse.
+func fireValidators(parent context.Context, prURL string, issue *Issue, plan *ConsolidatedPlan, validators []Validator) <-chan int {
 	done := make(chan int, len(validators))
 	for i, v := range validators {
 		i, v := i, v
@@ -1139,12 +1309,29 @@ func fireValidators(prURL string, issue *Issue, plan *ConsolidatedPlan, validato
 				}
 			}()
 			prompt := buildValidatorPrompt(issue, plan)
-			ctx, cancel := context.WithTimeout(context.Background(), AgentTimeout)
+			ctx, cancel := context.WithTimeout(parent, AgentTimeout)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, v.Agent.Binary(), v.Agent.InvokeArgs(prompt)...)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			cmd.Cancel = func() error {
+				if cmd.Process == nil {
+					return nil
+				}
+				pgid, err := syscall.Getpgid(cmd.Process.Pid)
+				if err != nil {
+					return cmd.Process.Signal(syscall.SIGTERM)
+				}
+				return syscall.Kill(-pgid, syscall.SIGTERM)
+			}
+			cmd.WaitDelay = agentKillGrace
 			out, _ := cmd.Output()
+			// Si el parent se canceló, no tiene sentido pelear con gh para
+			// postear el comment — retornamos y dejamos que el caller siga.
+			if parent.Err() != nil {
+				return
+			}
 			body := fmt.Sprintf("## Validator %s#%d\n\n%s\n", v.Agent, v.Instance, strings.TrimSpace(string(out)))
-			_ = postPRComment(prURL, body)
+			_ = postPRComment(parent, prURL, body)
 		}()
 	}
 	return done
@@ -1173,7 +1360,7 @@ func buildValidatorPrompt(issue *Issue, plan *ConsolidatedPlan) string {
 }
 
 // postPRComment postea un comment en el PR via `gh pr comment <url>`.
-func postPRComment(prURL, body string) error {
+func postPRComment(ctx context.Context, prURL, body string) error {
 	tmpDir, err := os.MkdirTemp("", "che-exec-prc-*")
 	if err != nil {
 		return err
@@ -1183,7 +1370,7 @@ func postPRComment(prURL, body string) error {
 	if err := os.WriteFile(bodyFile, []byte(body), 0o644); err != nil {
 		return err
 	}
-	cmd := exec.Command("gh", "pr", "comment", prURL, "--body-file", bodyFile)
+	cmd := exec.CommandContext(ctx, "gh", "pr", "comment", prURL, "--body-file", bodyFile)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gh pr comment: %s", strings.TrimSpace(string(out)))
@@ -1210,7 +1397,7 @@ func renderIssueComment(prURL string, validators []Validator) string {
 	return sb.String()
 }
 
-func commentIssue(ref, body string) error {
+func commentIssue(ctx context.Context, ref, body string) error {
 	tmpDir, err := os.MkdirTemp("", "che-exec-ic-*")
 	if err != nil {
 		return err
@@ -1220,7 +1407,7 @@ func commentIssue(ref, body string) error {
 	if err := os.WriteFile(bodyFile, []byte(body), 0o644); err != nil {
 		return err
 	}
-	cmd := exec.Command("gh", "issue", "comment", ref, "--body-file", bodyFile)
+	cmd := exec.CommandContext(ctx, "gh", "issue", "comment", ref, "--body-file", bodyFile)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gh issue comment: %s", strings.TrimSpace(string(out)))

@@ -8,9 +8,13 @@ package tui
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
@@ -86,6 +90,20 @@ type Model struct {
 	repo    string
 	branch  string
 
+	// ctx es el context raíz del TUI (signal.NotifyContext en tui.Run).
+	// Cada flow en background se corre sobre un subcontext derivado —
+	// cancelRun permite cancelar solo la corrida activa sin afectar el
+	// context raíz, y una cancelación del raíz cascadea a todas las
+	// corridas. Los subcommandos (CLI) tienen su propio ctx separado.
+	ctx       context.Context
+	cancelRun context.CancelFunc
+	// quittingAfterCleanup se setea cuando pedimos shutdown (Ctrl+C durante
+	// execute o señal externa): en vez de matar la UI de una, cancelamos el
+	// flow y esperamos a que el done msg llegue para asegurar que el
+	// cleanup local (label rollback, worktree remove, branch local)
+	// terminó antes de salir.
+	quittingAfterCleanup bool
+
 	// streaming del flow
 	runStart   time.Time
 	runLog     []string
@@ -128,13 +146,18 @@ type Model struct {
 
 // New construye el modelo inicial. version es el tag con el que se buildeó
 // el binario (ej. "0.0.8"). El repo y la branch se detectan en el momento.
-func New(version string) Model {
+// ctx es el context raíz (cancelable por señal); si es nil, se usa
+// context.Background() — los tests de snapshot del model no lo necesitan.
+func New(version string, ctx context.Context) Model {
 	ta := textarea.New()
 	ta.Placeholder = "Contame la idea — puede ser multilínea. Ctrl+D para enviar, Esc para cancelar."
 	ta.CharLimit = 5000
 	ta.SetWidth(70)
 	ta.SetHeight(8)
 	ta.ShowLineNumbers = false
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return Model{
 		screen:   screenMenu,
 		cursor:   0,
@@ -142,6 +165,7 @@ func New(version string) Model {
 		version:  version,
 		repo:     detectRepo(),
 		branch:   detectBranch(),
+		ctx:      ctx,
 	}
 }
 
@@ -213,6 +237,13 @@ type resumeInspectedMsg struct {
 	validators []explore.Validator
 	err        error
 }
+
+// shutdownMsg llega cuando el context raíz se cancela (SIGINT/SIGTERM desde
+// fuera del TUI). La UI la interpreta igual que Ctrl+C durante un run en
+// curso: cancela la corrida activa y espera a que el done msg llegue antes
+// de salir, para que el cleanup local del flow corra síncrono.
+type shutdownMsg struct{}
+
 type tickMsg time.Time
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -220,22 +251,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 
+	case shutdownMsg:
+		// Señal externa (SIGTERM/SIGINT fuera de la TUI). Si hay un run
+		// activo con cancelRun seteado, cancelamos y marcamos
+		// quittingAfterCleanup: cuando llegue el *DoneMsg salimos. Si no
+		// hay run activo, salimos de una.
+		if m.cancelRun != nil {
+			m.cancelRun()
+			m.quittingAfterCleanup = true
+			return m, nil
+		}
+		return m, tea.Quit
+
 	case progressMsg:
 		m.runLog = appendLog(m.runLog, msg.line)
 		// seguimos escuchando el channel
 		return m, waitForMsg(m.progressCh)
 
 	case flowDoneMsg:
-		return m.finishRun(int(msg.code), msg.code == idea.ExitOK, msg.stdout, msg.stderr), nil
+		return m.afterDone(m.finishRun(int(msg.code), msg.code == idea.ExitOK, msg.stdout, msg.stderr))
 
 	case exploreDoneMsg:
-		return m.finishRun(int(msg.code), msg.code == explore.ExitOK, msg.stdout, msg.stderr), nil
+		return m.afterDone(m.finishRun(int(msg.code), msg.code == explore.ExitOK, msg.stdout, msg.stderr))
 
 	case executeDoneMsg:
-		return m.finishRun(int(msg.code), msg.code == execute.ExitOK, msg.stdout, msg.stderr), nil
+		return m.afterDone(m.finishRun(int(msg.code), msg.code == execute.ExitOK, msg.stdout, msg.stderr))
 
 	case validateDoneMsg:
-		return m.finishRun(int(msg.code), msg.code == validate.ExitOK, msg.stdout, msg.stderr), nil
+		return m.afterDone(m.finishRun(int(msg.code), msg.code == validate.ExitOK, msg.stdout, msg.stderr))
 
 	case validateCandidatesLoadedMsg:
 		if msg.err != nil {
@@ -344,7 +387,20 @@ func (m Model) finishRun(exitCode int, ok bool, stdout, stderr string) Model {
 	}
 	m.resultLines = lines
 	m.progressCh = nil
+	// Liberar el cancel del run — el ctx del run ya quedó resuelto y la
+	// próxima corrida crea el suyo.
+	m.cancelRun = nil
 	return m
+}
+
+// afterDone decide si después de un finishRun tenemos que cerrar la UI
+// (cuando venimos de un shutdown pedido) o volver al menú / pantalla de
+// resultado normal. Factorizado para no repetir la lógica en cada *DoneMsg.
+func (m Model) afterDone(newModel Model) (tea.Model, tea.Cmd) {
+	if newModel.quittingAfterCleanup {
+		return newModel, tea.Quit
+	}
+	return newModel, nil
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -356,6 +412,15 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenIdeaRunning, screenExploreRunning, screenExploreLoading, screenExecuteRunning, screenExecuteLoading,
 		screenValidateRunning, screenValidateLoading:
 		if msg.String() == "ctrl+c" {
+			// Si hay un run activo con cancel asociado (caso execute),
+			// cancelamos y esperamos al done msg para que el cleanup
+			// local termine síncrono antes de cerrar la UI. Para los
+			// otros flows el cancel no está armado y salimos directo.
+			if m.cancelRun != nil {
+				m.cancelRun()
+				m.quittingAfterCleanup = true
+				return m, nil
+			}
 			return m, tea.Quit
 		}
 		return m, nil
@@ -617,24 +682,33 @@ func (m Model) startValidateFlow(prRef string, validators []validate.Validator) 
 // con el agente seleccionado y sin validadores (default 'none' en la TUI —
 // el usuario interactivo típicamente quiere ver el PR listo, los validadores
 // se pueden disparar después desde CLI si hace falta).
+//
+// Deriva un subcontext cancelable del ctx raíz y lo guarda en m.cancelRun
+// para que el handler de Ctrl+C pueda cancelar solo esta corrida (dejando
+// el ctx raíz vivo para las siguientes). Si llega una señal externa, el
+// ctx raíz se cancela y cascadea.
 func (m Model) startExecuteFlow(issueRef string, agent execute.Agent) (tea.Model, tea.Cmd) {
 	m.screen = screenExecuteRunning
 	m.runStart = time.Now()
 	m.runLog = []string{}
 	m.progressCh = make(chan tea.Msg, 64)
 
-	go func(ch chan<- tea.Msg) {
+	runCtx, cancel := context.WithCancel(m.ctx)
+	m.cancelRun = cancel
+
+	go func(ch chan<- tea.Msg, runCtx context.Context) {
 		var stdout, stderr bytes.Buffer
 		code := execute.Run(issueRef, execute.Opts{
 			Stdout: &stdout,
 			Stderr: &stderr,
 			Agent:  agent,
+			Ctx:    runCtx,
 			OnProgress: func(line string) {
 				ch <- progressMsg{line: line}
 			},
 		})
 		ch <- executeDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
-	}(m.progressCh)
+	}(m.progressCh, runCtx)
 
 	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
 }
@@ -1457,8 +1531,25 @@ func renderResult(m Model) string {
 
 // Run lanza el TUI y bloquea hasta que el usuario cierre. version se muestra
 // en el header del menú (típicamente cmd.Version).
+//
+// Instala signal.NotifyContext(SIGINT, SIGTERM) sobre context.Background().
+// tea.WithoutSignalHandler desactiva el handler default de bubbletea — el
+// nuestro es el único que ve las señales. En alt-screen + raw stdin, Ctrl+C
+// no genera SIGINT (se lee como byte por stdin y llega al Update como
+// tea.KeyMsg); las señales reales vienen de `kill -INT/TERM <pid>` fuera
+// de la TUI. Una goroutine convierte el ctx.Done() a shutdownMsg para que
+// el Update cancele la corrida activa y espere al cleanup antes de tea.Quit.
 func Run(version string) error {
-	p := tea.NewProgram(New(version), tea.WithAltScreen())
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	p := tea.NewProgram(New(version, ctx), tea.WithAltScreen(), tea.WithoutSignalHandler())
+
+	go func() {
+		<-ctx.Done()
+		p.Send(shutdownMsg{})
+	}()
+
 	_, err := p.Run()
 	return err
 }
