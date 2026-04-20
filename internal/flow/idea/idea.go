@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/chichex/che/internal/labels"
 )
 
 // Response es lo que esperamos que devuelva el agente de clasificación.
@@ -278,30 +280,27 @@ func validate(r *Response) error {
 }
 
 // ensureLabels garantiza que los labels type:*, size:* y status:idea que se
-// van a aplicar existan en el repo. Usa `gh label create --force` que es
-// idempotente: crea si no existe, actualiza si existe.
+// van a aplicar existan en el repo. Delega en labels.Ensure (idempotente).
 func ensureLabels(items []Item, progress func(string)) error {
 	seen := map[string]bool{}
-	var labels []string
+	var names []string
 	for _, it := range items {
 		for _, l := range []string{
 			"type:" + it.Type,
 			"size:" + strings.ToLower(it.Size),
-			"status:idea",
-			"ct:plan",
+			labels.StatusIdea,
+			labels.CtPlan,
 		} {
 			if !seen[l] {
 				seen[l] = true
-				labels = append(labels, l)
+				names = append(names, l)
 			}
 		}
 	}
-	for _, lbl := range labels {
+	for _, lbl := range names {
 		progress("asegurando label " + lbl)
-		cmd := exec.Command("gh", "label", "create", lbl, "--force")
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("ensuring label %s: %s", lbl, strings.TrimSpace(string(out)))
+		if err := labels.Ensure(lbl); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -326,8 +325,8 @@ func createIssue(item Item) (string, error) {
 		"--body-file", bodyFile,
 		"--label", "type:" + item.Type,
 		"--label", "size:" + strings.ToLower(item.Size),
-		"--label", "status:idea",
-		"--label", "ct:plan",
+		"--label", labels.StatusIdea,
+		"--label", labels.CtPlan,
 	}
 	cmd := exec.Command("gh", args...)
 	out, err := cmd.Output()

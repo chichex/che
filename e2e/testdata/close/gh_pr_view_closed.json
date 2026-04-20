@@ -1,0 +1,13 @@
+{
+  "number": 7,
+  "title": "feat(old): merged already",
+  "url": "https://github.com/acme/demo/pull/7",
+  "state": "MERGED",
+  "isDraft": false,
+  "headRefName": "old-branch",
+  "mergeable": "UNKNOWN",
+  "mergeStateStatus": "UNKNOWN",
+  "author": {"login": "acme-bot"},
+  "closingIssuesReferences": [],
+  "labels": []
+}

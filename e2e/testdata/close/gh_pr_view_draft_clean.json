@@ -5,6 +5,9 @@
   "state": "OPEN",
   "isDraft": true,
   "headRefName": "exec/42-nuevo-flow",
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "CLEAN",
   "author": {"login": "acme-bot"},
+  "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
   "labels": []
 }
