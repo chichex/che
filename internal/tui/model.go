@@ -19,6 +19,7 @@ import (
 	"github.com/chichex/che/internal/flow/execute"
 	"github.com/chichex/che/internal/flow/explore"
 	"github.com/chichex/che/internal/flow/idea"
+	"github.com/chichex/che/internal/flow/iterate"
 	"github.com/chichex/che/internal/flow/validate"
 )
 
@@ -41,6 +42,9 @@ const (
 	screenValidateSelect
 	screenValidateValidators
 	screenValidateRunning
+	screenIterateLoading
+	screenIterateSelect
+	screenIterateRunning
 	screenCloseLoading
 	screenCloseSelect
 	screenCloseRunning
@@ -73,8 +77,8 @@ var menuItems = []menuItem{
 	{label: "Explorar", key: "2", action: screenExploreLoading},
 	{label: "Ejecutar", key: "3", action: screenExecuteLoading},
 	{label: "Validar", key: "4", action: screenValidateLoading},
-	{label: "Cerrar", key: "5", action: screenCloseLoading},
-	{label: "Eliminar", key: "6", disabled: true},
+	{label: "Iterar", key: "5", action: screenIterateLoading},
+	{label: "Cerrar", key: "6", action: screenCloseLoading},
 }
 
 const maxLogLines = 40
@@ -134,6 +138,13 @@ type Model struct {
 	closeCursor    int
 	closeChosenRef string
 	closeChosenURL string
+
+	// selector de iterate: lista de PRs con validated:changes-requested
+	// (los que piden que opus aplique cambios).
+	iterateCandidates []validate.Candidate
+	iterateCursor     int
+	iterateChosenRef  string
+	iterateChosenURL  string
 
 	// resultado final
 	resultLines []string
@@ -231,6 +242,15 @@ type closeDoneMsg struct {
 	stdout string
 	stderr string
 }
+type iterateCandidatesLoadedMsg struct {
+	items []validate.Candidate
+	err   error
+}
+type iterateDoneMsg struct {
+	code   iterate.ExitCode
+	stdout string
+	stderr string
+}
 type resumeInspectedMsg struct {
 	ref        string
 	agent      explore.Agent
@@ -263,6 +283,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case closeDoneMsg:
 		return m.finishRun(int(msg.code), msg.code == closing.ExitOK, msg.stdout, msg.stderr), nil
+
+	case iterateDoneMsg:
+		return m.finishRun(int(msg.code), msg.code == iterate.ExitOK, msg.stdout, msg.stderr), nil
+
+	case iterateCandidatesLoadedMsg:
+		if msg.err != nil {
+			m.screen = screenResult
+			m.resultOK = false
+			m.resultLines = []string{"error: " + msg.err.Error()}
+			return m, nil
+		}
+		if len(msg.items) == 0 {
+			m.screen = screenResult
+			m.resultOK = false
+			m.resultLines = []string{
+				"No hay PRs con validated:changes-requested en este repo.",
+				"Corré `che validate <pr>` y si pide cambios, volvé acá.",
+			}
+			return m, nil
+		}
+		m.iterateCandidates = msg.items
+		m.iterateCursor = 0
+		m.screen = screenIterateSelect
+		return m, nil
 
 	case closeCandidatesLoadedMsg:
 		if msg.err != nil {
@@ -372,7 +416,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		if m.screen == screenIdeaRunning || m.screen == screenExploreRunning ||
 			m.screen == screenExecuteRunning || m.screen == screenValidateRunning ||
-			m.screen == screenCloseRunning {
+			m.screen == screenCloseRunning || m.screen == screenIterateRunning {
 			return m, tickCmd()
 		}
 		return m, nil
@@ -404,7 +448,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenIdeaInput:
 		return m.handleIdeaInputKey(msg)
 	case screenIdeaRunning, screenExploreRunning, screenExploreLoading, screenExecuteRunning, screenExecuteLoading,
-		screenValidateRunning, screenValidateLoading, screenCloseRunning, screenCloseLoading:
+		screenValidateRunning, screenValidateLoading, screenCloseRunning, screenCloseLoading,
+		screenIterateRunning, screenIterateLoading:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
@@ -425,6 +470,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleValidateValidatorsKey(msg)
 	case screenCloseSelect:
 		return m.handleCloseSelectKey(msg)
+	case screenIterateSelect:
+		return m.handleIterateSelectKey(msg)
 	case screenResult:
 		return m.handleResultKey(msg)
 	}
@@ -486,6 +533,11 @@ func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 		m.closeBlocked = nil
 		m.closeCursor = 0
 		return m, loadCloseCandidatesCmd()
+	case screenIterateLoading:
+		m.screen = screenIterateLoading
+		m.iterateCandidates = nil
+		m.iterateCursor = 0
+		return m, loadIterateCandidatesCmd()
 	}
 	return m, nil
 }
@@ -646,6 +698,72 @@ func validateValidatorsFromCounts(counts map[validate.Agent]int) []validate.Vali
 		}
 	}
 	return out
+}
+
+// loadIterateCandidatesCmd lista PRs con validated:changes-requested —
+// los que pidieron cambios y están esperando que iterate los aplique.
+func loadIterateCandidatesCmd() tea.Cmd {
+	return func() tea.Msg {
+		items, err := iterate.ListIterable()
+		return iterateCandidatesLoadedMsg{items: items, err: err}
+	}
+}
+
+func (m Model) handleIterateSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	total := len(m.iterateCandidates)
+	switch k {
+	case "esc":
+		m.screen = screenMenu
+		m.iterateCandidates = nil
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if total == 0 {
+			return m, nil
+		}
+		m.iterateCursor = (m.iterateCursor - 1 + total) % total
+		return m, nil
+	case "down", "j":
+		if total == 0 {
+			return m, nil
+		}
+		m.iterateCursor = (m.iterateCursor + 1) % total
+		return m, nil
+	case "enter":
+		if total == 0 {
+			return m, nil
+		}
+		chosen := m.iterateCandidates[m.iterateCursor]
+		m.iterateChosenRef = fmt.Sprint(chosen.Number)
+		m.iterateChosenURL = chosen.URL
+		return m.startIterateFlow(m.iterateChosenRef)
+	}
+	return m, nil
+}
+
+// startIterateFlow arranca iterate.Run en background sobre el PR elegido.
+// Sin selector de agente — iterate usa opus hardcoded.
+func (m Model) startIterateFlow(prRef string) (tea.Model, tea.Cmd) {
+	m.screen = screenIterateRunning
+	m.runStart = time.Now()
+	m.runLog = []string{}
+	m.progressCh = make(chan tea.Msg, 64)
+
+	go func(ch chan<- tea.Msg) {
+		var stdout, stderr bytes.Buffer
+		code := iterate.Run(prRef, iterate.Opts{
+			Stdout: &stdout,
+			Stderr: &stderr,
+			OnProgress: func(line string) {
+				ch <- progressMsg{line: line}
+			},
+		})
+		ch <- iterateDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	}(m.progressCh)
+
+	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
 }
 
 // loadCloseCandidatesCmd lista PRs abiertos agrupados en ready/blocked
@@ -984,6 +1102,7 @@ func (m Model) handleResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.validateCandidates = nil
 	m.closeReady = nil
 	m.closeBlocked = nil
+	m.iterateCandidates = nil
 	return m, nil
 }
 
@@ -1117,6 +1236,12 @@ func (m Model) View() string {
 		return renderCloseSelect(m)
 	case screenCloseRunning:
 		return renderRunning(m, "Cerrando PR…", "Ctrl+C cancela")
+	case screenIterateLoading:
+		return renderIterateLoading(m)
+	case screenIterateSelect:
+		return renderIterateSelect(m)
+	case screenIterateRunning:
+		return renderRunning(m, "Iterando sobre findings…", "Ctrl+C cancela")
 	case screenResult:
 		return renderResult(m)
 	}
@@ -1680,6 +1805,41 @@ func closeCandidateLine(c validate.Candidate, selected bool) string {
 		line += " " + comingSoonStyle.Render("— by @"+c.Author)
 	}
 	return style.Render(line) + "\n"
+}
+
+// ---- iterate renders ----
+
+func renderIterateLoading(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Iterar sobre un PR"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render("Buscando PRs con validated:changes-requested…"))
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("Ctrl+C cancela"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func renderIterateSelect(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Iterar"))
+	sb.WriteString("\n")
+	total := len(m.iterateCandidates)
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf(
+		"%d PR(s) con changes-requested — opus lee los findings y aplica los cambios",
+		total)))
+	sb.WriteString("\n\n")
+	if total == 0 {
+		sb.WriteString("  " + mutedBadge("(ninguno)") + "\n")
+	} else {
+		for i, c := range m.iterateCandidates {
+			sb.WriteString(closeCandidateLine(c, i == m.iterateCursor))
+		}
+	}
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("↑/↓ navega · Enter dispara · Esc vuelve · Ctrl+C sale"))
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 // Run lanza el TUI y bloquea hasta que el usuario cierre. version se muestra
