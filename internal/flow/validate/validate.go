@@ -159,15 +159,19 @@ type PullRequest struct {
 	Author     struct {
 		Login string `json:"login"`
 	} `json:"author"`
+	ClosingIssuesReferences []struct {
+		Number int `json:"number"`
+	} `json:"closingIssuesReferences"`
 }
 
 // Candidate es la vista mínima para la TUI al listar PRs abiertos.
 type Candidate struct {
-	Number  int
-	Title   string
-	URL     string
-	IsDraft bool
-	Author  string
+	Number         int
+	Title          string
+	URL            string
+	IsDraft        bool
+	Author         string
+	RelatedIssues  []int // issues referenciados via "Closes #N" / "Fixes #N" en el body del PR
 }
 
 // PRComment es un comment del PR; el body puede tener header de claude-cli al
@@ -371,7 +375,7 @@ func Run(prRef string, opts Opts) ExitCode {
 func ListOpenPRs() ([]Candidate, error) {
 	cmd := exec.Command("gh", "pr", "list",
 		"--state", "open",
-		"--json", "number,title,url,isDraft,author,headRefName",
+		"--json", "number,title,url,isDraft,author,headRefName,closingIssuesReferences",
 		"--limit", "50")
 	out, err := cmd.Output()
 	if err != nil {
@@ -386,12 +390,17 @@ func ListOpenPRs() ([]Candidate, error) {
 	}
 	res := make([]Candidate, 0, len(raw))
 	for _, p := range raw {
+		related := make([]int, 0, len(p.ClosingIssuesReferences))
+		for _, r := range p.ClosingIssuesReferences {
+			related = append(related, r.Number)
+		}
 		res = append(res, Candidate{
-			Number:  p.Number,
-			Title:   p.Title,
-			URL:     p.URL,
-			IsDraft: p.IsDraft,
-			Author:  p.Author.Login,
+			Number:        p.Number,
+			Title:         p.Title,
+			URL:           p.URL,
+			IsDraft:       p.IsDraft,
+			Author:        p.Author.Login,
+			RelatedIssues: related,
 		})
 	}
 	return res, nil
