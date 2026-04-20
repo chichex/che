@@ -323,17 +323,6 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitRetry
 	}
 
-	// Defer de rollback: si algo falla (incluyendo señal), limpiar localmente
-	// y volver a plan. El defer es idempotente — puede correrse dos veces
-	// sin romper — y usa context.Background() para los subprocesos del
-	// cleanup, así la cancelación del parent no aborta el rollback.
-	// Orden fijo (importante para que un segundo Ctrl+C vea progreso):
-	//   1) label executing → plan (lo primero, así el issue queda libre para
-	//      otra corrida incluso si el resto del cleanup se interrumpe)
-	//   2) git worktree remove --force (aguanta cambios sin commitear del
-	//      agente)
-	//   3) git branch -D (último; menos crítico, la branch sin worktree no
-	//      bloquea nada funcional)
 	var (
 		succeeded       bool
 		wt              *Worktree
@@ -341,18 +330,23 @@ func Run(issueRef string, opts Opts) ExitCode {
 		executedApplied bool // si true, el label ya transitó a executed — no lo revertimos
 		cleanupDone     bool
 	)
-	// cleanupLocal limpia el estado local: label rollback (si no se
-	// transicionó a executed todavía), worktree remove, branch local delete.
-	// Idempotente (cleanupDone) y usa context.Background() para que una
-	// señal durante el cleanup no aborte el cleanup en sí. Orden fijo
-	// (importante para que un segundo Ctrl+C vea progreso):
-	//   1) label executing → plan (lo primero, así el issue queda libre
-	//      para otra corrida incluso si el resto se interrumpe). Salta
-	//      si executedApplied=true (ya transitamos más allá).
-	//   2) git worktree remove --force (aguanta cambios sin commitear del
-	//      agente).
-	//   3) git branch -D (último; menos crítico, la branch sin worktree no
-	//      bloquea nada funcional).
+	// cleanupLocal limpia el estado local tras una falla o señal. Idempotente
+	// (cleanupDone) y usa context.Background() para que una señal durante el
+	// cleanup no aborte el cleanup en sí.
+	//
+	// Label handling (depende del punto de la falla):
+	//   - executedApplied=true          → no tocamos el label (quedó en executed).
+	//   - !executedApplied && prCreated → transicionamos a executed: el PR
+	//     remoto ya existe, así que ese es el estado consistente. Volver a
+	//     plan dejaría el issue "libre" con un PR vivo apuntando a él, que
+	//     es peor que dejarlo en executed + awaiting-human para retry manual.
+	//   - !executedApplied && !prCreated → rollback normal a plan (ownership-
+	//     aware: re-fetch y chequeamos que seguimos teniendo el lock).
+	//
+	// Después del label, en orden fijo para que un segundo Ctrl+C vea
+	// progreso: 2) git worktree remove --force, 3) git branch -D. Los
+	// errores de esos pasos se propagan para loguearlos — best-effort pero
+	// NO silencioso.
 	cleanupLocal := func(cause string) {
 		if cleanupDone {
 			return
@@ -362,35 +356,53 @@ func Run(issueRef string, opts Opts) ExitCode {
 		// Señal: avisamos al user qué estamos haciendo para que el bloqueo
 		// síncrono del cleanup no parezca un cuelgue.
 		if cause != "" {
-			if executedApplied {
+			switch {
+			case executedApplied:
 				fmt.Fprintf(stderr, "%s — limpiando localmente (worktree, branch; label queda en executed)…\n", cause)
-			} else {
+			case prCreated:
+				fmt.Fprintf(stderr, "%s — limpiando localmente (label → executed por PR vivo, worktree, branch)…\n", cause)
+			default:
 				fmt.Fprintf(stderr, "%s — limpiando localmente (label → plan, worktree, branch)…\n", cause)
 			}
 		}
 
-		// 1) Label rollback primero. Ownership-aware: re-fetch el issue y
-		//    verificar que status:executing siga siendo nuestro lock.
-		//    Si ya transitamos a executed, saltamos este paso (el issue
-		//    quedó consistente; el worktree es solo scratch local).
+		// 1) Label handling. Caso tres-ramas (ver docstring).
 		if !executedApplied {
 			rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer rollbackCancel()
-			current, fetchErr := fetchIssue(rollbackCtx, issueRef)
-			if fetchErr != nil {
-				fmt.Fprintf(stderr, "warning: rollback no aplicado: no se pudo re-fetch el issue (%v) — revisá labels a mano\n", fetchErr)
-			} else if !current.HasLabel(labels.StatusExecuting) {
-				fmt.Fprintln(stderr, "rollback abortado: el issue ya no está en status:executing (owner=otro)")
+			if prCreated {
+				// PR ya creado: dejar el issue en executed para preservar
+				// consistencia con el estado remoto. Best-effort; si falla,
+				// warneamos.
+				if err := labels.Apply(issueRef, labels.StatusExecuting, labels.StatusExecuted); err != nil {
+					fmt.Fprintf(stderr, "warning: no se pudo transicionar a status:executed tras señal post-PR: %v — revisá labels a mano\n", err)
+				}
 			} else {
-				if err := labels.Apply(issueRef, labels.StatusExecuting, labels.StatusPlan); err != nil {
-					fmt.Fprintf(stderr, "warning: rollback failed: %v — revisá labels del issue a mano\n", err)
+				// Sin PR todavía: rollback a plan, pero solo si seguimos
+				// siendo el owner del lock (otra corrida podría haberlo
+				// tomado si el worktree se quedó colgado).
+				current, fetchErr := fetchIssue(rollbackCtx, issueRef)
+				if fetchErr != nil {
+					fmt.Fprintf(stderr, "warning: rollback no aplicado: no se pudo re-fetch el issue (%v) — revisá labels a mano\n", fetchErr)
+				} else if !current.HasLabel(labels.StatusExecuting) {
+					fmt.Fprintln(stderr, "rollback abortado: el issue ya no está en status:executing (owner=otro)")
+				} else {
+					if err := labels.Apply(issueRef, labels.StatusExecuting, labels.StatusPlan); err != nil {
+						fmt.Fprintf(stderr, "warning: rollback failed: %v — revisá labels del issue a mano\n", err)
+					}
 				}
 			}
 		}
 
-		// 2) Worktree remove (force).
+		// 2) Worktree + branch local. Acotado con timeout y propagamos los
+		//    errores para loguearlos — si queda basura local, el usuario
+		//    tiene que saberlo para limpiarla a mano.
 		if wt != nil {
-			_ = wt.Cleanup(repoRoot, false)
+			wtCtx, wtCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := wt.Cleanup(wtCtx, repoRoot, false); err != nil {
+				fmt.Fprintf(stderr, "warning: cleanup local parcial: %v — revisá `git worktree list` y `git branch` para limpiar a mano\n", err)
+			}
+			wtCancel()
 		}
 
 		// 3) Si el PR remoto ya quedó creado, avisamos al usuario que la
@@ -503,6 +515,18 @@ func Run(issueRef string, opts Opts) ExitCode {
 		prCreated = true
 	}
 
+	// Transición a status:executed ANTES de disparar validadores. Orden
+	// importante: una señal entre `prCreated=true` y `executedApplied=true`
+	// dejaría al cleanup en modo "PR vivo + label en executing", que forzaría
+	// un label fix-up en el defer. Transicionar ya mismo encoge la ventana
+	// a mínimo y deja al issue en el estado consistente con el PR remoto.
+	progress("transicionando issue a status:executed + awaiting-human…")
+	if err := labels.Apply(issueRef, labels.StatusExecuting, labels.StatusExecuted); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
+	}
+	executedApplied = true
+
 	// Disparar validadores y esperar con timeout acotado. Originalmente esto
 	// era fire-and-forget, pero cmd/execute.go hace os.Exit(code) apenas Run
 	// retorna — eso mataba las goroutines antes de que postearan comments.
@@ -522,13 +546,6 @@ func Run(issueRef string, opts Opts) ExitCode {
 		validatorsDone = fireValidators(validatorsCtx, prURL, issue, plan, opts.Validators)
 		validatorsTotal = len(opts.Validators)
 	}
-
-	progress("transicionando issue a status:executed + awaiting-human…")
-	if err := labels.Apply(issueRef, labels.StatusExecuting, labels.StatusExecuted); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
-		return ExitRetry
-	}
-	executedApplied = true
 
 	progress("posteando comment en el issue con link al PR…")
 	if err := commentIssue(ctx, issueRef, renderIssueComment(prURL, opts.Validators)); err != nil {
