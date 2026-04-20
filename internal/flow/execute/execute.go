@@ -27,8 +27,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chichex/che/internal/comments"
 	"github.com/chichex/che/internal/labels"
 )
+
+// validatorCommentIter es el iter que estampan los headers de los PR comments
+// de validadores. Hoy siempre 1 porque execute no tiene ciclo iter aún — el
+// formato queda listo para cuando se implemente el ciclo con scope-lock
+// (design.html L1257+). Cuando exista, este valor lo resuelve el caller.
+const validatorCommentIter = 1
 
 // ExitCode es el código de salida semántico para el caller.
 type ExitCode int
@@ -1347,7 +1354,14 @@ func fireValidators(parent context.Context, prURL string, issue *Issue, plan *Co
 			if parent.Err() != nil {
 				return
 			}
-			body := fmt.Sprintf("## Validator %s#%d\n\n%s\n", v.Agent, v.Instance, strings.TrimSpace(string(out)))
+			header := comments.Header{
+				Flow:     "execute",
+				Iter:     validatorCommentIter,
+				Agent:    string(v.Agent),
+				Instance: v.Instance,
+				Role:     "validator",
+			}.Format()
+			body := fmt.Sprintf("%s\n## Validator %s#%d\n\n%s\n", header, v.Agent, v.Instance, strings.TrimSpace(string(out)))
 			_ = postPRComment(parent, prURL, body)
 		}()
 	}

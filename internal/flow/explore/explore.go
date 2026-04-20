@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chichex/che/internal/comments"
 	"github.com/chichex/che/internal/labels"
 )
 
@@ -255,34 +256,21 @@ type CommentHeader struct {
 	Role     string // "executor", "validator", "human-request"
 }
 
-// headerRe matchea el HTML comment de che al principio del body. Captura
-// flow, iter, agent, instance, role como key=value dentro del comment.
-var headerRe = regexp.MustCompile(`^<!--\s*claude-cli:\s*(.+?)\s*-->`)
-var kvRe = regexp.MustCompile(`(\w+)=(\S+)`)
-
 // ParseCommentHeader lee la primera línea del body y, si es un HTML comment
 // de che, devuelve la metadata. Si no lo es, devuelve un CommentHeader vacío.
+// Delega el parseo al helper compartido internal/comments.
 func ParseCommentHeader(body string) CommentHeader {
-	m := headerRe.FindStringSubmatch(strings.TrimSpace(body))
-	if m == nil {
+	h := comments.Parse(body)
+	if h.Role == "" && h.Flow == "" {
 		return CommentHeader{}
 	}
-	h := CommentHeader{}
-	for _, kv := range kvRe.FindAllStringSubmatch(m[1], -1) {
-		switch kv[1] {
-		case "flow":
-			h.Flow = kv[2]
-		case "iter":
-			fmt.Sscanf(kv[2], "%d", &h.Iter)
-		case "agent":
-			h.Agent = Agent(kv[2])
-		case "instance":
-			fmt.Sscanf(kv[2], "%d", &h.Instance)
-		case "role":
-			h.Role = kv[2]
-		}
+	return CommentHeader{
+		Flow:     h.Flow,
+		Iter:     h.Iter,
+		Agent:    Agent(h.Agent),
+		Instance: h.Instance,
+		Role:     h.Role,
 	}
-	return h
 }
 
 // IsHuman devuelve true cuando el comment NO tiene header de che — asumimos
@@ -1092,7 +1080,7 @@ func validate(r *Response) error {
 // continuar la conversación sin perder estructura.
 func renderComment(r *Response, agent Agent, iter int) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("<!-- claude-cli: flow=explore iter=%d agent=%s role=executor -->\n", iter, agent))
+	sb.WriteString(comments.Header{Flow: "explore", Iter: iter, Agent: string(agent), Role: "executor"}.Format() + "\n")
 	sb.WriteString(fmt.Sprintf("## [executor:%s · iter:%d]\n\n", agent, iter))
 
 	sb.WriteString("**Resumen:** ")
@@ -1431,8 +1419,9 @@ Plan del ejecutor:
 func renderValidatorComment(r validatorResult, iter int) string {
 	v := r.Validator
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("<!-- claude-cli: flow=explore iter=%d agent=%s instance=%d role=validator -->\n",
-		iter, v.Agent, v.Instance))
+	sb.WriteString(comments.Header{
+		Flow: "explore", Iter: iter, Agent: string(v.Agent), Instance: v.Instance, Role: "validator",
+	}.Format() + "\n")
 
 	if r.Err != nil || r.Response == nil {
 		sb.WriteString(fmt.Sprintf("## [validator:%s#%d · iter:%d · ERROR]\n\n", v.Agent, v.Instance, iter))
@@ -1490,7 +1479,7 @@ func renderValidatorComment(r validatorResult, iter int) string {
 // needs_human=true de los validadores que no dupliquen preguntas del plan.
 func renderHumanRequest(issueNumber int, plan *Response, results []validatorResult, iter int) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("<!-- claude-cli: flow=explore iter=%d role=human-request -->\n", iter))
+	sb.WriteString(comments.Header{Flow: "explore", Iter: iter, Role: "human-request"}.Format() + "\n")
 	sb.WriteString("## 🧑 Necesito tu input para seguir\n\n")
 
 	planQs := collectPlanBlockers(plan)
