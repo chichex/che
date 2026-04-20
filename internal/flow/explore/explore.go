@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/plan"
 )
 
 // ExitCode es el código de salida semántico para el caller.
@@ -362,12 +363,10 @@ type Assumption struct {
 	Why  string `json:"why"`
 }
 
-type Risk struct {
-	Risk       string `json:"risk"`
-	Likelihood string `json:"likelihood"`
-	Impact     string `json:"impact"`
-	Mitigation string `json:"mitigation"`
-}
+// Risk es un type alias a plan.Risk para que Response.Risks y el resto del
+// código de explore sigan compilando tras la consolidación del shape en el
+// paquete internal/plan. El shape JSON queda exactamente igual.
+type Risk = plan.Risk
 
 type Path struct {
 	Title       string   `json:"title"`
@@ -686,7 +685,7 @@ func runResume(issueRef string, issue *Issue, opts Opts, progress func(string), 
 		return ExitSemantic
 	}
 
-	newBody := renderConsolidatedBody(consolidated, issue.Body)
+	newBody := plan.Render(consolidated, issue.Body)
 	progress("actualizando body del issue con plan consolidado…")
 	if err := editIssueBody(issueRef, newBody); err != nil {
 		fmt.Fprintf(stderr, "error: updating body: %v\n", err)
@@ -2044,17 +2043,10 @@ Respuestas del humano:
 >>>`
 }
 
-// ConsolidatedPlan es el plan final post-convergencia que se escribe al body
-// del issue. Sin ambigüedades, listo para ejecutar.
-type ConsolidatedPlan struct {
-	Summary            string   `json:"summary"`
-	Goal               string   `json:"goal"`
-	AcceptanceCriteria []string `json:"acceptance_criteria"`
-	Approach           string   `json:"approach"`
-	Steps              []string `json:"steps"`
-	RisksToMitigate    []Risk   `json:"risks_to_mitigate"`
-	OutOfScope         []string `json:"out_of_scope"`
-}
+// ConsolidatedPlan es un type alias al shape canónico en internal/plan. El
+// unmarshal del JSON del agente de consolidación sigue funcionando igual
+// porque los tags se preservan.
+type ConsolidatedPlan = plan.ConsolidatedPlan
 
 // callConsolidation invoca al ejecutor con un prompt de "consolidación" que
 // recibe el plan original, las respuestas humanas y los findings finales, y
@@ -2185,56 +2177,6 @@ func validateConsolidated(c *ConsolidatedPlan) error {
 	return nil
 }
 
-// renderConsolidatedBody arma el nuevo body del issue: plan consolidado
-// arriba (listo para ejecución), idea original preservada abajo como
-// referencia.
-func renderConsolidatedBody(c *ConsolidatedPlan, originalBody string) string {
-	var sb strings.Builder
-	sb.WriteString("## Plan consolidado (post-exploración)\n\n")
-	sb.WriteString("**Resumen:** " + c.Summary + "\n\n")
-	sb.WriteString("**Goal:** " + c.Goal + "\n\n")
-
-	sb.WriteString("### Criterios de aceptación\n")
-	for _, crit := range c.AcceptanceCriteria {
-		sb.WriteString("- [ ] " + crit + "\n")
-	}
-	sb.WriteString("\n")
-
-	sb.WriteString("### Approach\n")
-	sb.WriteString(c.Approach + "\n\n")
-
-	sb.WriteString("### Pasos\n")
-	for i, step := range c.Steps {
-		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, step))
-	}
-	sb.WriteString("\n")
-
-	if len(c.RisksToMitigate) > 0 {
-		sb.WriteString("### Riesgos a mitigar\n")
-		for _, r := range c.RisksToMitigate {
-			sb.WriteString(fmt.Sprintf("- **%s** (likelihood=%s, impact=%s) — %s\n",
-				r.Risk, r.Likelihood, r.Impact, r.Mitigation))
-		}
-		sb.WriteString("\n")
-	}
-
-	if len(c.OutOfScope) > 0 {
-		sb.WriteString("### Fuera de alcance\n")
-		for _, o := range c.OutOfScope {
-			sb.WriteString("- " + o + "\n")
-		}
-		sb.WriteString("\n")
-	}
-
-	sb.WriteString("---\n\n")
-	sb.WriteString("## Idea original (de `che idea`)\n\n")
-	sb.WriteString(originalBody)
-	if !strings.HasSuffix(originalBody, "\n") {
-		sb.WriteString("\n")
-	}
-
-	return sb.String()
-}
 
 // editIssueBody reemplaza el body del issue via `gh issue edit --body-file`.
 func editIssueBody(ref, body string) error {

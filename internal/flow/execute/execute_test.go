@@ -17,93 +17,6 @@ func writeExecutable(path, content string) error {
 func getEnv(k string) string  { return os.Getenv(k) }
 func setEnv(k, v string) error { return os.Setenv(k, v) }
 
-func TestParseConsolidatedPlan_FullBody(t *testing.T) {
-	body := `## Plan consolidado (post-exploración)
-
-**Resumen:** Agregar comando che execute.
-
-**Goal:** Un desarrollador selecciona un issue y che execute lo ejecuta end-to-end.
-
-### Criterios de aceptación
-- [ ] che execute registrado como subcomando cobra
-- [ ] La TUI lista solo issues con ct:plan + status:plan
-- [ ] No tocar explore
-
-### Approach
-Construir execute como copia adaptada de explore.
-
-### Pasos
-1. Crear internal/flow/execute
-2. Wirear cmd/execute.go
-3. Agregar tests e2e
-
-### Fuera de alcance
-- Ciclo iter con scope-lock
-- Workflow GHA
-
----
-
-## Idea original
-
-Lorem ipsum
-`
-	p, err := parseConsolidatedPlan(body)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if p.Summary != "Agregar comando che execute." {
-		t.Errorf("summary: %q", p.Summary)
-	}
-	if !strings.Contains(p.Goal, "end-to-end") {
-		t.Errorf("goal: %q", p.Goal)
-	}
-	if len(p.AcceptanceCriteria) != 3 {
-		t.Errorf("criteria: got %d items: %v", len(p.AcceptanceCriteria), p.AcceptanceCriteria)
-	}
-	if p.AcceptanceCriteria[0] != "che execute registrado como subcomando cobra" {
-		t.Errorf("criteria[0]: %q", p.AcceptanceCriteria[0])
-	}
-	if !strings.Contains(p.Approach, "copia adaptada") {
-		t.Errorf("approach: %q", p.Approach)
-	}
-	if len(p.Steps) != 3 {
-		t.Errorf("steps: got %d: %v", len(p.Steps), p.Steps)
-	}
-	if p.Steps[0] != "Crear internal/flow/execute" {
-		t.Errorf("steps[0]: %q", p.Steps[0])
-	}
-	if len(p.OutOfScope) != 2 {
-		t.Errorf("out_of_scope: got %d: %v", len(p.OutOfScope), p.OutOfScope)
-	}
-}
-
-func TestParseConsolidatedPlan_FallbackWhenNoHeader(t *testing.T) {
-	body := "Body sin plan consolidado, solo texto libre."
-	p, err := parseConsolidatedPlan(body)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if p.Summary != body {
-		t.Errorf("expected summary=body")
-	}
-	if p.Goal != "" || len(p.Steps) != 0 {
-		t.Errorf("expected empty goal/steps in fallback")
-	}
-}
-
-func TestParseConsolidatedPlan_EmptyBody(t *testing.T) {
-	if _, err := parseConsolidatedPlan(""); err == nil {
-		t.Fatalf("expected error on empty body")
-	}
-}
-
-func TestParseConsolidatedPlan_HeaderButNoContent(t *testing.T) {
-	body := "## Plan consolidado\n\n(lorem sin sub-secciones parseables)\n"
-	if _, err := parseConsolidatedPlan(body); err == nil {
-		t.Fatalf("expected error when sections missing")
-	}
-}
-
 func TestGate(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -249,36 +162,6 @@ func TestBuildPromptIncludesPlanSections(t *testing.T) {
 		if !strings.Contains(got, need) {
 			t.Errorf("prompt missing %q", need)
 		}
-	}
-}
-
-func TestExtractSection_StopsAtNextSameLevelHeader(t *testing.T) {
-	body := `## A
-foo
-bar
-
-## B
-quux
-`
-	got := extractSection(body, "## A")
-	if strings.Contains(got, "quux") {
-		t.Errorf("section A should not include B: %q", got)
-	}
-	if !strings.Contains(got, "foo") || !strings.Contains(got, "bar") {
-		t.Errorf("section A missing content: %q", got)
-	}
-}
-
-func TestExtractSection_IncludesDeeperHeaders(t *testing.T) {
-	body := `## Plan consolidado
-**Resumen:** r
-
-### Criterios
-- [ ] crit
-`
-	got := extractSection(body, "## Plan consolidado")
-	if !strings.Contains(got, "### Criterios") {
-		t.Errorf("should include ### children: %q", got)
 	}
 }
 
