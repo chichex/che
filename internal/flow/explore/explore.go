@@ -963,7 +963,7 @@ Te voy a pasar un issue de GitHub ya clasificado (type, size, criterios iniciale
 2. Tomar decisiones técnicas por tu cuenta y declararlas como assumptions.
 3. Listar las preguntas abiertas que SOLO el humano puede contestar.
 4. Identificar riesgos con likelihood e impact.
-5. Proponer 2-4 caminos de implementación distintos con pros, cons y effort estimado.
+5. Proponer al menos 2 caminos de implementación distintos (idealmente 2-4, más si el espacio de diseño lo amerita) con pros, cons y effort estimado.
 6. Marcar EXACTAMENTE UN camino como recomendado.
 7. Indicar el próximo paso concreto.
 
@@ -1010,7 +1010,7 @@ Reglas:
 - assumptions[] idealmente tiene 2-5 items si tomaste decisiones técnicas. Cero assumptions con cero questions es sospechoso: o el issue es trivial, o no estás mirando lo suficiente.
 - Toda question DEBE tener kind="product". Si te sale kind="technical" o "documented", MOVELA a assumptions (o descartala si ya está documentada).
 - risks[] tiene al menos 1 item.
-- paths[] tiene entre 2 y 4 items. Un solo camino = no estás explorando, solo planeando.
+- paths[] tiene al menos 2 items (idealmente 2-4). Un solo camino = no estás explorando, solo planeando. Más de 4 solo si el espacio de diseño realmente lo amerita.
 - EXACTAMENTE UN path con "recommended": true. Los otros con false.
 - Cada path debe tener al menos 1 pro y 1 con.
 - No inventes archivos o módulos que no aparecen en el issue.
@@ -1053,8 +1053,8 @@ func validate(r *Response) error {
 			return fmt.Errorf("assumption %d: what is empty", i)
 		}
 	}
-	if len(r.Paths) < 2 || len(r.Paths) > 4 {
-		return fmt.Errorf("paths[] must have 2-4 items, got %d", len(r.Paths))
+	if len(r.Paths) < 2 {
+		return fmt.Errorf("paths[] must have at least 2 items, got %d", len(r.Paths))
 	}
 	for i, risk := range r.Risks {
 		if !validLikelihood[risk.Likelihood] {
