@@ -23,6 +23,7 @@ type Matcher struct {
 	Stderr        string            `json:"stderr,omitempty"`
 	Exit          int               `json:"exit"`
 	TouchFiles    map[string]string `json:"touch_files,omitempty"`
+	BlockSeconds  int               `json:"block_seconds,omitempty"`
 }
 
 // ExpectBuilder is the fluent API used to script a single matcher. Values
@@ -131,6 +132,15 @@ func (b *ExpectBuilder) TouchFile(relPath, content string) *ExpectBuilder {
 		b.m.TouchFiles = map[string]string{}
 	}
 	b.m.TouchFiles[relPath] = content
+	return b
+}
+
+// BlockSeconds hace que el fake, después de emitir stdout/stderr, duerma N
+// segundos antes de salir. Los tests de signal handling lo usan para
+// simular un agente que tarda: emite un sentinel (stdout), bloquea, y
+// cuando el parent manda SIGTERM al process group el fake termina de una.
+func (b *ExpectBuilder) BlockSeconds(n int) *ExpectBuilder {
+	b.m.BlockSeconds = n
 	return b
 }
 

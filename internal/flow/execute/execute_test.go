@@ -2,6 +2,7 @@ package execute
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -294,7 +295,7 @@ func TestWaitValidators_AllFinish(t *testing.T) {
 	}()
 	var buf bytes.Buffer
 	start := time.Now()
-	waitValidators(&buf, done, 2, 5*time.Second)
+	waitValidators(context.Background(), &buf, done, 2, 5*time.Second)
 	elapsed := time.Since(start)
 	if elapsed > 2*time.Second {
 		t.Fatalf("waitValidators took too long: %v", elapsed)
@@ -356,7 +357,7 @@ echo "  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'"
 	setEnv("PATH", tmp+":"+oldPath)
 	t.Cleanup(func() { setEnv("PATH", oldPath) })
 
-	if err := precheckPRScopes(); err != nil {
+	if err := precheckPRScopes(context.Background()); err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 }
@@ -377,7 +378,7 @@ echo "  - Token scopes: 'read:org', 'repo:status'"
 	setEnv("PATH", tmp+":"+oldPath)
 	t.Cleanup(func() { setEnv("PATH", oldPath) })
 
-	err := precheckPRScopes()
+	err := precheckPRScopes(context.Background())
 	if err == nil {
 		t.Fatal("expected error on missing scope")
 	}
@@ -406,7 +407,7 @@ EOF
 	setEnv("PATH", tmp+":"+oldPath)
 	t.Cleanup(func() { setEnv("PATH", oldPath) })
 
-	_, err := findOpenPRForBranch("exec/42-foo")
+	_, err := findOpenPRForBranch(context.Background(), "exec/42-foo")
 	if err == nil {
 		t.Fatalf("expected error on multiple matches")
 	}
@@ -434,7 +435,7 @@ EOF
 	setEnv("PATH", tmp+":"+oldPath)
 	t.Cleanup(func() { setEnv("PATH", oldPath) })
 
-	got, err := findOpenPRForBranch("exec/42-foo")
+	got, err := findOpenPRForBranch(context.Background(), "exec/42-foo")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -564,7 +565,7 @@ func TestWaitValidators_Timeout(t *testing.T) {
 	}()
 	var buf bytes.Buffer
 	start := time.Now()
-	waitValidators(&buf, done, 2, 50*time.Millisecond)
+	waitValidators(context.Background(), &buf, done, 2, 50*time.Millisecond)
 	elapsed := time.Since(start)
 	if elapsed > 1*time.Second {
 		t.Fatalf("waitValidators did not respect timeout: %v", elapsed)
