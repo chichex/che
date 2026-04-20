@@ -179,7 +179,11 @@ func Run(prRef string, opts Opts) ExitCode {
 	}
 	defer func() {
 		if wt != nil && wtOwned {
-			_ = wt.Cleanup(repoRoot, false)
+			wtCtx, wtCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			if err := wt.Cleanup(wtCtx, repoRoot, false); err != nil {
+				fmt.Fprintf(stderr, "warning: cleanup local parcial: %v — revisá `git worktree list` y `git branch` para limpiar a mano\n", err)
+			}
+			wtCancel()
 		}
 	}()
 
