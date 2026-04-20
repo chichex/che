@@ -1,0 +1,15 @@
+{
+  "verdict": "changes_requested",
+  "summary": "Falta un test importante y hay un edge case sin cubrir.",
+  "findings": [
+    {
+      "severity": "major",
+      "area": "tests",
+      "where": "validate.go:200",
+      "issue": "No hay test para el caso de PR sin diff.",
+      "suggestion": "Agregar un test que pase un PR con diff vacío y espere exit 3.",
+      "needs_human": false,
+      "kind": "technical"
+    }
+  ]
+}

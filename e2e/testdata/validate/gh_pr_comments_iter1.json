@@ -1,0 +1,14 @@
+{
+  "comments": [
+    {
+      "body": "<!-- claude-cli: flow=validate iter=1 agent=opus instance=1 role=validator -->\n## [che · validate · opus#1 · iter:1 · approve]\n\nok",
+      "createdAt": "2024-06-01T10:00:00Z",
+      "author": {"login": "acme-bot"}
+    },
+    {
+      "body": "<!-- claude-cli: flow=validate iter=1 role=summary -->\n## resumen",
+      "createdAt": "2024-06-01T10:00:05Z",
+      "author": {"login": "acme-bot"}
+    }
+  ]
+}
