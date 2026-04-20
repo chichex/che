@@ -456,8 +456,8 @@ func waitValidators(stdout io.Writer, done <-chan int, total int, timeout time.D
 // no tienen awaiting-human. Estos son los candidatos a ejecutar.
 func ListCandidates() ([]Candidate, error) {
 	cmd := exec.Command("gh", "issue", "list",
-		"--label", "ct:plan",
-		"--label", "status:plan",
+		"--label", labels.CtPlan,
+		"--label", labels.StatusPlan,
 		"--state", "open",
 		"--json", "number,title,labels",
 		"--limit", "50")
