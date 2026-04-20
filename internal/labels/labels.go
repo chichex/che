@@ -25,6 +25,7 @@ const (
 	StatusExecuting     = "status:executing"
 	StatusExecuted      = "status:executed"
 	StatusAwaitingHuman = "status:awaiting-human"
+	StatusClosed        = "status:closed"
 )
 
 // Marker labels que no cambian con el estado — identifican el origen del
@@ -32,6 +33,23 @@ const (
 const (
 	CtPlan = "ct:plan"
 )
+
+// Validated labels que che validate aplica sobre un PR reflejando el verdict
+// consolidado de los validadores. Mutan entre iteraciones: antes de aplicar
+// uno, se quitan los otros dos (son mutuamente excluyentes).
+const (
+	ValidatedApprove          = "validated:approve"
+	ValidatedChangesRequested = "validated:changes-requested"
+	ValidatedNeedsHuman       = "validated:needs-human"
+)
+
+// AllValidated lista los labels validated:* — usado por validate para saber
+// cuáles remover antes de aplicar el nuevo.
+var AllValidated = []string{
+	ValidatedApprove,
+	ValidatedChangesRequested,
+	ValidatedNeedsHuman,
+}
 
 // Transition representa un cambio de estado expresado como labels a remover
 // y labels a agregar. El orden no importa: `gh issue edit` aplica todo en
@@ -66,6 +84,13 @@ var validTransitions = map[string]Transition{
 	StatusExecuting + "→" + StatusPlan: {
 		Remove: []string{StatusExecuting, StatusAwaitingHuman},
 		Add:    []string{StatusPlan},
+	},
+	// close termina OK: executed → closed. Se quita awaiting-human porque
+	// ya no hay nada que esperar de un humano, y los validated:* del PR
+	// quedan en el PR (no pertenecen al issue).
+	StatusExecuted + "→" + StatusClosed: {
+		Remove: []string{StatusExecuted, StatusAwaitingHuman},
+		Add:    []string{StatusClosed},
 	},
 }
 

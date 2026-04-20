@@ -443,6 +443,117 @@ EOF
 	}
 }
 
+// TestFormatOpusLine cubre los casos relevantes del stream-json del CLI de
+// claude: system init, tool_use con las tools que más nos importan, result
+// success/error, eventos irrelevantes que se omiten, y el fallback raw
+// para líneas no-JSON (lo que emiten los fakes de los e2e).
+func TestFormatOpusLine(t *testing.T) {
+	cases := []struct {
+		name   string
+		line   string
+		wantOK bool
+		want   string // si wantOK, substring esperado
+	}{
+		{
+			name:   "empty",
+			line:   "",
+			wantOK: false,
+		},
+		{
+			name:   "whitespace",
+			line:   "   \t ",
+			wantOK: false,
+		},
+		{
+			name:   "non-json raw fallthrough",
+			line:   "ok",
+			wantOK: true,
+			want:   "ok",
+		},
+		{
+			name:   "malformed json falls through as raw",
+			line:   `{"type":"assistant"`,
+			wantOK: true,
+			want:   `{"type":"assistant"`,
+		},
+		{
+			name:   "system init",
+			line:   `{"type":"system","subtype":"init","session_id":"abc","tools":["Read","Edit"]}`,
+			wantOK: true,
+			want:   "sesión lista",
+		},
+		{
+			name:   "assistant tool_use Read",
+			line:   `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/repo/foo.go"}}]}}`,
+			wantOK: true,
+			want:   "Read /repo/foo.go",
+		},
+		{
+			name:   "assistant tool_use Edit",
+			line:   `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"internal/bar.go","old_string":"x","new_string":"y"}}]}}`,
+			wantOK: true,
+			want:   "Edit internal/bar.go",
+		},
+		{
+			name:   "assistant tool_use Bash",
+			line:   `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"go test ./..."}}]}}`,
+			wantOK: true,
+			want:   "Bash go test ./...",
+		},
+		{
+			name:   "assistant tool_use Bash truncated",
+			line:   `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"` + strings.Repeat("a", 200) + `"}}]}}`,
+			wantOK: true,
+			want:   "…",
+		},
+		{
+			name:   "assistant tool_use Grep",
+			line:   `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Grep","input":{"pattern":"foo.*bar","glob":"*.go"}}]}}`,
+			wantOK: true,
+			want:   "Grep foo.*bar",
+		},
+		{
+			name:   "assistant tool_use unknown tool only shows name",
+			line:   `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"SomethingNew","input":{"foo":"bar"}}]}}`,
+			wantOK: true,
+			want:   "SomethingNew",
+		},
+		{
+			name:   "assistant text-only is skipped",
+			line:   `{"type":"assistant","message":{"content":[{"type":"text","text":"Voy a leer el archivo..."}]}}`,
+			wantOK: false,
+		},
+		{
+			name:   "user tool_result is skipped",
+			line:   `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"..."}]}}`,
+			wantOK: false,
+		},
+		{
+			name:   "result success",
+			line:   `{"type":"result","subtype":"success","result":"done"}`,
+			wantOK: true,
+			want:   "OK",
+		},
+		{
+			name:   "result error",
+			line:   `{"type":"result","subtype":"error_max_turns"}`,
+			wantOK: true,
+			want:   "error_max_turns",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := formatOpusLine(c.line)
+			if ok != c.wantOK {
+				t.Fatalf("ok=%v want=%v (got=%q)", ok, c.wantOK, got)
+			}
+			if c.wantOK && !strings.Contains(got, c.want) {
+				t.Errorf("got %q, want substring %q", got, c.want)
+			}
+		})
+	}
+}
+
 // TestWaitValidators_Timeout: si el timeout expira antes de que terminen
 // todos, retorna sin bloquear y loguea cuántos quedaron.
 func TestWaitValidators_Timeout(t *testing.T) {

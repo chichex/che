@@ -789,9 +789,9 @@ type Candidate struct {
 
 // ListCandidates devuelve los issues abiertos con label ct:plan que todavía
 // no fueron explorados (sin status:plan) y que NO están esperando input
-// humano (sin status:awaiting-human). Limita a los 50 más recientes para
-// mantener la TUI manejable. Los awaiting-human se listan aparte con
-// ListAwaiting() — el usuario los reanuda desde otra sección de la TUI.
+// humano (sin status:awaiting-human). También excluye los que ya pasaron
+// por execute (status:executing | status:executed) — esos son de otro flow.
+// Limita a los 50 más recientes para mantener la TUI manejable.
 func ListCandidates() ([]Candidate, error) {
 	raw, err := listIssuesWithCtPlan()
 	if err != nil {
@@ -799,7 +799,8 @@ func ListCandidates() ([]Candidate, error) {
 	}
 	out := make([]Candidate, 0, len(raw))
 	for _, i := range raw {
-		if i.HasLabel(labels.StatusPlan) || i.HasLabel(labels.StatusAwaitingHuman) {
+		if i.HasLabel(labels.StatusPlan) || i.HasLabel(labels.StatusAwaitingHuman) ||
+			i.HasLabel(labels.StatusExecuting) || i.HasLabel(labels.StatusExecuted) {
 			continue
 		}
 		out = append(out, Candidate{Number: i.Number, Title: i.Title})
@@ -808,8 +809,10 @@ func ListCandidates() ([]Candidate, error) {
 }
 
 // ListAwaiting devuelve los issues con status:awaiting-human, candidatos a
-// reanudación. Son los que quedaron en pausa porque los validadores pidieron
-// input humano en una corrida anterior.
+// reanudación. Son los que quedaron en pausa porque los validadores de
+// explore pidieron input humano en una corrida anterior. Excluye los que
+// también tienen status:executed — esos vienen de execute (PR abierto
+// esperando review humano) y pertenecen al flow de validate, no de explore.
 func ListAwaiting() ([]Candidate, error) {
 	raw, err := listIssuesWithCtPlan()
 	if err != nil {
@@ -818,6 +821,9 @@ func ListAwaiting() ([]Candidate, error) {
 	out := make([]Candidate, 0, len(raw))
 	for _, i := range raw {
 		if !i.HasLabel(labels.StatusAwaitingHuman) {
+			continue
+		}
+		if i.HasLabel(labels.StatusExecuted) || i.HasLabel(labels.StatusExecuting) {
 			continue
 		}
 		out = append(out, Candidate{Number: i.Number, Title: i.Title})

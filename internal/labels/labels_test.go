@@ -29,6 +29,12 @@ func TestTransitionFor_Valid(t *testing.T) {
 			wantAdd: []string{StatusPlan},
 			wantRem: []string{StatusExecuting, StatusAwaitingHuman},
 		},
+		{
+			from:    StatusExecuted,
+			to:      StatusClosed,
+			wantAdd: []string{StatusClosed},
+			wantRem: []string{StatusExecuted, StatusAwaitingHuman},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.from+"→"+c.to, func(t *testing.T) {
@@ -56,6 +62,8 @@ func TestTransitionFor_Invalid(t *testing.T) {
 		{"", StatusExecuting},             // from vacío
 		{StatusPlan, ""},                  // to vacío
 		{StatusPlan, "status:ready-to-close"}, // estado no soportado todavía
+		{StatusPlan, StatusClosed},            // plan no va directo a closed (execute primero)
+		{StatusExecuting, StatusClosed},       // executing no va directo a closed (terminar exec primero)
 	}
 	for _, c := range cases {
 		t.Run(c.from+"→"+c.to, func(t *testing.T) {

@@ -1,0 +1,13 @@
+{
+  "number": 7,
+  "title": "feat(x): pending review",
+  "url": "https://github.com/acme/demo/pull/7",
+  "state": "OPEN",
+  "isDraft": false,
+  "headRefName": "feat/x",
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "CLEAN",
+  "author": {"login": "acme-bot"},
+  "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
+  "labels": [{"name": "validated:changes-requested"}]
+}

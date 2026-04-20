@@ -66,10 +66,16 @@ func (a Agent) Binary() string {
 
 // InvokeArgs devuelve los args de línea de comando para cada CLI en modo
 // no-interactivo.
+//
+// Para Opus usamos stream-json + --verbose para que cada tool use llegue al
+// harness en tiempo real: con --output-format text, claude no emite nada
+// hasta que termina, y una ejecución de varios minutos aparece como un
+// silencio sospechoso en la TUI. formatOpusLine() parsea los eventos y los
+// traduce a líneas descriptivas ("Edit foo.go", "Bash go test …").
 func (a Agent) InvokeArgs(prompt string) []string {
 	switch a {
 	case AgentOpus:
-		return []string{"-p", prompt, "--output-format", "text"}
+		return []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
 	case AgentCodex:
 		return []string{"exec", "--full-auto", prompt}
 	case AgentGemini:
@@ -91,14 +97,16 @@ func ParseAgent(s string) (Agent, error) {
 
 // AgentTimeout para llamadas al CLI del agente. execute tiene un default
 // mayor que explore porque generar diff + tool use es típicamente más largo
-// que devolver un JSON de análisis.
+// que devolver un JSON de análisis. 30 min da margen para issues que tocan
+// varios archivos + corren tests; con stream-json el operador ve si el
+// agente se colgó mucho antes de que expire y puede cancelar con Ctrl+C.
 var AgentTimeout = func() time.Duration {
 	if s := strings.TrimSpace(os.Getenv("CHE_EXEC_AGENT_TIMEOUT_SECS")); s != "" {
 		if n, err := time.ParseDuration(s + "s"); err == nil && n > 0 {
 			return n
 		}
 	}
-	return 15 * time.Minute
+	return 30 * time.Minute
 }()
 
 // ValidatorsWaitTimeout es cuánto esperamos a que las goroutines de
@@ -824,16 +832,29 @@ func runAgent(agent Agent, cwd, prompt string, progress func(string)) error {
 		return fmt.Errorf("starting %s: %w", agent.Binary(), err)
 	}
 
+	var stdoutFormat func(string) (string, bool)
+	if agent == AgentOpus {
+		stdoutFormat = formatOpusLine
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 	var stderrBuf strings.Builder
-	go streamPipe(&wg, stdoutPipe, nil, progress, string(agent)+": ")
-	go streamPipe(&wg, stderrPipe, &stderrBuf, progress, string(agent)+" stderr: ")
+	go streamPipe(&wg, stdoutPipe, nil, progress, string(agent)+": ", stdoutFormat)
+	go streamPipe(&wg, stderrPipe, &stderrBuf, progress, string(agent)+" stderr: ", nil)
 	wg.Wait()
 
 	waitErr := cmd.Wait()
 	if ctx.Err() == context.DeadlineExceeded {
-		return fmt.Errorf("%s timed out after %s", agent, AgentTimeout)
+		// Incluimos el stderr acumulado cuando lo hay: un timeout puede
+		// venir acompañado de pistas (auth expirado, prompt rechazado,
+		// warnings del CLI) que el usuario necesita ver para distinguir
+		// "el agente trabajó 15 min y no terminó" vs "el agente se colgó
+		// en el segundo 1 porque algo está mal".
+		if se := strings.TrimSpace(stderrBuf.String()); se != "" {
+			return fmt.Errorf("%s timed out after %s; stderr: %s", agent, AgentTimeout, se)
+		}
+		return fmt.Errorf("%s timed out after %s (sin stderr — subí CHE_EXEC_AGENT_TIMEOUT_SECS si el agente necesita más tiempo)", agent, AgentTimeout)
 	}
 	if waitErr != nil {
 		if ee, ok := waitErr.(*exec.ExitError); ok {
@@ -845,7 +866,11 @@ func runAgent(agent Agent, cwd, prompt string, progress func(string)) error {
 }
 
 // streamPipe lee un pipe y reenvía las líneas al progress con un prefix.
-func streamPipe(wg *sync.WaitGroup, r io.Reader, acc *strings.Builder, progress func(string), prefix string) {
+// Si format != nil, cada línea se pasa por él antes de emitirse: el
+// formatter puede reescribir la línea o pedir que se omita (ok=false).
+// Las líneas se acumulan siempre en acc (si no es nil) sin transformar,
+// para preservar el stderr tal como vino para mensajes de error.
+func streamPipe(wg *sync.WaitGroup, r io.Reader, acc *strings.Builder, progress func(string), prefix string, format func(string) (string, bool)) {
 	defer wg.Done()
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
@@ -854,10 +879,113 @@ func streamPipe(wg *sync.WaitGroup, r io.Reader, acc *strings.Builder, progress 
 		if acc != nil {
 			acc.WriteString(line + "\n")
 		}
-		if strings.TrimSpace(line) != "" && progress != nil {
-			progress(prefix + line)
+		out := line
+		if format != nil {
+			msg, ok := format(line)
+			if !ok {
+				continue
+			}
+			out = msg
+		}
+		if strings.TrimSpace(out) != "" && progress != nil {
+			progress(prefix + out)
 		}
 	}
+}
+
+// formatOpusLine traduce una línea del stream-json del CLI de claude a un
+// mensaje corto y descriptivo. Devuelve (msg, true) si hay algo que mostrar,
+// o ("", false) para omitir la línea (eventos irrelevantes como tool_result
+// o bloques de texto del asistente, que inundarían la TUI sin aportar info
+// accionable).
+//
+// Si la línea no parsea como JSON (caso típico de los fakes en e2e, que
+// devuelven "ok\n"), se devuelve tal cual vino — así no rompemos los tests
+// que todavía escriben texto plano al stdout del agente.
+func formatOpusLine(line string) (string, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return "", false
+	}
+	if !strings.HasPrefix(trimmed, "{") {
+		return line, true
+	}
+	var ev struct {
+		Type    string `json:"type"`
+		Subtype string `json:"subtype"`
+		Message struct {
+			Content []struct {
+				Type  string                 `json:"type"`
+				Name  string                 `json:"name"`
+				Input map[string]interface{} `json:"input"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &ev); err != nil {
+		return line, true
+	}
+	switch ev.Type {
+	case "system":
+		if ev.Subtype == "init" {
+			return "sesión lista, arrancando…", true
+		}
+	case "assistant":
+		for _, c := range ev.Message.Content {
+			if c.Type == "tool_use" {
+				return describeOpusTool(c.Name, c.Input), true
+			}
+		}
+	case "result":
+		if ev.Subtype == "success" {
+			return "agente terminó OK", true
+		}
+		if ev.Subtype != "" {
+			return "agente terminó (" + ev.Subtype + ")", true
+		}
+	}
+	return "", false
+}
+
+// describeOpusTool arma el detalle que acompaña al nombre de la tool. Para
+// tools que tocan archivos usamos el path; para Bash, el comando truncado;
+// para búsquedas, el patrón. Si no reconocemos la tool, mostramos solo el
+// nombre.
+func describeOpusTool(name string, input map[string]interface{}) string {
+	detail := ""
+	switch name {
+	case "Read", "Write", "Edit", "NotebookEdit":
+		if v, ok := input["file_path"].(string); ok {
+			detail = v
+		}
+	case "Bash":
+		if v, ok := input["command"].(string); ok {
+			detail = truncate(v, 80)
+		}
+	case "Glob", "Grep":
+		if v, ok := input["pattern"].(string); ok {
+			detail = v
+		}
+	case "Task":
+		if v, ok := input["description"].(string); ok {
+			detail = v
+		}
+	case "WebFetch":
+		if v, ok := input["url"].(string); ok {
+			detail = v
+		}
+	}
+	if detail == "" {
+		return name
+	}
+	return name + " " + detail
+}
+
+func truncate(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
 }
 
 // ---- git ops sobre el worktree ----

@@ -1,0 +1,4 @@
+[
+  {"name": "lint", "state": "SUCCESS", "link": "https://example.com/1", "workflow": "CI"},
+  {"name": "unit", "state": "SUCCESS", "link": "https://example.com/2", "workflow": "CI"}
+]
