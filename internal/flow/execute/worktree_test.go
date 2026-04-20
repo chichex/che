@@ -1,6 +1,7 @@
 package execute
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -76,7 +77,7 @@ func TestCreateWorktree_GoldenPath(t *testing.T) {
 		t.Errorf("worktree dir not created: %v", err)
 	}
 	// Cleanup lo deja sin worktree y sin branch.
-	if err := wt.Cleanup(root, false); err != nil {
+	if err := wt.Cleanup(context.Background(), root, false); err != nil {
 		t.Fatalf("cleanup: %v", err)
 	}
 	if _, err := os.Stat(expectedPath); !os.IsNotExist(err) {
@@ -98,7 +99,7 @@ func TestCreateWorktree_ReusesExistingSameBranch(t *testing.T) {
 		t.Errorf("expected same worktree on reuse: first=%+v second=%+v", first, second)
 	}
 	// cleanup sólo una vez, no doble.
-	_ = first.Cleanup(root, false)
+	_ = first.Cleanup(context.Background(), root, false)
 }
 
 func TestCreateWorktree_RejectsDivergentBranch(t *testing.T) {
@@ -127,7 +128,7 @@ func TestCreateWorktree_ReusesExistingBranchWithoutWorktree(t *testing.T) {
 	if wt.Branch != "exec/9-foo" {
 		t.Errorf("branch: got %q", wt.Branch)
 	}
-	_ = wt.Cleanup(root, false)
+	_ = wt.Cleanup(context.Background(), root, false)
 }
 
 func TestCreateWorktree_InvalidInputs(t *testing.T) {
@@ -203,7 +204,7 @@ func TestCreateWorktree_FetchesOriginMainAndUsesRemoteRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	defer wt.Cleanup(root, false)
+	defer wt.Cleanup(context.Background(), root, false)
 
 	// La branch debe apuntar al mismo commit que origin/main (el nuevo a2).
 	branchHead := mustRevParse(t, root, wt.Branch)

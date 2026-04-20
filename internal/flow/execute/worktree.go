@@ -1,6 +1,8 @@
 package execute
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -158,21 +160,54 @@ func hasRef(repoRoot, ref string) (bool, error) {
 }
 
 // Cleanup elimina el worktree y (si keepBranch=false) borra la branch local.
-// Idempotente: llamar dos veces no es error.
-func (w *Worktree) Cleanup(repoRoot string, keepBranch bool) error {
+// Acepta un ctx para acotar cada operación y devuelve (joined) los errores
+// que haya — el caller es responsable de loguearlos. Es idempotente:
+// llamar dos veces no es error (la segunda es no-op). "Ya no existía" no
+// se considera error para no ensuciar el log cuando alguien limpió a mano.
+func (w *Worktree) Cleanup(ctx context.Context, repoRoot string, keepBranch bool) error {
 	if w == nil || w.cleaned {
 		return nil
 	}
 	w.cleaned = true
 
-	// Intentamos remove; si falla (worktree ya no existía), no reportamos
-	// error fatal — el objetivo es dejar todo limpio.
-	_ = runGit(repoRoot, "worktree", "remove", "--force", w.Path)
-
-	if !keepBranch {
-		_ = runGit(repoRoot, "branch", "-D", w.Branch)
+	var errs []error
+	if err := runGitCtx(ctx, repoRoot, "worktree", "remove", "--force", w.Path); err != nil {
+		if !isMissingWorktreeErr(err) {
+			errs = append(errs, fmt.Errorf("worktree remove: %w", err))
+		}
 	}
-	return nil
+	if !keepBranch {
+		if err := runGitCtx(ctx, repoRoot, "branch", "-D", w.Branch); err != nil {
+			if !isMissingBranchErr(err) {
+				errs = append(errs, fmt.Errorf("branch -D: %w", err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// isMissingWorktreeErr detecta el caso en que `git worktree remove` falla
+// porque el worktree ya no estaba registrado. No lo consideramos un error
+// real para no ensuciar el log cuando algo lo limpió antes (por ejemplo,
+// el test que corre Cleanup en un defer).
+func isMissingWorktreeErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := err.Error()
+	return strings.Contains(m, "is not a working tree") ||
+		strings.Contains(m, "not a valid working tree") ||
+		strings.Contains(m, "No such file or directory")
+}
+
+// isMissingBranchErr detecta el caso en que `git branch -D` falla porque
+// la branch ya no existía (la borraron a mano o nunca se creó).
+func isMissingBranchErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := err.Error()
+	return strings.Contains(m, "not found") || strings.Contains(m, "No such branch")
 }
 
 // worktreeAt devuelve la branch actualmente checkouteada en un path si hay
@@ -260,6 +295,19 @@ func branchExists(repoRoot, branch string) (bool, error) {
 func runGit(repoRoot string, args ...string) error {
 	full := append([]string{"-C", repoRoot}, args...)
 	cmd := exec.Command("git", full...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// runGitCtx es runGit con context — si ctx se cancela, el subproceso se mata.
+// Lo usamos en los pasos de cleanup para que un `git worktree remove` colgado
+// no deje al usuario esperando indefinidamente tras una señal.
+func runGitCtx(ctx context.Context, repoRoot string, args ...string) error {
+	full := append([]string{"-C", repoRoot}, args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(string(out)))
