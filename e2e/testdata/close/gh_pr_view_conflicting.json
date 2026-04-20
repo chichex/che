@@ -1,0 +1,13 @@
+{
+  "number": 7,
+  "title": "feat(conflicts): diverge from main",
+  "url": "https://github.com/acme/demo/pull/7",
+  "state": "OPEN",
+  "isDraft": false,
+  "headRefName": "feat/conflicting",
+  "mergeable": "CONFLICTING",
+  "mergeStateStatus": "DIRTY",
+  "author": {"login": "acme-bot"},
+  "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
+  "labels": []
+}

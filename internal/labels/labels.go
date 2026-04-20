@@ -25,6 +25,7 @@ const (
 	StatusExecuting     = "status:executing"
 	StatusExecuted      = "status:executed"
 	StatusAwaitingHuman = "status:awaiting-human"
+	StatusClosed        = "status:closed"
 )
 
 // Marker labels que no cambian con el estado — identifican el origen del
@@ -83,6 +84,13 @@ var validTransitions = map[string]Transition{
 	StatusExecuting + "→" + StatusPlan: {
 		Remove: []string{StatusExecuting, StatusAwaitingHuman},
 		Add:    []string{StatusPlan},
+	},
+	// close termina OK: executed → closed. Se quita awaiting-human porque
+	// ya no hay nada que esperar de un humano, y los validated:* del PR
+	// quedan en el PR (no pertenecen al issue).
+	StatusExecuted + "→" + StatusClosed: {
+		Remove: []string{StatusExecuted, StatusAwaitingHuman},
+		Add:    []string{StatusClosed},
 	},
 }
 

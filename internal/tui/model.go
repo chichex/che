@@ -15,6 +15,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	closing "github.com/chichex/che/internal/flow/close"
 	"github.com/chichex/che/internal/flow/execute"
 	"github.com/chichex/che/internal/flow/explore"
 	"github.com/chichex/che/internal/flow/idea"
@@ -40,6 +41,9 @@ const (
 	screenValidateSelect
 	screenValidateValidators
 	screenValidateRunning
+	screenCloseLoading
+	screenCloseSelect
+	screenCloseRunning
 	screenResult
 )
 
@@ -69,7 +73,7 @@ var menuItems = []menuItem{
 	{label: "Explorar", key: "2", action: screenExploreLoading},
 	{label: "Ejecutar", key: "3", action: screenExecuteLoading},
 	{label: "Validar", key: "4", action: screenValidateLoading},
-	{label: "Cerrar", key: "5", disabled: true},
+	{label: "Cerrar", key: "5", action: screenCloseLoading},
 	{label: "Eliminar", key: "6", disabled: true},
 }
 
@@ -120,6 +124,14 @@ type Model struct {
 	validateChosenURL      string
 	validateValidatorCursor int
 	validateValidatorCount  map[validate.Agent]int
+
+	// selector de close: reusa candidates de validate.ListOpenPRs (misma
+	// pregunta "¿qué PRs hay abiertos?"). No hay panel de validadores —
+	// close usa opus por diseño.
+	closeCandidates []validate.Candidate
+	closeCursor     int
+	closeChosenRef  string
+	closeChosenURL  string
 
 	// resultado final
 	resultLines []string
@@ -207,6 +219,15 @@ type validateDoneMsg struct {
 	stdout string
 	stderr string
 }
+type closeCandidatesLoadedMsg struct {
+	items []validate.Candidate
+	err   error
+}
+type closeDoneMsg struct {
+	code   closing.ExitCode
+	stdout string
+	stderr string
+}
 type resumeInspectedMsg struct {
 	ref        string
 	agent      explore.Agent
@@ -236,6 +257,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case validateDoneMsg:
 		return m.finishRun(int(msg.code), msg.code == validate.ExitOK, msg.stdout, msg.stderr), nil
+
+	case closeDoneMsg:
+		return m.finishRun(int(msg.code), msg.code == closing.ExitOK, msg.stdout, msg.stderr), nil
+
+	case closeCandidatesLoadedMsg:
+		if msg.err != nil {
+			m.screen = screenResult
+			m.resultOK = false
+			m.resultLines = []string{"error: " + msg.err.Error()}
+			return m, nil
+		}
+		if len(msg.items) == 0 {
+			m.screen = screenResult
+			m.resultOK = false
+			m.resultLines = []string{
+				"No hay PRs abiertos que cerrar en este repo.",
+				"Abrí un PR con `che execute` o validá uno existente antes.",
+			}
+			return m, nil
+		}
+		m.closeCandidates = msg.items
+		m.closeCursor = 0
+		m.screen = screenCloseSelect
+		return m, nil
 
 	case validateCandidatesLoadedMsg:
 		if msg.err != nil {
@@ -322,7 +367,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		if m.screen == screenIdeaRunning || m.screen == screenExploreRunning ||
-			m.screen == screenExecuteRunning || m.screen == screenValidateRunning {
+			m.screen == screenExecuteRunning || m.screen == screenValidateRunning ||
+			m.screen == screenCloseRunning {
 			return m, tickCmd()
 		}
 		return m, nil
@@ -354,7 +400,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case screenIdeaInput:
 		return m.handleIdeaInputKey(msg)
 	case screenIdeaRunning, screenExploreRunning, screenExploreLoading, screenExecuteRunning, screenExecuteLoading,
-		screenValidateRunning, screenValidateLoading:
+		screenValidateRunning, screenValidateLoading, screenCloseRunning, screenCloseLoading:
 		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
 		}
@@ -373,6 +419,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleValidateSelectKey(msg)
 	case screenValidateValidators:
 		return m.handleValidateValidatorsKey(msg)
+	case screenCloseSelect:
+		return m.handleCloseSelectKey(msg)
 	case screenResult:
 		return m.handleResultKey(msg)
 	}
@@ -428,6 +476,11 @@ func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 		m.validateCandidates = nil
 		m.validateCursor = 0
 		return m, loadValidateCandidatesCmd()
+	case screenCloseLoading:
+		m.screen = screenCloseLoading
+		m.closeCandidates = nil
+		m.closeCursor = 0
+		return m, loadCloseCandidatesCmd()
 	}
 	return m, nil
 }
@@ -588,6 +641,75 @@ func validateValidatorsFromCounts(counts map[validate.Agent]int) []validate.Vali
 		}
 	}
 	return out
+}
+
+// loadCloseCandidatesCmd lista PRs abiertos del repo vía gh. Reusa el
+// loader de validate: la pregunta es la misma ("¿qué PRs hay abiertos?")
+// y ya excluye validated:approve (los que ya están aprobados igual pueden
+// cerrarse, pero al no aparecer en la TUI el usuario usa `che close <n>`
+// explícito — decisión de producto a revisar si molesta).
+func loadCloseCandidatesCmd() tea.Cmd {
+	return func() tea.Msg {
+		items, err := validate.ListOpenPRs()
+		return closeCandidatesLoadedMsg{items: items, err: err}
+	}
+}
+
+func (m Model) handleCloseSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	total := len(m.closeCandidates)
+	switch k {
+	case "esc":
+		m.screen = screenMenu
+		m.closeCandidates = nil
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if total == 0 {
+			return m, nil
+		}
+		m.closeCursor = (m.closeCursor - 1 + total) % total
+		return m, nil
+	case "down", "j":
+		if total == 0 {
+			return m, nil
+		}
+		m.closeCursor = (m.closeCursor + 1) % total
+		return m, nil
+	case "enter":
+		if total == 0 {
+			return m, nil
+		}
+		chosen := m.closeCandidates[m.closeCursor]
+		m.closeChosenRef = fmt.Sprint(chosen.Number)
+		m.closeChosenURL = chosen.URL
+		return m.startCloseFlow(m.closeChosenRef)
+	}
+	return m, nil
+}
+
+// startCloseFlow arranca closing.Run en background sobre el PR elegido.
+// No hay selector de agente — close usa opus hardcoded.
+func (m Model) startCloseFlow(prRef string) (tea.Model, tea.Cmd) {
+	m.screen = screenCloseRunning
+	m.runStart = time.Now()
+	m.runLog = []string{}
+	m.progressCh = make(chan tea.Msg, 64)
+
+	go func(ch chan<- tea.Msg) {
+		var stdout, stderr bytes.Buffer
+		code := closing.Run(prRef, closing.Opts{
+			Stdout: &stdout,
+			Stderr: &stderr,
+			OnProgress: func(line string) {
+				ch <- progressMsg{line: line}
+			},
+		})
+		ch <- closeDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	}(m.progressCh)
+
+	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
 }
 
 // startValidateFlow arranca validate.Run en background sobre el PR elegido.
@@ -847,6 +969,7 @@ func (m Model) handleResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.exploreResume = nil
 	m.executeCandidates = nil
 	m.validateCandidates = nil
+	m.closeCandidates = nil
 	return m, nil
 }
 
@@ -974,6 +1097,12 @@ func (m Model) View() string {
 		return renderValidateValidators(m)
 	case screenValidateRunning:
 		return renderRunning(m, "Validando PR…", "Ctrl+C cancela")
+	case screenCloseLoading:
+		return renderCloseLoading(m)
+	case screenCloseSelect:
+		return renderCloseSelect(m)
+	case screenCloseRunning:
+		return renderRunning(m, "Cerrando PR…", "Ctrl+C cancela")
 	case screenResult:
 		return renderResult(m)
 	}
@@ -1451,6 +1580,63 @@ func renderResult(m Model) string {
 
 	sb.WriteString("\n")
 	sb.WriteString(hintStyle.Render("presioná cualquier tecla para volver al menú"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+// ---- close renders ----
+
+func renderCloseLoading(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Cerrar un PR"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render("Buscando PRs abiertos…"))
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("Ctrl+C cancela"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func renderCloseSelect(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Cerrar"))
+	sb.WriteString("\n")
+	total := len(m.closeCandidates)
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("%d PR(s) abiertos — opus arregla conflictos/CI si hace falta, después mergea",
+		total)))
+	sb.WriteString("\n\n")
+	if total == 0 {
+		sb.WriteString("  " + mutedBadge("(ninguno)") + "\n")
+	} else {
+		for i, c := range m.closeCandidates {
+			prefix := "  "
+			style := menuItemStyle
+			if i == m.closeCursor {
+				prefix = "▸ "
+				style = menuSelectedStyle
+			}
+			num := menuNumberStyle.Render(fmt.Sprintf("#%d", c.Number))
+			draft := ""
+			if c.IsDraft {
+				draft = " " + mutedBadge("draft")
+			}
+			rel := ""
+			if len(c.RelatedIssues) > 0 {
+				parts := make([]string, 0, len(c.RelatedIssues))
+				for _, n := range c.RelatedIssues {
+					parts = append(parts, fmt.Sprintf("#%d", n))
+				}
+				rel = " " + mutedBadge("closes "+strings.Join(parts, ", "))
+			}
+			line := prefix + num + "  " + c.Title + draft + rel
+			if c.Author != "" {
+				line += " " + comingSoonStyle.Render("— by @"+c.Author)
+			}
+			sb.WriteString(style.Render(line) + "\n")
+		}
+	}
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("↑/↓ navega · Enter cierra · Esc vuelve · Ctrl+C sale"))
 	sb.WriteString("\n")
 	return sb.String()
 }
