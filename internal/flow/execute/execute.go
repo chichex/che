@@ -712,7 +712,7 @@ func ListCandidates() ([]Candidate, error) {
 	}
 	out2 := make([]Candidate, 0, len(raw))
 	for _, i := range raw {
-		if i.HasLabel(labels.StatusAwaitingHuman) {
+		if i.HasLabel(deprecatedAwaitingHuman) {
 			continue
 		}
 		out2 = append(out2, Candidate{Number: i.Number, Title: i.Title})
@@ -836,7 +836,7 @@ func gate(i *Issue) error {
 	if i.HasLabel(labels.StatusExecuting) {
 		return fmt.Errorf("issue #%d is already status:executing — otro run en curso o quedó colgado; quitá el label a mano si es lo segundo", i.Number)
 	}
-	if i.HasLabel(labels.StatusAwaitingHuman) {
+	if i.HasLabel(deprecatedAwaitingHuman) {
 		return fmt.Errorf("issue #%d tiene status:awaiting-human — resolvé primero lo que falta antes de ejecutar", i.Number)
 	}
 	if !i.HasLabel(labels.StatusPlan) {

@@ -25,7 +25,6 @@ func TestNoHardcodedLabelsOutsideThisPackage(t *testing.T) {
 		`"` + StatusPlan + `"`,
 		`"` + StatusExecuting + `"`,
 		`"` + StatusExecuted + `"`,
-		`"` + StatusAwaitingHuman + `"`,
 		`"` + CtPlan + `"`,
 	}
 

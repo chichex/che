@@ -600,7 +600,7 @@ func Run(issueRef string, opts Opts) ExitCode {
 
 	// Ramificación por modo. awaiting-human → resume; status:plan → error
 	// de "ya explorado"; default → new.
-	if issue.HasLabel(labels.StatusAwaitingHuman) {
+	if issue.HasLabel(deprecatedAwaitingHuman) {
 		return runResume(issueRef, issue, opts, progress, stdout, stderr)
 	}
 	if issue.HasLabel(labels.StatusPlan) {
@@ -770,7 +770,7 @@ func pauseForHuman(issueRef string, issue *Issue, plan *Response, results []vali
 		return ExitRetry
 	}
 	progress("asegurando label status:awaiting-human…")
-	if err := ensureLabel(labels.StatusAwaitingHuman, progress); err != nil {
+	if err := ensureLabel(deprecatedAwaitingHuman, progress); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
@@ -849,7 +849,7 @@ func ListCandidates() ([]Candidate, error) {
 	}
 	out := make([]Candidate, 0, len(raw))
 	for _, i := range raw {
-		if i.HasLabel(labels.StatusPlan) || i.HasLabel(labels.StatusAwaitingHuman) ||
+		if i.HasLabel(labels.StatusPlan) || i.HasLabel(deprecatedAwaitingHuman) ||
 			i.HasLabel(labels.StatusExecuting) || i.HasLabel(labels.StatusExecuted) {
 			continue
 		}
@@ -870,7 +870,7 @@ func ListAwaiting() ([]Candidate, error) {
 	}
 	out := make([]Candidate, 0, len(raw))
 	for _, i := range raw {
-		if !i.HasLabel(labels.StatusAwaitingHuman) {
+		if !i.HasLabel(deprecatedAwaitingHuman) {
 			continue
 		}
 		if i.HasLabel(labels.StatusExecuted) || i.HasLabel(labels.StatusExecuting) {
@@ -1374,7 +1374,7 @@ func transitionLabels(ref string) error {
 // pausa esperando respuesta del humano). No toca otros labels.
 func setLabelAwaitingHuman(ref string) error {
 	cmd := exec.Command("gh", "issue", "edit", ref,
-		"--add-label", labels.StatusAwaitingHuman)
+		"--add-label", deprecatedAwaitingHuman)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gh issue edit: %s", strings.TrimSpace(string(out)))
@@ -2456,7 +2456,7 @@ func editIssueBody(ref, body string) error {
 // en la misma operación, cerrando el ciclo.
 func closeAwaitingHuman(ref string) error {
 	cmd := exec.Command("gh", "issue", "edit", ref,
-		"--remove-label", labels.StatusAwaitingHuman,
+		"--remove-label", deprecatedAwaitingHuman,
 		"--remove-label", labels.StatusIdea,
 		"--add-label", labels.StatusPlan)
 	out, err := cmd.CombinedOutput()
