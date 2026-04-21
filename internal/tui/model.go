@@ -37,12 +37,10 @@ const (
 	screenExploreLoading
 	screenExploreSelect
 	screenExploreAgent
-	screenExploreValidators
 	screenExploreRunning
 	screenExecuteLoading
 	screenExecuteSelect
 	screenExecuteAgent
-	screenExecuteValidators
 	screenExecuteRunning
 	screenValidateLoading
 	screenValidateSelect
@@ -141,32 +139,28 @@ type Model struct {
 	runLog     []string
 	progressCh chan tea.Msg
 
-	// selector de explore: dos listas — ideas sin explorar + issues
-	// awaiting-human para reanudar. El cursor es un índice global sobre la
-	// concatenación new+resume; exploreTargets arma esa vista unificada.
+	// selector de explore: lista de ideas sin explorar. No hay lista de
+	// "resume" — con el flow simplificado explore no pausa más para input
+	// humano.
 	exploreNew     []explore.Candidate
-	exploreResume  []explore.Candidate
 	exploreCursor  int
 	exploreLoadErr error
 
-	// selector de agente ejecutor + checkbox de validadores
-	exploreChosenRef       string
-	exploreAgentIdx        int
-	exploreChosenAgent     explore.Agent
-	exploreValidatorCursor int
-	exploreValidatorCount  map[explore.Agent]int
+	// selector de agente ejecutor. El stepper actual es Loading → Select →
+	// Agent → Running; no hay panel de validadores (explore ya no dispara
+	// validadores automáticamente).
+	exploreChosenRef   string
+	exploreAgentIdx    int
+	exploreChosenAgent explore.Agent
 
 	// selector de execute: lista de issues en status:plan, seguido de
-	// selector de ejecutor y panel de validadores (default "none" —
-	// counts vacío se renderiza como checkboxes vacíos y el spec llega
-	// vacío al flow).
-	executeCandidates      []execute.Candidate
-	executeCursor          int
-	executeChosenRef       string
-	executeAgentIdx        int
-	executeChosenAgent     execute.Agent
-	executeValidatorCursor int
-	executeValidatorCount  map[execute.Agent]int
+	// selector de ejecutor. Sin panel de validadores — execute tampoco
+	// dispara validadores automáticamente.
+	executeCandidates  []execute.Candidate
+	executeCursor      int
+	executeChosenRef   string
+	executeAgentIdx    int
+	executeChosenAgent execute.Agent
 
 	// selector de validate: lista de PRs abiertos + panel de validadores.
 	validateCandidates      []validate.Candidate
@@ -276,9 +270,8 @@ type exploreDoneMsg struct {
 	stderr string
 }
 type exploreCandidatesLoadedMsg struct {
-	newItems    []explore.Candidate
-	resumeItems []explore.Candidate
-	err         error
+	newItems []explore.Candidate
+	err      error
 }
 type executeCandidatesLoadedMsg struct {
 	items []execute.Candidate
@@ -317,13 +310,6 @@ type iterateDoneMsg struct {
 	stdout string
 	stderr string
 }
-type resumeInspectedMsg struct {
-	ref        string
-	agent      explore.Agent
-	validators []explore.Validator
-	err        error
-}
-
 // shutdownMsg llega cuando el context raíz se cancela (SIGINT/SIGTERM desde
 // fuera del TUI). La UI la interpreta igual que Ctrl+C durante un run en
 // curso: cancela la corrida activa y espera a que el done msg llegue antes
@@ -465,25 +451,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = screenExecuteSelect
 		return m, nil
 
-	case resumeInspectedMsg:
-		if msg.err != nil {
-			m.screen = screenResult
-			m.resultKind = resultError
-			m.resultLines = []string{"error leyendo run anterior: " + msg.err.Error()}
-			return m, nil
-		}
-		m.exploreChosenRef = msg.ref
-		m.exploreAgentIdx = indexOfAgent(msg.agent)
-		// Pre-seleccionar validators del run anterior en el mapa de counts.
-		counts := map[explore.Agent]int{}
-		for _, v := range msg.validators {
-			counts[v.Agent]++
-		}
-		m.exploreValidatorCount = counts
-		m.exploreValidatorCursor = 0
-		m.screen = screenExploreAgent
-		return m, nil
-
 	case exploreCandidatesLoadedMsg:
 		if msg.err != nil {
 			m.screen = screenResult
@@ -491,17 +458,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resultLines = []string{"error: " + msg.err.Error()}
 			return m, nil
 		}
-		if len(msg.newItems) == 0 && len(msg.resumeItems) == 0 {
+		if len(msg.newItems) == 0 {
 			m.screen = screenResult
 			m.resultKind = resultInfo
 			m.resultLines = []string{
 				"No hay issues con label ct:plan listos para explorar.",
-				"Tampoco hay issues en pausa esperando tu respuesta.",
+				"Corré `che idea` para crear un issue primero.",
 			}
 			return m, nil
 		}
 		m.exploreNew = msg.newItems
-		m.exploreResume = msg.resumeItems
 		m.exploreCursor = 0
 		m.screen = screenExploreSelect
 		return m, nil
@@ -577,14 +543,10 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleExploreSelectKey(msg)
 	case screenExploreAgent:
 		return m.handleExploreAgentKey(msg)
-	case screenExploreValidators:
-		return m.handleExploreValidatorsKey(msg)
 	case screenExecuteSelect:
 		return m.handleExecuteSelectKey(msg)
 	case screenExecuteAgent:
 		return m.handleExecuteAgentKey(msg)
-	case screenExecuteValidators:
-		return m.handleExecuteValidatorsKey(msg)
 	case screenValidateSelect:
 		return m.handleValidateSelectKey(msg)
 	case screenValidateValidators:
@@ -634,7 +596,6 @@ func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 	case screenExploreLoading:
 		m.screen = screenExploreLoading
 		m.exploreNew = nil
-		m.exploreResume = nil
 		m.exploreCursor = 0
 		m.exploreLoadErr = nil
 		return m, loadExploreCandidatesCmd()
@@ -677,7 +638,6 @@ func (m Model) handleExecuteSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.screen = screenMenu
 		m.executeCandidates = nil
-		m.executeValidatorCount = nil
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
@@ -700,9 +660,6 @@ func (m Model) handleExecuteSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		chosen := m.executeCandidates[m.executeCursor]
 		m.executeChosenRef = fmt.Sprint(chosen.Number)
 		m.executeAgentIdx = 0
-		// Default "none" en cada flow nuevo: limpiamos counts de runs previos
-		// para que la pantalla de validadores arranque sin nada marcado.
-		m.executeValidatorCount = nil
 		m.screen = screenExecuteAgent
 		return m, nil
 	}
@@ -725,67 +682,15 @@ func (m Model) handleExecuteAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		m.executeChosenAgent = execute.ValidAgents[m.executeAgentIdx]
-		return m.enterExecuteValidatorsScreen(), nil
+		return m.startExecuteFlow(m.executeChosenRef, m.executeChosenAgent)
 	}
 	for i := range execute.ValidAgents {
 		if k == fmt.Sprint(i+1) {
 			m.executeChosenAgent = execute.ValidAgents[i]
-			return m.enterExecuteValidatorsScreen(), nil
+			return m.startExecuteFlow(m.executeChosenRef, m.executeChosenAgent)
 		}
 	}
 	return m, nil
-}
-
-// enterExecuteValidatorsScreen lleva a la pantalla de selección de
-// validadores del flow execute. A diferencia de explore (que pre-selecciona
-// opus=1), acá el default es "none" — counts vacío se renderiza como
-// checkboxes sin marcar y, si el usuario confirma sin tocar nada, el spec
-// llega vacío a execute.Run (equivalente a --validators none).
-func (m Model) enterExecuteValidatorsScreen() Model {
-	m.executeValidatorCursor = 0
-	if m.executeValidatorCount == nil {
-		m.executeValidatorCount = map[execute.Agent]int{}
-	}
-	m.screen = screenExecuteValidators
-	return m
-}
-
-func (m Model) handleExecuteValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	k := msg.String()
-	switch k {
-	case "esc":
-		m.screen = screenExecuteAgent
-		return m, nil
-	case "ctrl+c":
-		return m, tea.Quit
-	case "up", "k":
-		m.executeValidatorCursor = (m.executeValidatorCursor - 1 + len(execute.ValidAgents)) % len(execute.ValidAgents)
-		return m, nil
-	case "down", "j":
-		m.executeValidatorCursor = (m.executeValidatorCursor + 1) % len(execute.ValidAgents)
-		return m, nil
-	case " ", "space", "x":
-		a := execute.ValidAgents[m.executeValidatorCursor]
-		m.executeValidatorCount[a] = (m.executeValidatorCount[a] + 1) % (maxValidatorsPerAgent + 1)
-		return m, nil
-	case "enter":
-		validators := executeValidatorsFromCounts(m.executeValidatorCount)
-		if len(validators) > maxValidatorsTotal {
-			return m, nil
-		}
-		return m.startExecuteFlow(m.executeChosenRef, m.executeChosenAgent, validators)
-	}
-	return m, nil
-}
-
-// executeValidatorsFromCounts traduce el mapa de counts a una lista ordenada
-// de execute.Validator con Instance 1..N en el orden canónico de ValidAgents.
-// Mismo shape que validatorsFromCounts de explore — ambos delegan a
-// buildValidatorList para evitar drift.
-func executeValidatorsFromCounts(counts map[execute.Agent]int) []execute.Validator {
-	return buildValidatorList(execute.ValidAgents, counts, func(a execute.Agent, inst int) execute.Validator {
-		return execute.Validator{Agent: a, Instance: inst}
-	})
 }
 
 // loadValidateCandidatesCmd lista PRs abiertos del repo vía gh.
@@ -1030,15 +935,13 @@ func (m Model) startValidateFlow(prRef string, validators []validate.Validator) 
 }
 
 // startExecuteFlow arranca execute.Run en background sobre el issue elegido
-// con el agente seleccionado y la lista de validadores elegida desde la TUI.
-// Si validators es vacío, execute.Run actúa como con --validators none
-// (el usuario sigue pudiendo disparar validadores post-PR desde CLI).
+// con el agente seleccionado.
 //
 // Deriva un subcontext cancelable del ctx raíz y lo guarda en m.cancelRun
 // para que el handler de Ctrl+C pueda cancelar solo esta corrida (dejando
 // el ctx raíz vivo para las siguientes). Si llega una señal externa, el
 // ctx raíz se cancela y cascadea.
-func (m Model) startExecuteFlow(issueRef string, agent execute.Agent, validators []execute.Validator) (tea.Model, tea.Cmd) {
+func (m Model) startExecuteFlow(issueRef string, agent execute.Agent) (tea.Model, tea.Cmd) {
 	m.screen = screenExecuteRunning
 	m.runStart = time.Now()
 	m.runLog = []string{}
@@ -1050,11 +953,10 @@ func (m Model) startExecuteFlow(issueRef string, agent execute.Agent, validators
 	go func(ch chan<- tea.Msg, runCtx context.Context) {
 		var stderr bytes.Buffer
 		code := execute.Run(issueRef, execute.Opts{
-			Stdout:     newStdoutLineWriter(ch),
-			Out:        output.New(&eventSink{ch: ch}),
-			Agent:      agent,
-			Validators: validators,
-			Ctx:        runCtx,
+			Stdout: newStdoutLineWriter(ch),
+			Out:    output.New(&eventSink{ch: ch}),
+			Agent:  agent,
+			Ctx:    runCtx,
 		})
 		ch <- executeDoneMsg{code: code, stdout: "", stderr: stderr.String()}
 	}(m.progressCh, runCtx)
@@ -1068,22 +970,17 @@ func loadExploreCandidatesCmd() tea.Cmd {
 		if err != nil {
 			return exploreCandidatesLoadedMsg{err: err}
 		}
-		resumeItems, err := explore.ListAwaiting()
-		if err != nil {
-			return exploreCandidatesLoadedMsg{err: err}
-		}
-		return exploreCandidatesLoadedMsg{newItems: newItems, resumeItems: resumeItems}
+		return exploreCandidatesLoadedMsg{newItems: newItems}
 	}
 }
 
 func (m Model) handleExploreSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
-	total := len(m.exploreNew) + len(m.exploreResume)
+	total := len(m.exploreNew)
 	switch k {
 	case "esc":
 		m.screen = screenMenu
 		m.exploreNew = nil
-		m.exploreResume = nil
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
@@ -1103,53 +1000,13 @@ func (m Model) handleExploreSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if total == 0 {
 			return m, nil
 		}
-		chosen, resume := m.exploreItemAt(m.exploreCursor)
-		ref := fmt.Sprint(chosen.Number)
-		if resume {
-			// Reanudación: vamos a mostrar pantalla de carga mientras leemos
-			// el run anterior del issue, y después paramos en agent+validators
-			// con los mismos pre-seleccionados (el humano puede cambiarlos).
-			m.exploreChosenRef = ref
-			m.screen = screenExploreLoading
-			return m, inspectResumeCmd(ref)
-		}
-		m.exploreChosenRef = ref
+		chosen := m.exploreNew[m.exploreCursor]
+		m.exploreChosenRef = fmt.Sprint(chosen.Number)
 		m.exploreAgentIdx = 0
-		// En modo new no hay preselect de validators — limpiamos por si quedó
-		// algo de una corrida anterior.
-		m.exploreValidatorCount = nil
 		m.screen = screenExploreAgent
 		return m, nil
 	}
 	return m, nil
-}
-
-// indexOfAgent devuelve el índice del agente en ValidAgents, o 0 si no se
-// encuentra (default: Opus).
-func indexOfAgent(a explore.Agent) int {
-	for i, v := range explore.ValidAgents {
-		if v == a {
-			return i
-		}
-	}
-	return 0
-}
-
-func inspectResumeCmd(ref string) tea.Cmd {
-	return func() tea.Msg {
-		agent, validators, err := explore.InspectResume(ref)
-		return resumeInspectedMsg{ref: ref, agent: agent, validators: validators, err: err}
-	}
-}
-
-// exploreItemAt devuelve el candidato en el índice global y si viene de la
-// sección "resume" (awaiting-human) o "new". El orden visual siempre es
-// new primero, resume después.
-func (m Model) exploreItemAt(idx int) (explore.Candidate, bool) {
-	if idx < len(m.exploreNew) {
-		return m.exploreNew[idx], false
-	}
-	return m.exploreResume[idx-len(m.exploreNew)], true
 }
 
 func (m Model) handleExploreAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1168,70 +1025,16 @@ func (m Model) handleExploreAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		m.exploreChosenAgent = explore.ValidAgents[m.exploreAgentIdx]
-		return m.enterValidatorsScreen(), nil
+		return m.startExploreFlow(m.exploreChosenRef, m.exploreChosenAgent)
 	}
 	// Atajos numéricos 1..N para selección rápida del ejecutor.
 	for i := range explore.ValidAgents {
 		if k == fmt.Sprint(i+1) {
 			m.exploreChosenAgent = explore.ValidAgents[i]
-			return m.enterValidatorsScreen(), nil
+			return m.startExploreFlow(m.exploreChosenRef, m.exploreChosenAgent)
 		}
 	}
 	return m, nil
-}
-
-// enterValidatorsScreen lleva a la pantalla de validadores. Si el mapa de
-// counts ya está seteado (caso de reanudación, donde lo pre-cargamos con el
-// panel del run anterior), lo preserva. Si está vacío, usa el default opus
-// para que el usuario arranque desde algo razonable.
-func (m Model) enterValidatorsScreen() Model {
-	m.exploreValidatorCursor = 0
-	if len(m.exploreValidatorCount) == 0 {
-		m.exploreValidatorCount = map[explore.Agent]int{
-			explore.AgentOpus: 1,
-		}
-	}
-	m.screen = screenExploreValidators
-	return m
-}
-
-func (m Model) handleExploreValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	k := msg.String()
-	switch k {
-	case "esc":
-		m.screen = screenExploreAgent
-		return m, nil
-	case "ctrl+c":
-		return m, tea.Quit
-	case "up", "k":
-		m.exploreValidatorCursor = (m.exploreValidatorCursor - 1 + len(explore.ValidAgents)) % len(explore.ValidAgents)
-		return m, nil
-	case "down", "j":
-		m.exploreValidatorCursor = (m.exploreValidatorCursor + 1) % len(explore.ValidAgents)
-		return m, nil
-	case " ", "space", "x":
-		// Cycle 0 → 1 → 2 → 0 sobre el agente bajo el cursor.
-		a := explore.ValidAgents[m.exploreValidatorCursor]
-		m.exploreValidatorCount[a] = (m.exploreValidatorCount[a] + 1) % (maxValidatorsPerAgent + 1)
-		return m, nil
-	case "enter":
-		validators := validatorsFromCounts(m.exploreValidatorCount)
-		total := len(validators)
-		// Reglas: 0 (skip) o 1-N son válidos; N+1+ no.
-		if total > maxValidatorsTotal {
-			return m, nil
-		}
-		return m.startExploreFlow(m.exploreChosenRef, m.exploreChosenAgent, validators)
-	}
-	return m, nil
-}
-
-// validatorsFromCounts traduce el mapa de counts a una lista de Validators
-// con instance correcto (1, 2, ...) en el orden canónico de ValidAgents.
-func validatorsFromCounts(counts map[explore.Agent]int) []explore.Validator {
-	return buildValidatorList(explore.ValidAgents, counts, func(a explore.Agent, inst int) explore.Validator {
-		return explore.Validator{Agent: a, Instance: inst}
-	})
 }
 
 func (m Model) handleIdeaInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1262,9 +1065,7 @@ func (m Model) handleResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.resultLines = nil
 	m.runLog = nil
 	m.exploreNew = nil
-	m.exploreResume = nil
 	m.executeCandidates = nil
-	m.executeValidatorCount = nil
 	m.validateCandidates = nil
 	m.closeReady = nil
 	m.closeBlocked = nil
@@ -1293,9 +1094,8 @@ func (m Model) startIdeaFlow(text string) (tea.Model, tea.Cmd) {
 }
 
 // startExploreFlow arranca explore.Run en background sobre el issue elegido
-// con el agente seleccionado y la lista de validators del preset. Mismo
-// patrón async que startIdeaFlow.
-func (m Model) startExploreFlow(issueRef string, agent explore.Agent, validators []explore.Validator) (tea.Model, tea.Cmd) {
+// con el agente seleccionado. Mismo patrón async que startIdeaFlow.
+func (m Model) startExploreFlow(issueRef string, agent explore.Agent) (tea.Model, tea.Cmd) {
 	m.screen = screenExploreRunning
 	m.runStart = time.Now()
 	m.runLog = []string{}
@@ -1304,10 +1104,9 @@ func (m Model) startExploreFlow(issueRef string, agent explore.Agent, validators
 	go func(ch chan<- tea.Msg) {
 		var stderr bytes.Buffer
 		code := explore.Run(issueRef, explore.Opts{
-			Stdout:     newStdoutLineWriter(ch),
-			Out:        output.New(&eventSink{ch: ch}),
-			Agent:      agent,
-			Validators: validators,
+			Stdout: newStdoutLineWriter(ch),
+			Out:    output.New(&eventSink{ch: ch}),
+			Agent:  agent,
 		})
 		ch <- exploreDoneMsg{code: code, stdout: "", stderr: stderr.String()}
 	}(m.progressCh)
@@ -1370,8 +1169,6 @@ func (m Model) View() string {
 		return renderExploreSelect(m)
 	case screenExploreAgent:
 		return renderExploreAgent(m)
-	case screenExploreValidators:
-		return renderExploreValidators(m)
 	case screenExploreRunning:
 		return renderRunning(m, "Explorando issue…", "Ctrl+C cancela")
 	case screenExecuteLoading:
@@ -1380,8 +1177,6 @@ func (m Model) View() string {
 		return renderExecuteSelect(m)
 	case screenExecuteAgent:
 		return renderExecuteAgent(m)
-	case screenExecuteValidators:
-		return renderExecuteValidators(m)
 	case screenExecuteRunning:
 		return renderRunning(m, "Ejecutando issue…", "Ctrl+C cancela")
 	case screenValidateLoading:
@@ -1506,8 +1301,9 @@ func renderValidateValidators(m Model) string {
 	return sb.String()
 }
 
-// renderValidateValidatorTotal es como renderValidatorTotal pero con la regla
-// de validate: el total=0 es inválido (validate sin validadores no corre).
+// renderValidateValidatorTotal arma el indicador del total con la regla de
+// validate: total=0 es inválido (validate sin validadores no corre),
+// total>3 tampoco, 1-3 es ok.
 func renderValidateValidatorTotal(total int) string {
 	mark := "✓"
 	note := ""
@@ -1585,50 +1381,6 @@ func renderExecuteAgent(m Model) string {
 	}
 	sb.WriteString("\n")
 	sb.WriteString(hintStyle.Render("↑/↓ navega · 1-3 atajo · Enter elige · Esc vuelve · Ctrl+C sale"))
-	sb.WriteString("\n")
-	return sb.String()
-}
-
-// renderExecuteValidators espeja la pantalla de validadores de explore: lista
-// de checkboxes (0/1/2 por agente) con la misma descripción. Default "none":
-// si el usuario confirma sin tocar nada, execute.Run arranca sin validadores
-// (equivalente a `che execute --validators none`).
-func renderExecuteValidators(m Model) string {
-	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Elegí validadores"))
-	sb.WriteString("\n")
-	sb.WriteString(subtitleStyle.Render(fmt.Sprintf(
-		"Issue #%s · ejecutor: %s — marcá con space (0 = sin validadores, máx 3)",
-		m.executeChosenRef, m.executeChosenAgent)))
-	sb.WriteString("\n\n")
-
-	total := 0
-	for i, a := range execute.ValidAgents {
-		count := m.executeValidatorCount[a]
-		total += count
-		box := renderCheckbox(count)
-		prefix := "  "
-		style := menuItemStyle
-		if i == m.executeValidatorCursor {
-			prefix = "▸ "
-			style = menuSelectedStyle
-		}
-		name := strings.ToUpper(string(a)[:1]) + string(a)[1:]
-		line := prefix + box + "  " + name
-		// Reusamos las descripciones de explore; los strings de Agent son
-		// idénticos entre paquetes ("opus"/"codex"/"gemini").
-		descKey := explore.Agent(string(a))
-		if desc, ok := validatorAgentDescriptions[descKey]; ok {
-			line += "  " + comingSoonStyle.Render("— "+desc)
-		}
-		sb.WriteString(style.Render(line) + "\n")
-	}
-
-	sb.WriteString("\n")
-	sb.WriteString("  " + renderValidatorTotal(total) + "\n")
-
-	sb.WriteString("\n")
-	sb.WriteString(hintStyle.Render("↑/↓ navega · Space cycle 0/1/2 · Enter manda · Esc vuelve · Ctrl+C sale"))
 	sb.WriteString("\n")
 	return sb.String()
 }
@@ -1765,42 +1517,6 @@ func renderExploreAgent(m Model) string {
 	return sb.String()
 }
 
-func renderExploreValidators(m Model) string {
-	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Elegí validadores"))
-	sb.WriteString("\n")
-	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("Issue #%s · ejecutor: %s — marcá con space (0/1/2 de cada)",
-		m.exploreChosenRef, m.exploreChosenAgent)))
-	sb.WriteString("\n\n")
-
-	total := 0
-	for i, a := range explore.ValidAgents {
-		count := m.exploreValidatorCount[a]
-		total += count
-		box := renderCheckbox(count)
-		prefix := "  "
-		style := menuItemStyle
-		if i == m.exploreValidatorCursor {
-			prefix = "▸ "
-			style = menuSelectedStyle
-		}
-		name := strings.ToUpper(string(a)[:1]) + string(a)[1:]
-		line := prefix + box + "  " + name
-		if desc, ok := validatorAgentDescriptions[a]; ok {
-			line += "  " + comingSoonStyle.Render("— "+desc)
-		}
-		sb.WriteString(style.Render(line) + "\n")
-	}
-
-	sb.WriteString("\n")
-	sb.WriteString("  " + renderValidatorTotal(total) + "\n")
-
-	sb.WriteString("\n")
-	sb.WriteString(hintStyle.Render("↑/↓ navega · Space cycle 0/1/2 · Enter manda · Esc vuelve · Ctrl+C sale"))
-	sb.WriteString("\n")
-	return sb.String()
-}
-
 // renderCheckbox genera la caja visible según el count: 0=vacía, 1=×, 2=××.
 func renderCheckbox(count int) string {
 	switch count {
@@ -1814,58 +1530,21 @@ func renderCheckbox(count int) string {
 	return fmt.Sprintf("[%d]", count)
 }
 
-// renderValidatorTotal imprime el total con un marcador que indica si el
-// count es aceptable (0-3) o inválido (4+).
-func renderValidatorTotal(total int) string {
-	mark := "✓"
-	note := ""
-	valid := total >= 0 && total <= 3
-	if !valid {
-		mark = "✗"
-		note = "  (máximo 3 validadores)"
-	} else if total == 0 {
-		note = "  (sin validadores — solo ejecutor)"
-	}
-	style := successStyle
-	if !valid {
-		style = errorStyle
-	}
-	return style.Render(fmt.Sprintf("Total: %d %s", total, mark)) + comingSoonStyle.Render(note)
-}
-
 func renderExploreSelect(m Model) string {
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("Explorar"))
 	sb.WriteString("\n")
 
-	newCount := len(m.exploreNew)
-	resumeCount := len(m.exploreResume)
-	summary := fmt.Sprintf("%d sin explorar · %d en pausa para revalidar", newCount, resumeCount)
-	sb.WriteString(subtitleStyle.Render(summary))
+	total := len(m.exploreNew)
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("%d idea(s) sin explorar", total)))
 	sb.WriteString("\n\n")
 
-	idx := 0
-
-	if newCount > 0 {
-		sb.WriteString("  " + mutedBadge("— Ideas sin explorar —") + "\n")
-		for _, c := range m.exploreNew {
-			sb.WriteString(exploreCandidateLine(c, idx == m.exploreCursor))
-			idx++
-		}
+	if total == 0 {
+		sb.WriteString("  " + mutedBadge("(ninguna)") + "\n")
 	} else {
-		sb.WriteString("  " + mutedBadge("— Ideas sin explorar —") + "  " + comingSoonStyle.Render("(ninguna)") + "\n")
-	}
-
-	sb.WriteString("\n")
-
-	if resumeCount > 0 {
-		sb.WriteString("  " + mutedBadge("— Para revalidar (pausadas por input humano) —") + "\n")
-		for _, c := range m.exploreResume {
-			sb.WriteString(exploreCandidateLine(c, idx == m.exploreCursor))
-			idx++
+		for i, c := range m.exploreNew {
+			sb.WriteString(exploreCandidateLine(c, i == m.exploreCursor))
 		}
-	} else {
-		sb.WriteString("  " + mutedBadge("— Para revalidar —") + "  " + comingSoonStyle.Render("(ninguna)") + "\n")
 	}
 
 	sb.WriteString("\n")
