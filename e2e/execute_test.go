@@ -113,6 +113,72 @@ func TestExecute_GoldenPath(t *testing.T) {
 	}
 }
 
+// TestExecute_Validators_MultiSpawn: criterio de aceptación de #13 — la
+// selección de validadores debe respetarse end-to-end. El spec producido por
+// la TUI (executeValidatorsFromCounts) y el parseado desde `--validators ...`
+// desembocan en el mismo Opts.Validators que llega a execute.Run; testeamos
+// acá que ese shape dispara un subprocess por validator con Instance correcto
+// y que cada uno postea su PR comment.
+func TestExecute_Validators_MultiSpawn(t *testing.T) {
+	env := setupExecuteEnv(t)
+	scriptExecutePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("execute/gh_issue_view_ready.json", 0)
+	env.ExpectGh(`^pr list --head exec/42-`).RespondStdout("[]\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	// Lock (plan→executing) + transition post-PR (executing→executed).
+	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0)
+
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior ejecutando`).
+		TouchFile("IMPLEMENTATION.md", "did it\n").
+		RespondStdout("ok\n", 0)
+
+	env.ExpectGh(`^pr create --draft`).RespondStdout("https://github.com/acme/demo/pull/7\n", 0)
+
+	// fetchPRComments → iter=1 (sin comments previos).
+	env.ExpectGh(`^pr view https://github.com/acme/demo/pull/7 --json comments`).
+		RespondStdout(`{"comments":[]}`+"\n", 0)
+
+	// 3 validators con 2 instancias de codex + 1 gemini (paralelo a
+	// TestExplore_Validators_Duplicate): verifica que Instance numbering
+	// llega bien a los subprocesos.
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`validador técnico`).Consumable().
+		RespondStdout("codex#1 says: ok\n", 0)
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`validador técnico`).Consumable().
+		RespondStdout("codex#2 says: ok\n", 0)
+	env.ExpectAgent("gemini").
+		WhenArgsMatch(`validador técnico`).
+		RespondStdout("gemini#1 says: ok\n", 0)
+
+	// 3 PR comments (uno por validator).
+	env.ExpectGh(`^pr comment https://github.com/acme/demo/pull/7 --body-file`).Consumable().RespondStdout("ok\n", 0)
+	env.ExpectGh(`^pr comment https://github.com/acme/demo/pull/7 --body-file`).Consumable().RespondStdout("ok\n", 0)
+	env.ExpectGh(`^pr comment https://github.com/acme/demo/pull/7 --body-file`).Consumable().RespondStdout("ok\n", 0)
+
+	// Issue comment final (link al PR).
+	env.ExpectGh(`^issue comment 42 --body-file`).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("execute", "--validators", "codex,codex,gemini", "42")
+	harness.AssertContains(t, out, "Executed")
+	// "esperando validadores (3/3)…" es prueba de que los 3 disparos
+	// llegaron al wait y completaron antes del retorno.
+	harness.AssertContains(t, out, "esperando validadores (3/3)")
+
+	inv := env.Invocations()
+	if codexCalls := inv.For("codex"); len(codexCalls) != 2 {
+		t.Fatalf("expected 2 codex calls (instance 1+2), got %d", len(codexCalls))
+	}
+	if geminiCalls := inv.For("gemini"); len(geminiCalls) != 1 {
+		t.Fatalf("expected 1 gemini call, got %d", len(geminiCalls))
+	}
+	if prComments := inv.FindCalls("gh", "pr", "comment", "--body-file"); len(prComments) != 3 {
+		t.Fatalf("expected 3 PR comment calls (one per validator), got %d", len(prComments))
+	}
+}
+
 // TestExecute_IssueNotStatusPlan_Exit3: issue sin status:plan (está en idea) → exit 3.
 func TestExecute_IssueNotStatusPlan_Exit3(t *testing.T) {
 	env := setupExecuteEnv(t)
