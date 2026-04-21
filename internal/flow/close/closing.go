@@ -91,6 +91,10 @@ type Opts struct {
 	Stdout     io.Writer
 	Stderr     io.Writer
 	OnProgress func(string)
+	// KeepBranch omite el --delete-branch del merge y el cleanup del
+	// worktree asociado. Default false: tras mergear, che close borra la
+	// branch remota/local y remueve el worktree para dejar el repo limpio.
+	KeepBranch bool
 }
 
 // PullRequest modela el subset de `gh pr view --json ...` que usamos.
@@ -294,6 +298,7 @@ func hasBlockingLabel(p validate.PullRequest) bool {
 //   - Cleanup del worktree solo si fue creado por este run (reusado: dejar).
 func Run(prRef string, opts Opts) ExitCode {
 	stdout, stderr := opts.Stdout, opts.Stderr
+	keepBranch := opts.KeepBranch
 	progress := opts.OnProgress
 	if progress == nil {
 		progress = func(string) {}
@@ -353,17 +358,25 @@ func Run(prRef string, opts Opts) ExitCode {
 	var (
 		wt           *execute.Worktree
 		wtOwned      bool // true si lo creamos en este run (cleanup al final)
+		mergedOK     bool // true tras retorno exitoso de mergePR
 		lastProblems []string
 	)
 
+	// Cleanup del worktree. Corre en dos casos:
+	//   - (mergedOK && !keepBranch): happy path, tras mergear queremos dejar
+	//     el repo limpio borrando el worktree asociado a la head branch.
+	//   - wtOwned: lo creamos en este run (ej. fix loop); aunque falle el
+	//     flow, no dejamos residuo.
 	defer func() {
-		if wt != nil && wtOwned {
-			wtCtx, wtCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			if err := wt.Cleanup(wtCtx, repoRoot, false); err != nil {
-				fmt.Fprintf(stderr, "warning: cleanup local parcial: %v — revisá `git worktree list` y `git branch` para limpiar a mano\n", err)
-			}
-			wtCancel()
+		if wt == nil {
+			return
 		}
+		if !((mergedOK && !keepBranch) || wtOwned) {
+			return
+		}
+		wtCtx, wtCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer wtCancel()
+		cleanupWorktree(wtCtx, stderr, repoRoot, wt)
 	}()
 
 	issueNum := firstClosingIssue(pr)
@@ -427,10 +440,38 @@ func Run(prRef string, opts Opts) ExitCode {
 		}
 	}
 
+	// Si vamos a borrar la branch tras mergear, ubicar el worktree asociado
+	// ahora (si el fix loop no lo hizo ya). Necesitamos conocerlo para que
+	// el defer limpie tras el retorno exitoso.
+	if wt == nil && !keepBranch {
+		if p, _ := findWorktreePathByBranch(repoRoot, pr.HeadBranch); p != "" {
+			wt = &execute.Worktree{Path: p, Branch: pr.HeadBranch}
+			wtOwned = false
+		}
+	}
+
+	// Snapshot del remote antes del merge para distinguir "lo borramos"
+	// de "ya no estaba" (auto-delete de GitHub) tras un merge --delete-branch.
+	preRemoteMissing, preRemoteKnown := false, false
+	if !keepBranch {
+		exists, known := remoteBranchExists(repoRoot, pr.HeadBranch)
+		preRemoteMissing = known && !exists
+		preRemoteKnown = known
+	}
+
 	progress(fmt.Sprintf("mergeando PR #%d con merge commit…", pr.Number))
-	if err := mergePR(prRef); err != nil {
+	if err := mergePR(prRef, keepBranch); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
+	}
+	mergedOK = true
+
+	if keepBranch {
+		fmt.Fprintf(stdout, "Keeping branch %s (--keep-branch)\n", pr.HeadBranch)
+	} else if preRemoteKnown && preRemoteMissing {
+		fmt.Fprintf(stdout, "Branch %s already removed\n", pr.HeadBranch)
+	} else {
+		fmt.Fprintf(stdout, "Deleted branch %s\n", pr.HeadBranch)
 	}
 
 	// Cerrar issues asociados. Después del merge, los que tenían "closes #N"
@@ -1059,13 +1100,28 @@ func prReady(ref string) error {
 
 // mergePR mergea el PR con merge commit (--merge). No usamos --auto porque
 // ya chequeamos CI antes; --auto suma latencia innecesaria.
-func mergePR(ref string) error {
-	cmd := exec.Command("gh", "pr", "merge", ref, "--merge")
+//
+// Si keepBranch=false (default), agrega --delete-branch para que gh borre
+// la branch remota y local en el mismo paso. Si la local está checkouteada
+// en un worktree activo, gh emite un warning pero no falla — el cleanup
+// del worktree post-merge se encarga del residual.
+func mergePR(ref string, keepBranch bool) error {
+	args := mergePRArgs(ref, keepBranch)
+	cmd := exec.Command("gh", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("gh pr merge: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// mergePRArgs construye los args de gh pr merge. Extraído para testabilidad.
+func mergePRArgs(ref string, keepBranch bool) []string {
+	args := []string{"pr", "merge", ref, "--merge"}
+	if !keepBranch {
+		args = append(args, "--delete-branch")
+	}
+	return args
 }
 
 // issueClose cierra un issue (gh issue close). Idempotente: si ya está
@@ -1089,6 +1145,89 @@ func runGit(repoRoot string, args ...string) error {
 		return fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// runGitCtx corre `git -C repoRoot args...` con contexto para el cleanup
+// (evita colgarse si un remove queda zombi). Análogo a runGit pero cancela
+// el subproceso si ctx vence.
+func runGitCtx(ctx context.Context, repoRoot string, args ...string) error {
+	full := append([]string{"-C", repoRoot}, args...)
+	cmd := exec.CommandContext(ctx, "git", full...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// cleanupWorktree remueve el worktree asociado al PR mergeado y borra la
+// branch local residual. Todo error acá es post-merge: emitimos warning a
+// stderr y seguimos — el merge ya ocurrió.
+//
+// Caso especial: si el worktree coincide con el cwd del flujo (repoRoot)
+// no podemos hacer `git worktree remove` sin invalidar nuestra propia cwd.
+// En ese caso hacemos detach HEAD + branch -D para liberar la branch, y
+// dejamos el directorio al usuario con un aviso.
+func cleanupWorktree(ctx context.Context, stderr io.Writer, repoRoot string, wt *execute.Worktree) {
+	if wt == nil {
+		return
+	}
+	if samePath(repoRoot, wt.Path) {
+		fmt.Fprintf(stderr, "warning: estás parado en el worktree del PR (%s) — detacho HEAD y borro la branch local, pero el worktree queda intacto. Movete a otro directorio y corré `git worktree remove %s` para removerlo.\n", wt.Path, wt.Path)
+		if err := runGitCtx(ctx, wt.Path, "checkout", "--detach", "HEAD"); err != nil {
+			fmt.Fprintf(stderr, "warning: detach HEAD falló: %v\n", err)
+			return
+		}
+		if err := runGitCtx(ctx, repoRoot, "branch", "-D", wt.Branch); err != nil && !looksLikeMissingBranch(err) {
+			fmt.Fprintf(stderr, "warning: branch -D %s: %v\n", wt.Branch, err)
+		}
+		return
+	}
+	if err := wt.Cleanup(ctx, repoRoot, false); err != nil {
+		fmt.Fprintf(stderr, "warning: cleanup local parcial: %v — revisá `git worktree list` y `git branch` para limpiar a mano\n", err)
+	}
+}
+
+// samePath compara dos paths canonicalizándolos (resuelve symlinks para
+// evitar false negatives entre /var y /private/var en macOS).
+func samePath(a, b string) bool {
+	ca, _ := canonPath(a)
+	cb, _ := canonPath(b)
+	return ca == cb
+}
+
+// looksLikeMissingBranch detecta el caso en que `git branch -D` falla
+// porque la branch ya no existe. Duplica la lógica de
+// execute.isMissingBranchErr (no exportada) para no cruzar el boundary
+// de paquetes.
+func looksLikeMissingBranch(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := err.Error()
+	return strings.Contains(m, "not found") || strings.Contains(m, "No such branch")
+}
+
+// remoteBranchExists consulta si refs/heads/<branch> existe en origin.
+// Devuelve (exists, known): known=false si no pudimos determinarlo (red,
+// auth, timeout) — el caller debe interpretarlo como "no sabemos".
+//
+// Usado pre-merge para distinguir "lo borró che" de "ya estaba borrado"
+// (auto-delete de GitHub). Best-effort: 5s de timeout con
+// GIT_TERMINAL_PROMPT=0 para no colgarse esperando credenciales.
+func remoteBranchExists(repoRoot, branch string) (exists bool, known bool) {
+	if os.Getenv("CHE_CLOSE_SKIP_REMOTE_CHECK") == "1" {
+		return false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", repoRoot, "ls-remote", "--heads", "origin", branch)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := cmd.Output()
+	if err != nil || ctx.Err() != nil {
+		return false, false
+	}
+	return len(strings.TrimSpace(string(out))) > 0, true
 }
 
 // waitCIStable pollea `gh pr checks` hasta que el CI deje de estar pending

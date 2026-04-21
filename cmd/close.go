@@ -8,6 +8,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var closeKeepBranch bool
+
 var closeCmd = &cobra.Command{
 	Use:   "close <pr-ref>",
 	Short: "cierra un PR: lo pasa a ready si está draft, arregla conflictos/CI con opus, mergea y cierra el issue",
@@ -21,7 +23,9 @@ var closeCmd = &cobra.Command{
      commit+push y close espera a que CI re-evalúe.
   4. Repite hasta 3 intentos totales. Si persisten problemas, sale con
      exit 2 (retry) sin mergear.
-  5. Si todo verde, mergea con merge commit (gh pr merge --merge).
+  5. Si todo verde, mergea con merge commit (gh pr merge --merge) y borra
+     la branch remota + local (--delete-branch). El worktree asociado se
+     remueve para dejar el repo limpio. Usá --keep-branch para opt-out.
   6. Cierra los issues asociados vía "Closes #N" del PR y les aplica la
      transición de labels status:executed → status:closed.
 
@@ -43,8 +47,9 @@ No hay flag --agent: close usa opus (claude) por diseño.`,
 			os.Exit(int(closing.ExitSemantic))
 		}
 		code := closing.Run(args[0], closing.Opts{
-			Stdout: cmd.OutOrStdout(),
-			Stderr: cmd.ErrOrStderr(),
+			Stdout:     cmd.OutOrStdout(),
+			Stderr:     cmd.ErrOrStderr(),
+			KeepBranch: closeKeepBranch,
 		})
 		if code != closing.ExitOK {
 			cmd.SilenceUsage = true
@@ -56,5 +61,7 @@ No hay flag --agent: close usa opus (claude) por diseño.`,
 }
 
 func init() {
+	closeCmd.Flags().BoolVar(&closeKeepBranch, "keep-branch", false,
+		"no eliminar la branch remota/local ni el worktree tras el merge")
 	rootCmd.AddCommand(closeCmd)
 }

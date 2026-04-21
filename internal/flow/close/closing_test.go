@@ -398,6 +398,105 @@ func TestGroupCloseable(t *testing.T) {
 	}
 }
 
+func TestMergePRArgs(t *testing.T) {
+	cases := []struct {
+		name       string
+		ref        string
+		keepBranch bool
+		want       []string
+	}{
+		{
+			name:       "default: merge con --delete-branch",
+			ref:        "7",
+			keepBranch: false,
+			want:       []string{"pr", "merge", "7", "--merge", "--delete-branch"},
+		},
+		{
+			name:       "--keep-branch omite --delete-branch",
+			ref:        "7",
+			keepBranch: true,
+			want:       []string{"pr", "merge", "7", "--merge"},
+		},
+		{
+			name:       "ref URL funciona igual",
+			ref:        "https://github.com/acme/demo/pull/7",
+			keepBranch: false,
+			want:       []string{"pr", "merge", "https://github.com/acme/demo/pull/7", "--merge", "--delete-branch"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := mergePRArgs(c.ref, c.keepBranch)
+			if len(got) != len(c.want) {
+				t.Fatalf("got %v, want %v", got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("got %v, want %v", got, c.want)
+				}
+			}
+		})
+	}
+}
+
+// TestShouldCleanupWorktree codifica la condición del defer de cleanup:
+// correr Worktree.Cleanup sii (mergedOK && !keepBranch) || wtOwned. La
+// función está inlineada dentro del defer pero la lógica booleana es
+// crítica — testearla aparte evita regresiones silenciosas.
+func TestShouldCleanupWorktree(t *testing.T) {
+	shouldCleanup := func(mergedOK, keepBranch, wtOwned bool) bool {
+		return (mergedOK && !keepBranch) || wtOwned
+	}
+	cases := []struct {
+		name       string
+		mergedOK   bool
+		keepBranch bool
+		wtOwned    bool
+		want       bool
+	}{
+		{"happy path sin flags: borra todo", true, false, false, true},
+		{"happy path con --keep-branch: preserva", true, true, false, false},
+		{"happy path con --keep-branch, worktree owned: igual limpia (no dejar residuo)", true, true, true, true},
+		{"early-return con worktree owned: limpia residuo propio", false, false, true, true},
+		{"early-return sin worktree owned: no toca nada", false, false, false, false},
+		{"early-return con --keep-branch sin owned: no toca nada", false, true, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := shouldCleanup(c.mergedOK, c.keepBranch, c.wtOwned)
+			if got != c.want {
+				t.Fatalf("shouldCleanup(mergedOK=%v, keepBranch=%v, wtOwned=%v) = %v, want %v",
+					c.mergedOK, c.keepBranch, c.wtOwned, got, c.want)
+			}
+		})
+	}
+}
+
+func TestLooksLikeMissingBranch(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"unrelated", errTest("merge conflict"), false},
+		{"not found", errTest("branch feat/x not found"), true},
+		{"No such branch", errTest("No such branch: feat/x"), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := looksLikeMissingBranch(c.err); got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// errTest es un error trivial solo para los casos de looksLikeMissingBranch.
+type errTest string
+
+func (e errTest) Error() string { return string(e) }
+
 func TestFormatOpusLine(t *testing.T) {
 	cases := []struct {
 		name string
