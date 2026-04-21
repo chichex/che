@@ -2,10 +2,10 @@ package cmd
 
 import (
 	"fmt"
-	"io"
 	"os/exec"
 	"strings"
 
+	"github.com/chichex/che/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -17,7 +17,8 @@ estén instalados, que gh esté autenticado, y que el working dir sea un repo
 con remote a GitHub. Devuelve exit 0 si todo está OK, o 1 si falta algo
 mandatory.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runDoctor(cmd.OutOrStdout())
+		log := output.New(output.NewWriterSink(cmd.OutOrStdout()))
+		return runDoctor(log)
 	},
 }
 
@@ -32,7 +33,7 @@ type checkResult struct {
 	detail   string
 }
 
-func runDoctor(out io.Writer) error {
+func runDoctor(log *output.Logger) error {
 	results := []checkResult{
 		checkBinaryResponds("git", "git"),
 		checkGitHubRemote(),
@@ -45,20 +46,16 @@ func runDoctor(out io.Writer) error {
 
 	failed := 0
 	for _, r := range results {
-		symbol := "✓"
-		if !r.ok {
-			if r.optional {
-				symbol = "⚠"
-			} else {
-				symbol = "✗"
-				failed++
-			}
+		fields := output.F{Detail: r.detail}
+		switch {
+		case r.ok:
+			log.Success(r.label, fields)
+		case r.optional:
+			log.Warn(r.label, fields)
+		default:
+			log.Error(r.label, fields)
+			failed++
 		}
-		line := fmt.Sprintf("%s %s", symbol, r.label)
-		if r.detail != "" {
-			line += " — " + r.detail
-		}
-		fmt.Fprintln(out, line)
 	}
 
 	if failed > 0 {
