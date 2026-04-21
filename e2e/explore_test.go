@@ -62,25 +62,88 @@ func TestExplore_IssueViewFails_Exit2(t *testing.T) {
 	env.Invocations().AssertNotCalled(t, "claude")
 }
 
-// TestExplore_IssueMissingCtPlanLabel_Exit3: issue fetched OK but doesn't
-// carry ct:plan → exit 3, no claude call, no state mutation.
-func TestExplore_IssueMissingCtPlanLabel_Exit3(t *testing.T) {
+// TestExplore_IssueMissingCtPlan_ClassifiesAndContinues: issue fetched OK
+// pero sin ct:plan → explore lo clasifica con el LLM (mismo prompt que
+// `che idea`), aplica los labels del pipeline (ct:plan, status:idea; type/
+// size ya estaban en la fixture) y continúa el flujo normal hasta el post
+// de comentario + transición a status:plan. El LLM de clasificación y el
+// de exploración se distinguen por regex sobre el prompt ("clasificador de
+// ideas" vs "ingeniero senior").
+func TestExplore_IssueMissingCtPlan_ClassifiesAndContinues(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 99`).RespondStdoutFromFixture("explore/gh_issue_view_without_ctplan.json", 0)
+	// 1) clasificador — mismo prompt que `che idea`.
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`clasificador de ideas`).
+		RespondStdoutFromFixture("idea/sonnet_single.json", 0)
+	// 2) explorer — prompt distinto.
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectGh(`^issue comment 99`).RespondStdout("https://github.com/acme/demo/issues/99#issuecomment-1\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 99 `).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("explore", "--validators", "none", "99")
+	harness.AssertContains(t, out, "Explored")
+
+	inv := env.Invocations()
+	// Ambos prompts deben haberse invocado (clasificador + explorador).
+	if n := len(inv.For("claude")); n != 2 {
+		t.Fatalf("expected 2 claude calls (classifier + explorer), got %d", n)
+	}
+	// El primer `gh issue edit` debe ser la aplicación de labels de
+	// reclasificación (agrega ct:plan + status:idea); la fixture ya tiene
+	// type:fix y size:s, así que esos NO se re-agregan.
+	edits := inv.FindCalls("gh", "issue", "edit", "99")
+	if len(edits) < 2 {
+		t.Fatalf("expected at least 2 gh issue edit calls (reclassify + status transition), got %d", len(edits))
+	}
+	edits[0].AssertArgsContain(t, "--add-label", "ct:plan", "--add-label", "status:idea")
+	// No debería re-agregar type:* o size:* porque ya estaban en la fixture.
+	reclassArgs := strings.Join(edits[0].Args, " ")
+	if strings.Contains(reclassArgs, "type:feature") || strings.Contains(reclassArgs, "size:m") {
+		t.Fatalf("reclassify edit debería preservar type/size existentes; args=%v", edits[0].Args)
+	}
+	// La última edit es la transición a status:plan.
+	edits[len(edits)-1].AssertArgsContain(t,
+		"--remove-label", "status:idea",
+		"--add-label", "status:plan")
+}
+
+// TestExplore_IssueMissingCtPlan_ClassifierFails_Exit2: si el LLM falla o
+// devuelve JSON inválido, explore aborta con exit 2 y NO aplica labels
+// parciales. El issue queda como estaba antes.
+func TestExplore_IssueMissingCtPlan_ClassifierFails_Exit2(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 99`).RespondStdoutFromFixture("explore/gh_issue_view_without_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`clasificador de ideas`).
+		RespondExitWithError(1, "network blip\n")
 
 	r := env.Run("explore", "99")
-	if r.ExitCode != 3 {
-		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	if r.ExitCode != 2 {
+		t.Fatalf("expected exit 2, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
-	harness.AssertContains(t, r.Stderr, "ct:plan")
-	env.Invocations().AssertNotCalled(t, "claude")
-	if edits := env.Invocations().FindCalls("gh", "issue", "edit"); len(edits) > 0 {
-		t.Fatalf("unexpected gh issue edit calls: %+v", edits)
+
+	inv := env.Invocations()
+	// El explorador no se debería haber invocado — cortamos antes.
+	for _, c := range inv.For("claude") {
+		joined := strings.Join(c.Args, " ")
+		if strings.Contains(joined, "ingeniero senior") {
+			t.Fatalf("explorer prompt should not be invoked when classifier fails; got call with args=%v", c.Args)
+		}
 	}
-	if comments := env.Invocations().FindCalls("gh", "issue", "comment", "--body-file"); len(comments) > 0 {
-		t.Fatalf("unexpected gh issue comment calls: %+v", comments)
+	// Nada de labels parciales aplicados al issue.
+	if edits := inv.FindCalls("gh", "issue", "edit", "99"); len(edits) > 0 {
+		t.Fatalf("expected no gh issue edit on classifier failure, got %+v", edits)
+	}
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) > 0 {
+		t.Fatalf("expected no gh issue comment on classifier failure, got %+v", comments)
 	}
 }
 

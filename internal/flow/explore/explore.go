@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/chichex/che/internal/comments"
+	"github.com/chichex/che/internal/flow/idea"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
 	"github.com/chichex/che/internal/plan"
@@ -573,6 +574,17 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitRetry
 	}
 
+	// Issues creados a mano (no por `che idea`) no tienen ct:plan. Antes de
+	// gatear, intentamos clasificarlos e inyectarles los labels. Saltamos
+	// el reclasificador si el issue está cerrado — el gate lo va a rechazar
+	// igual y no queremos gastar tokens en algo que no va a avanzar.
+	if issue.State == "OPEN" && !issue.HasLabel(labels.CtPlan) {
+		if err := reclassifyIssue(issueRef, issue, log); err != nil {
+			log.Error("reclasificación del issue falló", output.F{Issue: issue.Number, Cause: err})
+			return ExitRetry
+		}
+	}
+
 	if err := gateBasic(issue); err != nil {
 		log.Error("gate failed", output.F{Issue: issue.Number, Cause: err})
 		return ExitSemantic
@@ -922,6 +934,83 @@ func fetchIssue(ref string) (*Issue, error) {
 		return nil, fmt.Errorf("parse gh issue view output: %w", err)
 	}
 	return &issue, nil
+}
+
+// reclassifyIssue clasifica un issue que no fue creado por `che idea` (no
+// tiene ct:plan) delegando en idea.Classify, y le aplica los labels de
+// pipeline (ct:plan + status:idea + type/size inferidos). Si el issue ya
+// tenía type:* o size:* manualmente, los preserva y solo agrega los que
+// falten — respetamos lo que el humano decidió a mano.
+//
+// Todos los labels se agregan en una sola llamada a `gh issue edit` para
+// que GitHub los aplique de forma atómica: si falla, el issue queda como
+// estaba (sin labels parciales). Actualiza issue.Labels in-place para que
+// el resto del flow vea los labels nuevos sin re-fetchear.
+func reclassifyIssue(ref string, issue *Issue, log *output.Logger) error {
+	log.Info("issue sin ct:plan; clasificando con el LLM antes de explorar",
+		output.F{Issue: issue.Number})
+
+	text := strings.TrimSpace(issue.Title)
+	if body := strings.TrimSpace(issue.Body); body != "" {
+		if text != "" {
+			text += "\n\n"
+		}
+		text += body
+	}
+
+	resp, err := idea.Classify(text, log)
+	if err != nil {
+		return fmt.Errorf("clasificación: %w", err)
+	}
+	if len(resp.Items) == 0 {
+		return fmt.Errorf("clasificación: el LLM no devolvió items")
+	}
+	it := resp.Items[0]
+
+	// Si el issue ya tiene un type:* o size:*, lo respetamos. La
+	// clasificación del LLM es un fallback para issues sin nada.
+	hasType, hasSize := false, false
+	for _, l := range issue.Labels {
+		if strings.HasPrefix(l.Name, "type:") {
+			hasType = true
+		}
+		if strings.HasPrefix(l.Name, "size:") {
+			hasSize = true
+		}
+	}
+
+	toAdd := []string{labels.CtPlan, labels.StatusIdea}
+	if !hasType {
+		toAdd = append(toAdd, "type:"+it.Type)
+	}
+	if !hasSize {
+		toAdd = append(toAdd, "size:"+strings.ToLower(it.Size))
+	}
+
+	for _, l := range toAdd {
+		log.Step("asegurando label", output.F{Labels: []string{l}})
+		if err := labels.Ensure(l); err != nil {
+			return fmt.Errorf("ensuring label %s: %w", l, err)
+		}
+	}
+
+	args := []string{"issue", "edit", ref}
+	for _, l := range toAdd {
+		args = append(args, "--add-label", l)
+	}
+	out, err := exec.Command("gh", args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gh issue edit: %s", strings.TrimSpace(string(out)))
+	}
+
+	for _, l := range toAdd {
+		issue.Labels = append(issue.Labels, Label{Name: l})
+	}
+	log.Success("issue clasificado y etiquetado", output.F{
+		Issue:  issue.Number,
+		Labels: toAdd,
+	})
+	return nil
 }
 
 // gateBasic valida las precondiciones mínimas (open + ct:plan). La decisión
