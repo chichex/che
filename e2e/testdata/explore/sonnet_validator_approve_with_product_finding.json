@@ -1,0 +1,15 @@
+{
+  "verdict": "approve",
+  "summary": "El plan está sólido pero hay una decisión de producto irreducible que conviene bajar antes de cerrar.",
+  "findings": [
+    {
+      "severity": "blocker",
+      "area": "questions",
+      "where": "questions[0]",
+      "issue": "¿Política de timeout del escape humano — cancelar automáticamente vs. esperar indefinidamente? Es decisión de producto.",
+      "suggestion": "",
+      "needs_human": true,
+      "kind": "product"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "summary": "Agregar comando che explore; deja una pregunta product blocker abierta para el humano.",
+  "questions": [
+    {
+      "q": "¿El flow cancela automáticamente tras 3 iteraciones sin respuesta humana, o espera indefinidamente?",
+      "why": "Decisión de producto irreducible — afecta UX de ramas abandonadas.",
+      "blocker": true,
+      "kind": "product"
+    }
+  ],
+  "risks": [
+    {
+      "risk": "El modelo alucina paths no factibles dado el codebase real.",
+      "likelihood": "medium",
+      "impact": "medium",
+      "mitigation": "Pasarle al prompt extractos de archivos relevantes, no solo el body del issue."
+    }
+  ],
+  "paths": [
+    {
+      "title": "Comando nuevo che explore",
+      "sketch": "Crear cmd/explore.go + internal/flow/explore/ espejando idea.",
+      "pros": ["Consistente con el embudo"],
+      "cons": ["Duplica plomería de idea"],
+      "effort": "M",
+      "recommended": true
+    },
+    {
+      "title": "Extender che idea con --explore",
+      "sketch": "Agregar flag a idea que cambia modo.",
+      "pros": ["Menos archivos nuevos"],
+      "cons": ["Mezcla flows"],
+      "effort": "S",
+      "recommended": false
+    }
+  ],
+  "next_step": "Esperar decisión de producto sobre timeout antes de implementar."
+}

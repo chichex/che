@@ -497,6 +497,25 @@ func hasHumanGaps(results []validatorResult) bool {
 	return false
 }
 
+// effectiveVerdict devuelve el verdict que el flow realmente usa para decidir
+// escalamiento y labels, no el verdict crudo del validator. Mantiene coherencia
+// entre (a) hasHumanGaps, (b) header del comment posteado a GitHub, (c) resumen
+// en stdout. Ver project_explore_verdict_consolidation.md.
+func effectiveVerdict(resp *ValidatorResponse) string {
+	if resp == nil {
+		return ""
+	}
+	for _, f := range resp.Findings {
+		if f.escalatesToHuman() {
+			return "needs_human"
+		}
+	}
+	if resp.Verdict == "approve" && len(resp.Findings) == 0 {
+		return "approve"
+	}
+	return "changes_requested"
+}
+
 // MaxIterations es el tope de iteraciones del loop humano antes de cortar
 // con error. 3 es el umbral del design — si después de 3 rondas los
 // validadores siguen pidiendo input humano, la conversación requiere
@@ -599,7 +618,7 @@ func runNew(issueRef string, issue *Issue, opts Opts, progress func(string), std
 	if len(opts.Validators) > 0 {
 		progress(fmt.Sprintf("corriendo %d validador(es) en paralelo…", len(opts.Validators)))
 		validationResults = runValidatorsParallel(issue, resp, opts.Validators, progress)
-		if err := validateValidatorResults(validationResults); err != nil {
+		if err := validateAndNormalizeValidatorResults(validationResults, stderr); err != nil {
 			fmt.Fprintf(stderr, "error: validator response: %v\n", err)
 			return ExitSemantic
 		}
@@ -654,7 +673,7 @@ func runResume(issueRef string, issue *Issue, opts Opts, progress func(string), 
 
 	progress(fmt.Sprintf("corriendo %d validador(es) con las respuestas humanas…", len(validators)))
 	results := runValidatorsResumeParallel(issue, state, validators, progress)
-	if err := validateValidatorResults(results); err != nil {
+	if err := validateAndNormalizeValidatorResults(results, stderr); err != nil {
 		fmt.Fprintf(stderr, "error: validator response: %v\n", err)
 		return ExitSemantic
 	}
@@ -1302,12 +1321,19 @@ func parseValidatorResponse(raw string) (*ValidatorResponse, error) {
 	return &r, nil
 }
 
-// validateValidatorResults chequea que cada response cumpla el schema mínimo
-// (verdict en enum, severities en enum, issue no vacío). Si alguno es
-// inválido devuelve error; otros errores de red/crash (Err != nil) se
-// reportan con contexto pero no cortan el flow acá — los posteamos como
+// validateAndNormalizeValidatorResults chequea que cada response cumpla el
+// schema mínimo (verdict en enum, severities en enum, issue no vacío). Si
+// alguno es inválido devuelve error; otros errores de red/crash (Err != nil)
+// se reportan con contexto pero no cortan el flow acá — los posteamos como
 // "error: ..." en el comment y el usuario decide.
-func validateValidatorResults(results []validatorResult) error {
+//
+// Después del pase de schema hace un segundo pase de normalización: si un
+// validator emitió verdict=needs_human sin ningún finding que escale a
+// humano (kind=product needs_human=true), degrada el verdict a
+// changes_requested in-place. Esto evita que stdout/comments posteados a
+// GitHub contradigan la decisión real del flow (que igual no escalaría por
+// hasHumanGaps). La degradación queda anotada en stderr.
+func validateAndNormalizeValidatorResults(results []validatorResult, stderr io.Writer) error {
 	for _, r := range results {
 		if r.Err != nil || r.Response == nil {
 			continue // error en ejecución, no de schema
@@ -1327,6 +1353,29 @@ func validateValidatorResults(results []validatorResult) error {
 			if strings.TrimSpace(f.Issue) == "" {
 				return fmt.Errorf("%s#%d: finding %d issue is empty",
 					r.Validator.Agent, r.Validator.Instance, i)
+			}
+		}
+	}
+	// Segundo pase: normalización de needs_human sin finding product.
+	for _, r := range results {
+		if r.Response == nil {
+			continue
+		}
+		if r.Response.Verdict != "needs_human" {
+			continue
+		}
+		hasHuman := false
+		for _, f := range r.Response.Findings {
+			if f.escalatesToHuman() {
+				hasHuman = true
+				break
+			}
+		}
+		if !hasHuman {
+			r.Response.Verdict = "changes_requested"
+			if stderr != nil {
+				fmt.Fprintf(stderr, "warning: %s#%d reported verdict=needs_human without product finding; degrading to changes_requested\n",
+					r.Validator.Agent, r.Validator.Instance)
 			}
 		}
 	}
@@ -1365,6 +1414,19 @@ IMPORTANTE — Clasificación de questions del ejecutor:
 Para cada pregunta en questions[] del plan, clasificala en tu review:
 
 - Si kind="product" y la pregunta es legítima (ambigüedad de dominio/UX/negocio que ni el código ni el body resuelven): aceptala. Opcionalmente marcá needs_human=true en un finding si pensás que quedó mal formulada.
+- Si la pregunta es kind="product" blocker=true y la validaste como legítima (es ambigüedad de producto real, ni el código ni el body la resuelven), TENÉS QUE emitir un finding espejo. No alcanza con mencionarla en prosa ni con poner verdict=needs_human sin finding — el flow no lee tu prosa, solo los findings. El finding espejo tiene este shape exacto:
+    * severity="blocker"
+    * area="questions"
+    * where="questions[<índice o texto>]"
+    * kind="product"
+    * needs_human=true
+    * issue: reformulá la pregunta del ejecutor con tus palabras si aporta claridad, o citala tal cual.
+    * suggestion: vacío, o una nota sobre por qué es irreducible.
+  Ejemplo: ejecutor preguntó "¿El flow cancela automáticamente o espera siempre al humano?" con blocker=true kind=product. Finding espejo:
+    {"severity": "blocker", "area": "questions", "where": "questions[0]", "kind": "product", "needs_human": true,
+     "issue": "Política de timeout del escape humano — cancelar automáticamente vs. esperar indefinidamente es decisión de producto.",
+     "suggestion": ""}
+- REGLA NEGATIVA DURA: NUNCA emitas verdict="needs_human" sin al menos un finding con kind="product" needs_human=true. Si no encontrás ninguna question product legítima ni ningún gap product propio, el verdict correcto es "approve" o "changes_requested" — nunca "needs_human" a secas. Un verdict=needs_human con findings=[] o solo findings technical/documented es un output inválido que el flow rechaza (degrada a changes_requested).
 - Si kind="technical" o kind="documented" (o sin kind pero claramente cae en una de esas dos categorías): ES UN BUG DEL EJECUTOR. Generá un finding con:
     * severity="minor"
     * area="questions"
@@ -1408,6 +1470,7 @@ Devolvé EXCLUSIVAMENTE un objeto JSON con este shape — sin texto antes ni des
 Reglas:
 - Si el plan está bien, verdict=approve y findings=[].
 - needs_human=true requiere kind=product Y que la respuesta dependa de decisión del dueño del producto (ej: "¿idempotente o no?", "¿timeout o esperar para siempre?"). Cualquier otro caso debe ir con needs_human=false.
+- needs_human como verdict GLOBAL requiere al menos un finding con kind=product needs_human=true. Sin ese finding, usá approve (si no hay nada que arreglar) o changes_requested (si hay findings technical/documented). Decir "el plan necesita input humano" en el summary sin sustentarlo con un finding product es autocontradictorio.
 - Un finding kind=product needs_human=true escala el verdict global a "needs_human". Un finding technical o documented NUNCA escala a "needs_human" aunque sea blocker.
 - No inventes gaps — si el plan cubre un riesgo aunque sea brevemente, no lo marques como faltante.
 - Si el ejecutor NO listó questions y sus assumptions cubren las decisiones técnicas con justificación razonable, eso no es un gap: es lo correcto.
@@ -1447,7 +1510,7 @@ func renderValidatorComment(r validatorResult, iter int) string {
 	}
 
 	resp := r.Response
-	sb.WriteString(fmt.Sprintf("## [validator:%s#%d · iter:%d · %s]\n\n", v.Agent, v.Instance, iter, resp.Verdict))
+	sb.WriteString(fmt.Sprintf("## [validator:%s#%d · iter:%d · %s]\n\n", v.Agent, v.Instance, iter, effectiveVerdict(resp)))
 	sb.WriteString("**Resumen:** " + resp.Summary + "\n\n")
 
 	if len(resp.Findings) == 0 {
@@ -1846,14 +1909,15 @@ func renderValidationReport(results []validatorResult, humanGaps bool) string {
 			continue
 		}
 		mark := "✓"
-		switch r.Response.Verdict {
+		verdict := effectiveVerdict(r.Response)
+		switch verdict {
 		case "changes_requested":
 			mark = "⚠"
 		case "needs_human":
 			mark = "🧑"
 		}
 		sb.WriteString(fmt.Sprintf("  %s %s: %s — %s (%d findings)\n",
-			mark, label, r.Response.Verdict, r.Response.Summary, len(r.Response.Findings)))
+			mark, label, verdict, r.Response.Summary, len(r.Response.Findings)))
 	}
 	if humanGaps {
 		sb.WriteString("\n⚠ Hay preguntas que requieren input tuyo. El issue se marcó con status:awaiting-human y se posteó un comment con las preguntas. Contestá en el issue y corré `che explore <ref>` de nuevo — el flow va a detectar tu respuesta, re-validar, y cerrar el plan si queda sin ambigüedades.\n")
