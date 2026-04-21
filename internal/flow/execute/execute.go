@@ -11,7 +11,6 @@
 package execute
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,10 +21,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
+	"github.com/chichex/che/internal/agent"
 	"github.com/chichex/che/internal/comments"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
@@ -52,64 +51,22 @@ const (
 // queremos exit determinista aunque el agente ignore SIGTERM.
 const agentKillGrace = 5 * time.Second
 
-// Agent identifica qué ejecutor usar. Replica el enum de explore para no
-// acoplar los paquetes; cuando se extraiga `internal/flow/common/`, los dos
-// enums migran allá.
-type Agent string
+// Agent es un alias del enum centralizado en internal/agent. Re-exportado
+// para que cmd/execute.go y la TUI sigan escribiendo `execute.Agent`.
+type Agent = agent.Agent
 
 const (
-	AgentOpus   Agent = "opus"
-	AgentCodex  Agent = "codex"
-	AgentGemini Agent = "gemini"
+	AgentOpus   = agent.AgentOpus
+	AgentCodex  = agent.AgentCodex
+	AgentGemini = agent.AgentGemini
 )
 
-const DefaultAgent = AgentOpus
+const DefaultAgent = agent.DefaultAgent
 
-var ValidAgents = []Agent{AgentOpus, AgentCodex, AgentGemini}
+var ValidAgents = agent.ValidAgents
 
-// Binary devuelve el nombre del ejecutable correspondiente al agente.
-func (a Agent) Binary() string {
-	switch a {
-	case AgentOpus:
-		return "claude"
-	case AgentCodex:
-		return "codex"
-	case AgentGemini:
-		return "gemini"
-	}
-	return ""
-}
-
-// InvokeArgs devuelve los args de línea de comando para cada CLI en modo
-// no-interactivo.
-//
-// Para Opus usamos stream-json + --verbose para que cada tool use llegue al
-// harness en tiempo real: con --output-format text, claude no emite nada
-// hasta que termina, y una ejecución de varios minutos aparece como un
-// silencio sospechoso en la TUI. formatOpusLine() parsea los eventos y los
-// traduce a líneas descriptivas ("Edit foo.go", "Bash go test …").
-func (a Agent) InvokeArgs(prompt string) []string {
-	switch a {
-	case AgentOpus:
-		return []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
-	case AgentCodex:
-		return []string{"exec", "--full-auto", prompt}
-	case AgentGemini:
-		return []string{"-p", prompt}
-	}
-	return nil
-}
-
-// ParseAgent normaliza un string a Agent.
-func ParseAgent(s string) (Agent, error) {
-	s = strings.ToLower(strings.TrimSpace(s))
-	for _, a := range ValidAgents {
-		if string(a) == s {
-			return a, nil
-		}
-	}
-	return "", fmt.Errorf("unknown agent %q; valid: opus, codex, gemini", s)
-}
+// ParseAgent delega en internal/agent.
+func ParseAgent(s string) (Agent, error) { return agent.ParseAgent(s) }
 
 // AgentTimeout para llamadas al CLI del agente. execute tiene un default
 // mayor que explore porque generar diff + tool use es típicamente más largo
@@ -159,35 +116,14 @@ type Opts struct {
 	Ctx context.Context
 }
 
-// Validator es una re-declaración del enum de explore para no acoplar los
-// paquetes. Instance permite repetir tipo (codex×2) aunque execute en v1 no
-// lo requiera; queda para futuro.
-type Validator struct {
-	Agent    Agent
-	Instance int
-}
+// Validator es un alias del struct centralizado. Instance permite repetir
+// tipo (codex×2) aunque execute en v1 no lo requiera; queda para futuro.
+type Validator = agent.Validator
 
-// ParseValidators parsea "codex,gemini" o "none".
+// ParseValidators parsea "codex,gemini" o "none". "none" (y string vacío)
+// → nil, lo que desactiva el panel de validadores.
 func ParseValidators(s string) ([]Validator, error) {
-	s = strings.TrimSpace(s)
-	if s == "" || strings.EqualFold(s, "none") {
-		return nil, nil
-	}
-	parts := strings.Split(s, ",")
-	if len(parts) < 1 || len(parts) > 3 {
-		return nil, fmt.Errorf("validators: need 1-3 items (or `none`), got %d", len(parts))
-	}
-	counts := map[Agent]int{}
-	out := make([]Validator, 0, len(parts))
-	for _, p := range parts {
-		a, err := ParseAgent(p)
-		if err != nil {
-			return nil, fmt.Errorf("validators: %w", err)
-		}
-		counts[a]++
-		out = append(out, Validator{Agent: a, Instance: counts[a]})
-	}
-	return out, nil
+	return agent.ParseValidators(s, true /* allowNone */)
 }
 
 // Issue modela el subset del output de `gh issue view --json ...`.
@@ -904,207 +840,65 @@ Título: ` + issue.Title + `
 
 // runAgent invoca al CLI del agente con el prompt construido, corriendo con
 // cwd en el worktree para que cualquier herramienta de file edit afecte ese
-// directorio. Usa StdoutPipe + streaming igual que explore. El parent ctx
-// se compone con el timeout del agente; cualquier cancelación (timeout o
-// señal) mata el process group entero para evitar subprocesos zombies —
-// claude/codex pueden fork-ar tool-use processes (bash, ripgrep, etc.) que
-// si solo matamos al PID directo siguen corriendo sueltos.
-func runAgent(parent context.Context, agent Agent, cwd, prompt string, progress func(string)) error {
-	ctx, cancel := context.WithTimeout(parent, AgentTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, agent.Binary(), agent.InvokeArgs(prompt)...)
-	cmd.Dir = cwd
-	// Setpgid aisla al agente (y su descendencia) en su propio process group;
-	// Cancel custom manda SIGTERM al -pgid en vez de al PID directo, así
-	// matamos el árbol entero. WaitDelay asegura SIGKILL si no termina
-	// después de agentKillGrace.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		pgid, err := syscall.Getpgid(cmd.Process.Pid)
-		if err != nil {
-			return cmd.Process.Signal(syscall.SIGTERM)
-		}
-		return syscall.Kill(-pgid, syscall.SIGTERM)
-	}
-	cmd.WaitDelay = agentKillGrace
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting %s: %w", agent.Binary(), err)
-	}
-
+// directorio. El parent ctx se compone con el timeout del agente; cualquier
+// cancelación (timeout o señal) mata el process group entero (Setpgid + kill
+// al -pgid) para evitar subprocesos zombies — claude/codex pueden fork-ar
+// tool-use processes (bash, ripgrep, etc.) que si solo matamos al PID
+// directo siguen corriendo sueltos. El plumbing concreto vive en
+// internal/agent.Run; acá solo traducimos errores al formato que esperan los
+// tests (mensajes con "timed out after", "exit N:", "cancelado por señal").
+func runAgent(parent context.Context, a Agent, cwd, prompt string, progress func(string)) error {
 	var stdoutFormat func(string) (string, bool)
-	if agent == AgentOpus {
+	if a == AgentOpus {
 		stdoutFormat = formatOpusLine
 	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	var stderrBuf strings.Builder
-	go streamPipe(&wg, stdoutPipe, nil, progress, string(agent)+": ", stdoutFormat)
-	go streamPipe(&wg, stderrPipe, &stderrBuf, progress, string(agent)+" stderr: ", nil)
-	wg.Wait()
-
-	waitErr := cmd.Wait()
+	res, err := agent.Run(a, prompt, agent.RunOpts{
+		Ctx:       parent,
+		Dir:       cwd,
+		Timeout:   AgentTimeout,
+		Format:    agent.OutputStreamJSON,
+		KillGrace: agentKillGrace,
+		OnLine: func(line string) {
+			if progress != nil {
+				progress(string(a) + ": " + line)
+			}
+		},
+		OnStderrLine: func(line string) {
+			if progress != nil {
+				progress(string(a) + " stderr: " + line)
+			}
+		},
+		StreamFormatter: stdoutFormat,
+	})
 	// Cancel por señal del parent: no es "error del agente", es cancelación
-	// del usuario. Devolvemos un error distintivo que el caller traduce a
-	// ExitCancelled tras verificar parent.Err().
-	if parent.Err() != nil {
-		return fmt.Errorf("%s: cancelado por señal", agent)
+	// del usuario. Mensaje distintivo que el caller traduce a ExitCancelled
+	// tras verificar parent.Err().
+	if errors.Is(err, agent.ErrCancelled) {
+		return fmt.Errorf("%s: cancelado por señal", a)
 	}
-	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+	if errors.Is(err, agent.ErrTimeout) {
 		// Incluimos el stderr acumulado cuando lo hay: un timeout puede
 		// venir acompañado de pistas (auth expirado, prompt rechazado,
 		// warnings del CLI) que el usuario necesita ver para distinguir
 		// "el agente trabajó 15 min y no terminó" vs "el agente se colgó
 		// en el segundo 1 porque algo está mal".
-		if se := strings.TrimSpace(stderrBuf.String()); se != "" {
-			return fmt.Errorf("%s timed out after %s; stderr: %s", agent, AgentTimeout, se)
+		if se := strings.TrimSpace(res.Stderr); se != "" {
+			return fmt.Errorf("%s timed out after %s; stderr: %s", a, AgentTimeout, se)
 		}
-		return fmt.Errorf("%s timed out after %s (sin stderr — subí CHE_EXEC_AGENT_TIMEOUT_SECS si el agente necesita más tiempo)", agent, AgentTimeout)
+		return fmt.Errorf("%s timed out after %s (sin stderr — subí CHE_EXEC_AGENT_TIMEOUT_SECS si el agente necesita más tiempo)", a, AgentTimeout)
 	}
-	if waitErr != nil {
-		if ee, ok := waitErr.(*exec.ExitError); ok {
-			return fmt.Errorf("%s exit %d: %s", agent, ee.ExitCode(), strings.TrimSpace(stderrBuf.String()))
-		}
-		return waitErr
+	var ee *agent.ExitError
+	if errors.As(err, &ee) {
+		return fmt.Errorf("%s exit %d: %s", a, ee.ExitCode, ee.Stderr)
 	}
-	return nil
+	return err
 }
 
-// streamPipe lee un pipe y reenvía las líneas al progress con un prefix.
-// Si format != nil, cada línea se pasa por él antes de emitirse: el
-// formatter puede reescribir la línea o pedir que se omita (ok=false).
-// Las líneas se acumulan siempre en acc (si no es nil) sin transformar,
-// para preservar el stderr tal como vino para mensajes de error.
-func streamPipe(wg *sync.WaitGroup, r io.Reader, acc *strings.Builder, progress func(string), prefix string, format func(string) (string, bool)) {
-	defer wg.Done()
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if acc != nil {
-			acc.WriteString(line + "\n")
-		}
-		out := line
-		if format != nil {
-			msg, ok := format(line)
-			if !ok {
-				continue
-			}
-			out = msg
-		}
-		if strings.TrimSpace(out) != "" && progress != nil {
-			progress(prefix + out)
-		}
-	}
-}
-
-// formatOpusLine traduce una línea del stream-json del CLI de claude a un
-// mensaje corto y descriptivo. Devuelve (msg, true) si hay algo que mostrar,
-// o ("", false) para omitir la línea (eventos irrelevantes como tool_result
-// o bloques de texto del asistente, que inundarían la TUI sin aportar info
-// accionable).
-//
-// Si la línea no parsea como JSON (caso típico de los fakes en e2e, que
-// devuelven "ok\n"), se devuelve tal cual vino — así no rompemos los tests
-// que todavía escriben texto plano al stdout del agente.
+// formatOpusLine es un thin wrapper sobre agent.FormatOpusLine con el prefijo
+// de tool que históricamente usa execute (sin prefijo, ej "Edit foo.go"). El
+// test de este paquete lo ejercita directamente.
 func formatOpusLine(line string) (string, bool) {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
-		return "", false
-	}
-	if !strings.HasPrefix(trimmed, "{") {
-		return line, true
-	}
-	var ev struct {
-		Type    string `json:"type"`
-		Subtype string `json:"subtype"`
-		Message struct {
-			Content []struct {
-				Type  string                 `json:"type"`
-				Name  string                 `json:"name"`
-				Input map[string]interface{} `json:"input"`
-			} `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal([]byte(trimmed), &ev); err != nil {
-		return line, true
-	}
-	switch ev.Type {
-	case "system":
-		if ev.Subtype == "init" {
-			return "sesión lista, arrancando…", true
-		}
-	case "assistant":
-		for _, c := range ev.Message.Content {
-			if c.Type == "tool_use" {
-				return describeOpusTool(c.Name, c.Input), true
-			}
-		}
-	case "result":
-		if ev.Subtype == "success" {
-			return "agente terminó OK", true
-		}
-		if ev.Subtype != "" {
-			return "agente terminó (" + ev.Subtype + ")", true
-		}
-	}
-	return "", false
-}
-
-// describeOpusTool arma el detalle que acompaña al nombre de la tool. Para
-// tools que tocan archivos usamos el path; para Bash, el comando truncado;
-// para búsquedas, el patrón. Si no reconocemos la tool, mostramos solo el
-// nombre.
-func describeOpusTool(name string, input map[string]interface{}) string {
-	detail := ""
-	switch name {
-	case "Read", "Write", "Edit", "NotebookEdit":
-		if v, ok := input["file_path"].(string); ok {
-			detail = v
-		}
-	case "Bash":
-		if v, ok := input["command"].(string); ok {
-			detail = truncate(v, 80)
-		}
-	case "Glob", "Grep":
-		if v, ok := input["pattern"].(string); ok {
-			detail = v
-		}
-	case "Task":
-		if v, ok := input["description"].(string); ok {
-			detail = v
-		}
-	case "WebFetch":
-		if v, ok := input["url"].(string); ok {
-			detail = v
-		}
-	}
-	if detail == "" {
-		return name
-	}
-	return name + " " + detail
-}
-
-func truncate(s string, max int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= max {
-		return s
-	}
-	return s[:max-1] + "…"
+	return agent.FormatOpusLine(line, "")
 }
 
 // ---- git ops sobre el worktree ----
@@ -1266,28 +1060,25 @@ func fireValidators(parent context.Context, prURL string, issue *Issue, plan *Co
 				}
 			}()
 			prompt := buildValidatorPrompt(issue, plan)
-			ctx, cancel := context.WithTimeout(parent, AgentTimeout)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, v.Agent.Binary(), v.Agent.InvokeArgs(prompt)...)
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			cmd.Cancel = func() error {
-				if cmd.Process == nil {
-					return nil
-				}
-				pgid, err := syscall.Getpgid(cmd.Process.Pid)
-				if err != nil {
-					return cmd.Process.Signal(syscall.SIGTERM)
-				}
-				return syscall.Kill(-pgid, syscall.SIGTERM)
-			}
-			cmd.WaitDelay = agentKillGrace
-			out, _ := cmd.Output()
+			// Preservamos EXACTAMENTE el formato histórico: los validadores
+			// de execute invocan con el MISMO InvokeArgs que el ejecutor
+			// (stream-json para opus), así que el comment del PR termina
+			// conteniendo los eventos NDJSON cuando el validador es opus.
+			// Cambiar esto acá sería un behavior change — vive como deuda
+			// separada. KillGrace>0 + Dir="" replican el plumbing anterior.
+			res, _ := agent.Run(v.Agent, prompt, agent.RunOpts{
+				Ctx:       parent,
+				Timeout:   AgentTimeout,
+				Format:    agent.OutputStreamJSON,
+				KillGrace: agentKillGrace,
+			})
+			out := res.Stdout
 			// Si el parent se canceló, no tiene sentido pelear con gh para
 			// postear el comment — retornamos y dejamos que el caller siga.
 			if parent.Err() != nil {
 				return
 			}
-			_ = postPRComment(parent, prURL, renderValidatorComment(iter, v, string(out)))
+			_ = postPRComment(parent, prURL, renderValidatorComment(iter, v, out))
 		}()
 	}
 	return done

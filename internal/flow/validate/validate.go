@@ -13,9 +13,8 @@
 package validate
 
 import (
-	"bufio"
-	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -27,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chichex/che/internal/agent"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
 )
@@ -40,13 +40,14 @@ const (
 	ExitSemantic ExitCode = 3 // ref vacío, PR cerrado, validators inválidos
 )
 
-// Agent identifica qué CLI invocar como validador.
-type Agent string
+// Agent es un alias del enum centralizado en internal/agent. Re-exportado
+// para que cmd/validate.go y la TUI sigan escribiendo `validate.Agent`.
+type Agent = agent.Agent
 
 const (
-	AgentOpus   Agent = "opus"
-	AgentCodex  Agent = "codex"
-	AgentGemini Agent = "gemini"
+	AgentOpus   = agent.AgentOpus
+	AgentCodex  = agent.AgentCodex
+	AgentGemini = agent.AgentGemini
 )
 
 // DefaultValidators es el panel por defecto cuando el caller no pasa uno
@@ -54,45 +55,10 @@ const (
 const DefaultValidators = "opus"
 
 // ValidAgents lista los agentes soportados (orden preservado para UI).
-var ValidAgents = []Agent{AgentOpus, AgentCodex, AgentGemini}
+var ValidAgents = agent.ValidAgents
 
-// Binary devuelve el nombre del ejecutable para cada agente.
-func (a Agent) Binary() string {
-	switch a {
-	case AgentOpus:
-		return "claude"
-	case AgentCodex:
-		return "codex"
-	case AgentGemini:
-		return "gemini"
-	}
-	return ""
-}
-
-// InvokeArgs devuelve los args de CLI en modo no-interactivo (mismo mapping
-// que explore/execute — si cambian los flags de los CLIs, hay que tocar los 3).
-func (a Agent) InvokeArgs(prompt string) []string {
-	switch a {
-	case AgentOpus:
-		return []string{"-p", prompt, "--output-format", "text"}
-	case AgentCodex:
-		return []string{"exec", "--full-auto", prompt}
-	case AgentGemini:
-		return []string{"-p", prompt}
-	}
-	return nil
-}
-
-// ParseAgent normaliza un string a Agent.
-func ParseAgent(s string) (Agent, error) {
-	s = strings.ToLower(strings.TrimSpace(s))
-	for _, a := range ValidAgents {
-		if string(a) == s {
-			return a, nil
-		}
-	}
-	return "", fmt.Errorf("unknown agent %q; valid: opus, codex, gemini", s)
-}
+// ParseAgent delega en internal/agent.
+func ParseAgent(s string) (Agent, error) { return agent.ParseAgent(s) }
 
 // AgentTimeout es el tiempo máximo de espera para cada validador individual.
 // Configurable con CHE_VALIDATE_AGENT_TIMEOUT_SECS. Default 10min: el diff de
@@ -106,39 +72,15 @@ var AgentTimeout = func() time.Duration {
 	return 10 * time.Minute
 }()
 
-// Validator identifica un validador: agente + instancia (1..N) para distinguir
-// cuando el mismo agente aparece varias veces en la lista.
-type Validator struct {
-	Agent    Agent
-	Instance int
-}
+// Validator es un alias del struct centralizado.
+type Validator = agent.Validator
 
 // ParseValidators parsea la flag `--validators` (ej: "opus", "codex,gemini",
 // "codex,codex,gemini"). validate requiere al menos 1 validador — a diferencia
-// de execute, aca "none" no tiene sentido (el flow completo se reduce a nada).
+// de execute, aca "none" no tiene sentido (el flow completo se reduce a nada),
+// así que lo rechazamos explícitamente con allowNone=false.
 func ParseValidators(s string) ([]Validator, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return nil, fmt.Errorf("validators: empty — validate requires at least 1 validator")
-	}
-	if strings.EqualFold(s, "none") {
-		return nil, fmt.Errorf("validators: 'none' is not allowed — validate requires at least 1 validator")
-	}
-	parts := strings.Split(s, ",")
-	if len(parts) < 1 || len(parts) > 3 {
-		return nil, fmt.Errorf("validators: need 1-3 items, got %d", len(parts))
-	}
-	counts := map[Agent]int{}
-	out := make([]Validator, 0, len(parts))
-	for _, p := range parts {
-		a, err := ParseAgent(p)
-		if err != nil {
-			return nil, fmt.Errorf("validators: %w", err)
-		}
-		counts[a]++
-		out = append(out, Validator{Agent: a, Instance: counts[a]})
-	}
-	return out, nil
+	return agent.ParseValidators(s, false /* allowNone */)
 }
 
 // Opts agrupa el writer de stdout (payload: reporte final) y el logger
@@ -691,60 +633,36 @@ func callValidator(v Validator, pr *PullRequest, diff string, log *output.Logger
 	return parseResponse(out)
 }
 
-// runAgentCmd invoca al binario del agente con el prompt construido. Streamea
-// stdout/stderr en vivo al log y aplica AgentTimeout con context.
-func runAgentCmd(agent Agent, prompt string, log *output.Logger, progressPrefix string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), AgentTimeout)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, agent.Binary(), agent.InvokeArgs(prompt)...)
-	stdoutPipe, err := cmd.StdoutPipe()
+// runAgentCmd invoca al binario del agente con el prompt construido. Adapter
+// sobre agent.Run que preserva los mensajes de error históricos y el hecho
+// de que cada línea se emite como log.Step(prefix + line).
+func runAgentCmd(a Agent, prompt string, log *output.Logger, progressPrefix string) (string, error) {
+	res, err := agent.Run(a, prompt, agent.RunOpts{
+		Timeout: AgentTimeout,
+		Format:  agent.OutputText,
+		OnLine: func(line string) {
+			if log != nil {
+				log.Step(progressPrefix + line)
+			}
+		},
+		OnStderrLine: func(line string) {
+			if log != nil {
+				log.Step(progressPrefix + "stderr: " + line)
+			}
+		},
+	})
+	if errors.Is(err, agent.ErrTimeout) {
+		return res.Stdout, fmt.Errorf("%s timed out after %s (stderr: %s)",
+			a, AgentTimeout, truncate(strings.TrimSpace(res.Stderr), 200))
+	}
+	var ee *agent.ExitError
+	if errors.As(err, &ee) {
+		return res.Stdout, fmt.Errorf("exit %d: %s", ee.ExitCode, ee.Stderr)
+	}
 	if err != nil {
-		return "", err
+		return res.Stdout, err
 	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return "", err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return "", err
-	}
-
-	var fullStdout, fullStderr strings.Builder
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go streamPipe(&wg, stdoutPipe, &fullStdout, log, progressPrefix)
-	go streamPipe(&wg, stderrPipe, &fullStderr, log, progressPrefix+"stderr: ")
-
-	wg.Wait()
-	waitErr := cmd.Wait()
-
-	if ctx.Err() == context.DeadlineExceeded {
-		return fullStdout.String(), fmt.Errorf("%s timed out after %s (stderr: %s)",
-			agent, AgentTimeout, truncate(strings.TrimSpace(fullStderr.String()), 200))
-	}
-	if waitErr != nil {
-		if ee, ok := waitErr.(*exec.ExitError); ok {
-			return fullStdout.String(), fmt.Errorf("exit %d: %s",
-				ee.ExitCode(), strings.TrimSpace(fullStderr.String()))
-		}
-		return fullStdout.String(), waitErr
-	}
-	return fullStdout.String(), nil
-}
-
-func streamPipe(wg *sync.WaitGroup, r io.Reader, full *strings.Builder, log *output.Logger, prefix string) {
-	defer wg.Done()
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		full.WriteString(line + "\n")
-		if strings.TrimSpace(line) != "" && log != nil {
-			log.Step(prefix + line)
-		}
-	}
+	return res.Stdout, nil
 }
 
 func truncate(s string, n int) string {
