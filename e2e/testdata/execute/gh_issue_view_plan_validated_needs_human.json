@@ -7,6 +7,6 @@
   "labels": [
     {"name": "ct:plan"},
     {"name": "status:plan"},
-    {"name": "status:awaiting-human"}
+    {"name": "plan-validated:needs-human"}
   ]
 }

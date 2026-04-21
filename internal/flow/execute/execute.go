@@ -1,13 +1,13 @@
 // Package execute implements flow 03 — tomar un issue en status:plan, armar
 // un worktree aislado, invocar al agente para producir el diff, abrir/actualizar
-// un PR draft contra main y transicionar el issue a status:executed +
-// awaiting-human. La lógica vive acá (pura, testeable) para que el subcomando
-// `che execute` y la TUI compartan la misma implementación.
+// un PR draft contra main y transicionar el issue a status:executed. La
+// lógica vive acá (pura, testeable) para que el subcomando `che execute` y
+// la TUI compartan la misma implementación.
 //
-// NOTA: este paquete es deliberadamente una copia adaptada de
-// `internal/flow/explore/` (no reusa su plumbing todavía) — la deuda de
-// extraer lo común a `internal/flow/common/` queda para un issue futuro
-// cuando execute esté validado end-to-end contra un issue real.
+// execute NO dispara validadores: si el humano quiere validación
+// automática del plan antes de ejecutar o del PR después de crearlo,
+// corre `che validate` explícitamente. El gate de intervención humana
+// son los labels plan-validated:* sobre el issue.
 package execute
 
 import (
@@ -25,16 +25,10 @@ import (
 	"time"
 
 	"github.com/chichex/che/internal/agent"
-	"github.com/chichex/che/internal/comments"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
 	planpkg "github.com/chichex/che/internal/plan"
 )
-
-// validatorRole es el valor del campo `role` en el header claude-cli de los
-// comments de validadores que postea execute. Lo usa nextValidatorIter para
-// filtrar los comments de tandas anteriores al calcular el iter.
-const validatorRole = "validator"
 
 // ExitCode es el código de salida semántico para el caller.
 type ExitCode int
@@ -82,48 +76,21 @@ var AgentTimeout = func() time.Duration {
 	return 30 * time.Minute
 }()
 
-// ValidatorsWaitTimeout es cuánto esperamos a que las goroutines de
-// validadores terminen antes de retornar de Run. Es el timeout del wait,
-// no del agente validador en sí — cada validador individualmente está
-// acotado por AgentTimeout. Configurable con CHE_EXEC_VALIDATORS_WAIT_SECS
-// (default 600s = 10min).
-var ValidatorsWaitTimeout = func() time.Duration {
-	if s := strings.TrimSpace(os.Getenv("CHE_EXEC_VALIDATORS_WAIT_SECS")); s != "" {
-		if n, err := time.ParseDuration(s + "s"); err == nil && n > 0 {
-			return n
-		}
-	}
-	return 10 * time.Minute
-}()
-
 // Opts agrupa el writer de stdout (payload: "Executed ...", "PR: ..."),
 // el logger estructurado (progress + errors) y el agente ejecutor.
+//
+// NO hay campo Validators: execute deja de disparar validadores
+// automáticamente; el humano los corre con `che validate` si los quiere.
 type Opts struct {
 	Stdout io.Writer
 	Out    *output.Logger
 	Agent  Agent
-	// Validators son los agentes que postean findings en el PR después de
-	// crearlo. execute NO espera por ellos (fire-and-forget).
-	Validators []Validator
-	// SkipValidators puede usarse en tests/CI para omitir el disparo de
-	// validadores aunque se hayan pasado en Validators.
-	SkipValidators bool
 	// Ctx permite al caller proveer un context cancelable (típicamente
 	// signal.NotifyContext para SIGINT/SIGTERM). Si es nil, Run instala su
 	// propio handler de señales. La TUI lo usa para compartir un context con
 	// cancel explícito desde el key handler de Ctrl+C sin depender de un
 	// signal real.
 	Ctx context.Context
-}
-
-// Validator es un alias del struct centralizado. Instance permite repetir
-// tipo (codex×2) aunque execute en v1 no lo requiera; queda para futuro.
-type Validator = agent.Validator
-
-// ParseValidators parsea "codex,gemini" o "none". "none" (y string vacío)
-// → nil, lo que desactiva el panel de validadores.
-func ParseValidators(s string) ([]Validator, error) {
-	return agent.ParseValidators(s, true /* allowNone */)
 }
 
 // Issue modela el subset del output de `gh issue view --json ...`.
@@ -217,7 +184,7 @@ func preparePlan(body string) (*ConsolidatedPlan, error) {
 //   - Invocar agente, commit en el worktree, push.
 //   - Crear o actualizar PR draft contra main con Closes #<n>.
 //   - Fire-and-forget validadores sobre el diff del PR.
-//   - Transition status:executing → status:executed + awaiting-human.
+//   - Transition status:executing → status:executed.
 //   - Comentario al issue con link al PR.
 //   - Rollback: si algo falla después del lock, revertir a status:plan y
 //     limpiar worktree.
@@ -347,7 +314,7 @@ func Run(issueRef string, opts Opts) ExitCode {
 	//   - !executedApplied && prCreated → transicionamos a executed: el PR
 	//     remoto ya existe, así que ese es el estado consistente. Volver a
 	//     plan dejaría el issue "libre" con un PR vivo apuntando a él, que
-	//     es peor que dejarlo en executed + awaiting-human para retry manual.
+	//     es peor que dejarlo en executed para retry manual.
 	//   - !executedApplied && !prCreated → rollback normal a plan (ownership-
 	//     aware: re-fetch y chequeamos que seguimos teniendo el lock).
 	//
@@ -475,7 +442,7 @@ func Run(issueRef string, opts Opts) ExitCode {
 	if !hasChanges {
 		// Sin cambios, no importa si hay PR existente o no: no tenemos
 		// nada que commitear ni que refrescar. NO transicionamos a
-		// executed + awaiting-human (eso engañaría al operador). Dejamos
+		// executed (eso engañaría al operador). Dejamos
 		// que el defer revierta executing → plan así el issue queda
 		// disponible para otro intento. Mensaje diferenciado según haya
 		// PR previo o no.
@@ -523,70 +490,23 @@ func Run(issueRef string, opts Opts) ExitCode {
 		prCreated = true
 	}
 
-	// Transición a status:executed ANTES de disparar validadores. Orden
-	// importante: una señal entre `prCreated=true` y `executedApplied=true`
-	// dejaría al cleanup en modo "PR vivo + label en executing", que forzaría
-	// un label fix-up en el defer. Transicionar ya mismo encoge la ventana
-	// a mínimo y deja al issue en el estado consistente con el PR remoto.
-	progress("transicionando issue a status:executed + awaiting-human…")
+	// Transición a status:executed. Sin validadores automáticos; el label
+	// refleja "ejecución terminada". Orden importante: una señal entre
+	// `prCreated=true` y `executedApplied=true` dejaría al cleanup en modo
+	// "PR vivo + label en executing", que forzaría un label fix-up en el
+	// defer. Transicionar ya mismo encoge la ventana a mínimo y deja al
+	// issue en el estado consistente con el PR remoto.
+	progress("transicionando issue a status:executed…")
 	if err := labels.Apply(issueRef, labels.StatusExecuting, labels.StatusExecuted); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
 	executedApplied = true
 
-	// Disparar validadores y esperar con timeout acotado. Originalmente esto
-	// era fire-and-forget, pero cmd/execute.go hace os.Exit(code) apenas Run
-	// retorna — eso mataba las goroutines antes de que postearan comments.
-	// Ahora esperamos hasta ValidatorsWaitTimeout (env configurable); si
-	// expira, logeamos y retornamos igual (los validadores que queden siguen
-	// en background pero el proceso se va a cortar).
-	var validatorsDone <-chan int
-	validatorsTotal := 0
-	// validatorsCtx es un subcontext que se cancela con el parent y nos
-	// permite matar los subprocesos de validación en cascada. Lo tenemos
-	// separado para cancelarlo explícitamente desde waitValidators si ctx
-	// expira durante el wait.
-	validatorsCtx, validatorsCancel := context.WithCancel(ctx)
-	defer validatorsCancel()
-	if !opts.SkipValidators && len(opts.Validators) > 0 {
-		// Cuando reusamos un PR existente puede haber comments de tandas
-		// previas; leemos sus headers para numerar esta tanda con el próximo
-		// iter. Si la lectura falla o no hay comments previos, caemos a 1 —
-		// un iter mal numerado no justifica abortar el run.
-		iter := 1
-		if existing, err := fetchPRComments(ctx, prURL); err == nil {
-			iter = nextValidatorIter(existing)
-		} else {
-			fmt.Fprintf(stderr, "warning: no pude leer comments previos del PR para numerar iter (%v); usando iter=1\n", err)
-		}
-		progress(fmt.Sprintf("disparando %d validador(es) sobre el PR (iter=%d)…", len(opts.Validators), iter))
-		validatorsDone = fireValidators(validatorsCtx, prURL, issue, plan, opts.Validators, iter)
-		validatorsTotal = len(opts.Validators)
-	}
-
 	progress("posteando comment en el issue con link al PR…")
-	if err := commentIssue(ctx, issueRef, renderIssueComment(prURL, opts.Validators)); err != nil {
+	if err := commentIssue(ctx, issueRef, renderIssueComment(prURL)); err != nil {
 		// No es fatal — ya hicimos todo el trabajo. Lo logueamos y seguimos.
 		fmt.Fprintf(stderr, "warning: no se pudo comentar el issue: %v\n", err)
-	}
-
-	// Esperar a los validadores (si los hay) antes de retornar, para que el
-	// os.Exit del caller no los mate. Feedback incremental a stdout. Si el
-	// ctx se cancela durante el wait (señal post-PR), cancelamos los
-	// validadores y hacemos el cleanup local (worktree + branch local; el
-	// label queda en executed porque ya transitamos — executedApplied=true
-	// salta el rollback del label en cleanupLocal).
-	if validatorsDone != nil && validatorsTotal > 0 {
-		waitValidators(ctx, stdout, validatorsDone, validatorsTotal, ValidatorsWaitTimeout)
-		if ctx.Err() != nil {
-			validatorsCancel()
-			cleanupLocal("señal recibida durante wait de validadores")
-			fmt.Fprintf(stdout, "Executed %s\n", issue.URL)
-			fmt.Fprintf(stdout, "PR: %s\n", prURL)
-			fmt.Fprintln(stdout, "cancelado durante wait de validadores; issue ya quedó en status:executed")
-			return ExitCancelled
-		}
 	}
 
 	succeeded = true
@@ -597,37 +517,10 @@ func Run(issueRef string, opts Opts) ExitCode {
 	return ExitOK
 }
 
-// waitValidators lee del canal una señal por validador que terminó y emite
-// progreso "esperando validadores (k/total)…" hasta total o hasta timeout.
-// Si expira el timeout, imprime cuántos quedaron y retorna — los que sigan
-// corriendo van a morir cuando el proceso termine. Si ctx se cancela
-// (señal externa), retorna inmediatamente; el caller se encarga de
-// cancelar los subprocesos de los validadores.
-func waitValidators(ctx context.Context, stdout io.Writer, done <-chan int, total int, timeout time.Duration) {
-	completed := 0
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	for completed < total {
-		select {
-		case _, ok := <-done:
-			if !ok {
-				// Canal cerrado antes de tiempo (no debería pasar, pero defendernos).
-				return
-			}
-			completed++
-			fmt.Fprintf(stdout, "esperando validadores (%d/%d)…\n", completed, total)
-		case <-timer.C:
-			fmt.Fprintf(stdout, "timeout: %d/%d validadores completaron, el resto sigue corriendo en background\n", completed, total)
-			return
-		case <-ctx.Done():
-			fmt.Fprintf(stdout, "cancelado: %d/%d validadores completaron antes de la señal\n", completed, total)
-			return
-		}
-	}
-}
-
-// ListCandidates devuelve los issues abiertos con ct:plan + status:plan que
-// no tienen awaiting-human. Estos son los candidatos a ejecutar.
+// ListCandidates devuelve los issues abiertos con ct:plan + status:plan.
+// Estos son los candidatos a ejecutar. El gate de plan-validated:* se
+// chequea más tarde en gate() — el listado los muestra igual para que el
+// humano vea los que necesitan intervención.
 func ListCandidates() ([]Candidate, error) {
 	cmd := exec.Command("gh", "issue", "list",
 		"--label", labels.CtPlan,
@@ -648,9 +541,6 @@ func ListCandidates() ([]Candidate, error) {
 	}
 	out2 := make([]Candidate, 0, len(raw))
 	for _, i := range raw {
-		if i.HasLabel(deprecatedAwaitingHuman) {
-			continue
-		}
 		out2 = append(out2, Candidate{Number: i.Number, Title: i.Title})
 	}
 	return out2, nil
@@ -760,8 +650,15 @@ func fetchIssue(ctx context.Context, ref string) (*Issue, error) {
 //   - Issue OPEN.
 //   - Tiene label ct:plan.
 //   - Tiene label status:plan.
-//   - NO tiene label status:awaiting-human (hay algo humano sin resolver).
 //   - NO tiene label status:executing (hay otro run en curso o quedó colgado).
+//   - NO tiene plan-validated:changes-requested (el validador del plan pidió
+//     cambios; hay que iterar/re-explorar primero).
+//   - NO tiene plan-validated:needs-human (decisión de producto pendiente).
+//
+// plan-validated:approve o ausencia de cualquier plan-validated:* = green
+// light. El humano decide si correr `che validate` antes de ejecutar; si
+// no lo hace, execute pasa sin verdict y confía en el plan consolidado
+// que dejó explore.
 func gate(i *Issue) error {
 	if i.State != "OPEN" {
 		return fmt.Errorf("issue #%d is closed", i.Number)
@@ -772,8 +669,11 @@ func gate(i *Issue) error {
 	if i.HasLabel(labels.StatusExecuting) {
 		return fmt.Errorf("issue #%d is already status:executing — otro run en curso o quedó colgado; quitá el label a mano si es lo segundo", i.Number)
 	}
-	if i.HasLabel(deprecatedAwaitingHuman) {
-		return fmt.Errorf("issue #%d tiene status:awaiting-human — resolvé primero lo que falta antes de ejecutar", i.Number)
+	if i.HasLabel(labels.PlanValidatedChangesRequested) {
+		return fmt.Errorf("issue #%d tiene plan-validated:changes-requested — corré `che iterate %d` primero, o re-validá", i.Number, i.Number)
+	}
+	if i.HasLabel(labels.PlanValidatedNeedsHuman) {
+		return fmt.Errorf("issue #%d tiene plan-validated:needs-human — resolvé a mano antes de ejecutar", i.Number)
 	}
 	if !i.HasLabel(labels.StatusPlan) {
 		return fmt.Errorf("issue #%d is not status:plan — corré `che explore %d` primero", i.Number, i.Number)
@@ -1030,177 +930,18 @@ func createDraftPR(ctx context.Context, wtPath, branch string, issue *Issue) (st
 	return strings.TrimSpace(string(out)), nil
 }
 
-// ---- validadores (fire-and-forget) ----
-
-// fireValidators lanza una goroutine por validator que invoca al agente con
-// el prompt de validación de diff y postea el resultado como PR comment.
-// Devuelve un canal que recibe una señal (el índice del validator) cada vez
-// que una goroutine termina. El caller puede leer hasta len(validators)
-// señales y aplicar su propio timeout. El canal tiene buffer = len(validators)
-// así las goroutines nunca se bloquean si el caller deja de drenarlo.
-//
-// iter es el número de tanda que se estampa en el header — el caller lo
-// resuelve con nextValidatorIter sobre los comments previos del PR; sin eso,
-// al reusar un PR en un segundo run quedarían comments indistinguibles.
-//
-// parent es el context del flow; cualquier cancelación (señal o timeout del
-// wait superior) mata los subprocesos de validación con SIGTERM al process
-// group y permite a las goroutines retornar sin colgarse.
-func fireValidators(parent context.Context, prURL string, issue *Issue, plan *ConsolidatedPlan, validators []Validator, iter int) <-chan int {
-	done := make(chan int, len(validators))
-	for i, v := range validators {
-		i, v := i, v
-		go func() {
-			defer func() {
-				// Non-blocking send: si el canal está lleno (no debería con
-				// buffer = len(validators)), no nos colgamos.
-				select {
-				case done <- i:
-				default:
-				}
-			}()
-			prompt := buildValidatorPrompt(issue, plan)
-			// Preservamos EXACTAMENTE el formato histórico: los validadores
-			// de execute invocan con el MISMO InvokeArgs que el ejecutor
-			// (stream-json para opus), así que el comment del PR termina
-			// conteniendo los eventos NDJSON cuando el validador es opus.
-			// Cambiar esto acá sería un behavior change — vive como deuda
-			// separada. KillGrace>0 + Dir="" replican el plumbing anterior.
-			res, _ := agent.Run(v.Agent, prompt, agent.RunOpts{
-				Ctx:       parent,
-				Timeout:   AgentTimeout,
-				Format:    agent.OutputStreamJSON,
-				KillGrace: agentKillGrace,
-			})
-			out := res.Stdout
-			// Si el parent se canceló, no tiene sentido pelear con gh para
-			// postear el comment — retornamos y dejamos que el caller siga.
-			if parent.Err() != nil {
-				return
-			}
-			_ = postPRComment(parent, prURL, renderValidatorComment(iter, v, out))
-		}()
-	}
-	return done
-}
-
-// renderValidatorComment arma el body del PR comment de un validator con el
-// header estructurado al principio. Pura y sin side-effects: así un test
-// puede assertarlo sin disparar goroutines ni ejecutar gh.
-func renderValidatorComment(iter int, v Validator, agentOut string) string {
-	header := comments.Header{
-		Flow:     "execute",
-		Iter:     iter,
-		Agent:    string(v.Agent),
-		Instance: v.Instance,
-		Role:     validatorRole,
-	}.Format()
-	return fmt.Sprintf("%s\n## Validator %s#%d\n\n%s\n", header, v.Agent, v.Instance, strings.TrimSpace(agentOut))
-}
-
-// PRComment es un comment del PR con el subset mínimo que nos interesa para
-// calcular iter. Coincide con lo que devuelve `gh pr view --json comments`.
-type PRComment struct {
-	Body      string    `json:"body"`
-	CreatedAt time.Time `json:"createdAt"`
-}
-
-// nextValidatorIter devuelve el próximo iter a usar para los comments de
-// validadores en el PR. Es max(iter) + 1 mirando sólo los comments de che
-// con flow=execute y role=validator; si no hay, devuelve 1. Así una segunda
-// corrida sobre el mismo PR queda separada de la primera.
-func nextValidatorIter(existing []PRComment) int {
-	max := 0
-	for _, c := range existing {
-		h := comments.Parse(c.Body)
-		if h.Flow != "execute" || h.Role != validatorRole {
-			continue
-		}
-		if h.Iter > max {
-			max = h.Iter
-		}
-	}
-	return max + 1
-}
-
-// fetchPRComments lee los comments actuales del PR. Usa `gh pr view --json
-// comments` (misma forma que validate.FetchPRComments). El ctx permite
-// cancelarlo rápido si entra una señal.
-func fetchPRComments(ctx context.Context, prURL string) ([]PRComment, error) {
-	cmd := exec.CommandContext(ctx, "gh", "pr", "view", prURL, "--json", "comments")
-	out, err := cmd.Output()
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("gh pr view comments: %s", strings.TrimSpace(string(ee.Stderr)))
-		}
-		return nil, err
-	}
-	var wrap struct {
-		Comments []PRComment `json:"comments"`
-	}
-	if err := json.Unmarshal(out, &wrap); err != nil {
-		return nil, fmt.Errorf("parse gh pr view comments: %w", err)
-	}
-	return wrap.Comments, nil
-}
-
-func buildValidatorPrompt(issue *Issue, plan *ConsolidatedPlan) string {
-	var sb strings.Builder
-	sb.WriteString("Sos un validador técnico senior. Un agente acaba de implementar un plan y abrió un PR draft. Tu tarea es revisarlo y marcar problemas — NO reimplementar nada.\n\n")
-	sb.WriteString("Chequeá específicamente:\n")
-	sb.WriteString("1. ¿El diff cubre los criterios de aceptación del plan?\n")
-	sb.WriteString("2. ¿Hay regresiones obvias, tests faltantes, o quebró builds?\n")
-	sb.WriteString("3. ¿Se metió con cosas fuera del scope del plan?\n\n")
-	sb.WriteString(fmt.Sprintf("Issue #%d — %s\n\n", issue.Number, issue.Title))
-	if plan.Summary != "" {
-		sb.WriteString("## Resumen del plan\n" + plan.Summary + "\n\n")
-	}
-	if len(plan.AcceptanceCriteria) > 0 {
-		sb.WriteString("## Criterios de aceptación\n")
-		for _, c := range plan.AcceptanceCriteria {
-			sb.WriteString("- " + c + "\n")
-		}
-		sb.WriteString("\n")
-	}
-	sb.WriteString("Podés ver el diff del PR corriendo `gh pr diff " + issue.URL + "` — revisalo y devolvé un resumen en markdown con hallazgos numerados.\n")
-	return sb.String()
-}
-
-// postPRComment postea un comment en el PR via `gh pr comment <url>`.
-func postPRComment(ctx context.Context, prURL, body string) error {
-	tmpDir, err := os.MkdirTemp("", "che-exec-prc-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmpDir)
-	bodyFile := filepath.Join(tmpDir, "body.md")
-	if err := os.WriteFile(bodyFile, []byte(body), 0o644); err != nil {
-		return err
-	}
-	cmd := exec.CommandContext(ctx, "gh", "pr", "comment", prURL, "--body-file", bodyFile)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("gh pr comment: %s", strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
 // ---- issue comment al final ----
 
-func renderIssueComment(prURL string, validators []Validator) string {
+// renderIssueComment arma el body del comment que postea execute al issue
+// cuando termina OK. El humano decide si correr `che validate` sobre el PR
+// antes de mergear — execute no se mete en esa decisión.
+func renderIssueComment(prURL string) string {
 	var sb strings.Builder
 	sb.WriteString("<!-- claude-cli: flow=execute role=pr-link -->\n")
 	sb.WriteString("## Ejecución completada\n\n")
 	sb.WriteString("Se abrió un PR draft con los cambios:\n\n")
 	sb.WriteString("- PR: " + prURL + "\n\n")
-	if len(validators) > 0 {
-		sb.WriteString("Los siguientes validadores están corriendo sobre el diff:\n")
-		for _, v := range validators {
-			sb.WriteString(fmt.Sprintf("- %s#%d\n", v.Agent, v.Instance))
-		}
-		sb.WriteString("\nSus findings van a aparecer como comments del PR (no de este issue).\n\n")
-	}
-	sb.WriteString("El issue quedó en `status:executed` + `status:awaiting-human` — revisá el PR + CI y mergealo cuando esté listo.\n")
+	sb.WriteString("El issue quedó en `status:executed`. Revisá el PR + CI; si querés validación automática antes de mergear, corré `che validate <pr>`.\n")
 	return sb.String()
 }
 

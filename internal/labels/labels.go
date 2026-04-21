@@ -87,6 +87,13 @@ type Transition struct {
 // intermedio; los gates de intervención humana viven en los labels
 // plan-validated:* y validated:*, aplicados por `che validate`.
 var validTransitions = map[string]Transition{
+	// explore termina: idea → plan (se registra acá para que explore use
+	// labels.Apply en vez de mandar un `gh issue edit` crudo; las reglas de
+	// estado viven todas en un lugar).
+	StatusIdea + "→" + StatusPlan: {
+		Remove: []string{StatusIdea},
+		Add:    []string{StatusPlan},
+	},
 	// execute arranca: plan → executing (lock).
 	StatusPlan + "→" + StatusExecuting: {
 		Remove: []string{StatusPlan},

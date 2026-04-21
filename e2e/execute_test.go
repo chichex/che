@@ -84,7 +84,7 @@ func TestExecute_GoldenPath(t *testing.T) {
 	env.ExpectGh(`^issue comment 42 --body-file`).
 		RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-xyz\n", 0)
 
-	out := env.MustRun("execute", "--validators", "none", "42")
+	out := env.MustRun("execute", "42")
 	harness.AssertContains(t, out, "Executed")
 	harness.AssertContains(t, out, "https://github.com/acme/demo/pull/7")
 
@@ -113,79 +113,13 @@ func TestExecute_GoldenPath(t *testing.T) {
 	}
 }
 
-// TestExecute_Validators_MultiSpawn: criterio de aceptación de #13 — la
-// selección de validadores debe respetarse end-to-end. El spec producido por
-// la TUI (executeValidatorsFromCounts) y el parseado desde `--validators ...`
-// desembocan en el mismo Opts.Validators que llega a execute.Run; testeamos
-// acá que ese shape dispara un subprocess por validator con Instance correcto
-// y que cada uno postea su PR comment.
-func TestExecute_Validators_MultiSpawn(t *testing.T) {
-	env := setupExecuteEnv(t)
-	scriptExecutePrechecks(env)
-	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("execute/gh_issue_view_ready.json", 0)
-	env.ExpectGh(`^pr list --head exec/42-`).RespondStdout("[]\n", 0)
-	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
-	// Lock (plan→executing) + transition post-PR (executing→executed).
-	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0)
-	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0)
-
-	env.ExpectAgent("claude").
-		WhenArgsMatch(`ingeniero senior ejecutando`).
-		TouchFile("IMPLEMENTATION.md", "did it\n").
-		RespondStdout("ok\n", 0)
-
-	env.ExpectGh(`^pr create --draft`).RespondStdout("https://github.com/acme/demo/pull/7\n", 0)
-
-	// fetchPRComments → iter=1 (sin comments previos).
-	env.ExpectGh(`^pr view https://github.com/acme/demo/pull/7 --json comments`).
-		RespondStdout(`{"comments":[]}`+"\n", 0)
-
-	// 3 validators con 2 instancias de codex + 1 gemini (paralelo a
-	// TestExplore_Validators_Duplicate): verifica que Instance numbering
-	// llega bien a los subprocesos.
-	env.ExpectAgent("codex").
-		WhenArgsMatch(`validador técnico`).Consumable().
-		RespondStdout("codex#1 says: ok\n", 0)
-	env.ExpectAgent("codex").
-		WhenArgsMatch(`validador técnico`).Consumable().
-		RespondStdout("codex#2 says: ok\n", 0)
-	env.ExpectAgent("gemini").
-		WhenArgsMatch(`validador técnico`).
-		RespondStdout("gemini#1 says: ok\n", 0)
-
-	// 3 PR comments (uno por validator).
-	env.ExpectGh(`^pr comment https://github.com/acme/demo/pull/7 --body-file`).Consumable().RespondStdout("ok\n", 0)
-	env.ExpectGh(`^pr comment https://github.com/acme/demo/pull/7 --body-file`).Consumable().RespondStdout("ok\n", 0)
-	env.ExpectGh(`^pr comment https://github.com/acme/demo/pull/7 --body-file`).Consumable().RespondStdout("ok\n", 0)
-
-	// Issue comment final (link al PR).
-	env.ExpectGh(`^issue comment 42 --body-file`).RespondStdout("ok\n", 0)
-
-	out := env.MustRun("execute", "--validators", "codex,codex,gemini", "42")
-	harness.AssertContains(t, out, "Executed")
-	// "esperando validadores (3/3)…" es prueba de que los 3 disparos
-	// llegaron al wait y completaron antes del retorno.
-	harness.AssertContains(t, out, "esperando validadores (3/3)")
-
-	inv := env.Invocations()
-	if codexCalls := inv.For("codex"); len(codexCalls) != 2 {
-		t.Fatalf("expected 2 codex calls (instance 1+2), got %d", len(codexCalls))
-	}
-	if geminiCalls := inv.For("gemini"); len(geminiCalls) != 1 {
-		t.Fatalf("expected 1 gemini call, got %d", len(geminiCalls))
-	}
-	if prComments := inv.FindCalls("gh", "pr", "comment", "--body-file"); len(prComments) != 3 {
-		t.Fatalf("expected 3 PR comment calls (one per validator), got %d", len(prComments))
-	}
-}
-
 // TestExecute_IssueNotStatusPlan_Exit3: issue sin status:plan (está en idea) → exit 3.
 func TestExecute_IssueNotStatusPlan_Exit3(t *testing.T) {
 	env := setupExecuteEnv(t)
 	scriptExecutePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("execute/gh_issue_view_not_plan.json", 0)
 
-	r := env.Run("execute", "--validators", "none", "42")
+	r := env.Run("execute", "42")
 	if r.ExitCode != 3 {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
@@ -193,17 +127,37 @@ func TestExecute_IssueNotStatusPlan_Exit3(t *testing.T) {
 	env.Invocations().AssertNotCalled(t, "claude")
 }
 
-// TestExecute_IssueAwaitingHuman_Exit3: issue con awaiting-human → exit 3.
-func TestExecute_IssueAwaitingHuman_Exit3(t *testing.T) {
+// TestExecute_PlanValidatedChangesRequested_Exit3: issue con
+// plan-validated:changes-requested (el validador del plan pidió cambios)
+// → execute corta con ExitSemantic y sugiere `che iterate`.
+func TestExecute_PlanValidatedChangesRequested_Exit3(t *testing.T) {
 	env := setupExecuteEnv(t)
 	scriptExecutePrechecks(env)
-	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("execute/gh_issue_view_awaiting.json", 0)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("execute/gh_issue_view_plan_validated_changes_requested.json", 0)
 
-	r := env.Run("execute", "--validators", "none", "42")
+	r := env.Run("execute", "42")
 	if r.ExitCode != 3 {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
-	harness.AssertContains(t, r.Stderr, "awaiting-human")
+	harness.AssertContains(t, r.Stderr, "plan-validated:changes-requested")
+	harness.AssertContains(t, r.Stderr, "che iterate")
+	env.Invocations().AssertNotCalled(t, "claude")
+}
+
+// TestExecute_PlanValidatedNeedsHuman_Exit3: issue con
+// plan-validated:needs-human → execute corta con ExitSemantic. El humano
+// tiene que resolver a mano antes de ejecutar.
+func TestExecute_PlanValidatedNeedsHuman_Exit3(t *testing.T) {
+	env := setupExecuteEnv(t)
+	scriptExecutePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("execute/gh_issue_view_plan_validated_needs_human.json", 0)
+
+	r := env.Run("execute", "42")
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "plan-validated:needs-human")
+	harness.AssertContains(t, r.Stderr, "resolvé a mano")
 	env.Invocations().AssertNotCalled(t, "claude")
 }
 
@@ -213,7 +167,7 @@ func TestExecute_IssueAlreadyExecuting_Exit3(t *testing.T) {
 	scriptExecutePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("execute/gh_issue_view_executing.json", 0)
 
-	r := env.Run("execute", "--validators", "none", "42")
+	r := env.Run("execute", "42")
 	if r.ExitCode != 3 {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
@@ -242,7 +196,7 @@ func TestExecute_Idempotency_UpdatesExistingPR(t *testing.T) {
 	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue comment 42 --body-file`).RespondStdout("ok\n", 0)
 
-	out := env.MustRun("execute", "--validators", "none", "42")
+	out := env.MustRun("execute", "42")
 	harness.AssertContains(t, out, "https://github.com/acme/demo/pull/7")
 
 	inv := env.Invocations()
@@ -272,7 +226,7 @@ func TestExecute_AgentFails_Rollback(t *testing.T) {
 		WhenArgsMatch(`ingeniero senior ejecutando`).
 		RespondExitWithError(1, "claude exploded\n")
 
-	r := env.Run("execute", "--validators", "none", "42")
+	r := env.Run("execute", "42")
 	if r.ExitCode != 2 {
 		t.Fatalf("expected exit 2 (retry), got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
@@ -308,7 +262,7 @@ func TestExecute_AgentFails_RollbackSkippedIfLockLost(t *testing.T) {
 		WhenArgsMatch(`ingeniero senior ejecutando`).
 		RespondExitWithError(1, "claude exploded\n")
 
-	r := env.Run("execute", "--validators", "none", "42")
+	r := env.Run("execute", "42")
 	if r.ExitCode != 2 {
 		t.Fatalf("expected exit 2 (retry), got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
@@ -352,7 +306,7 @@ func TestExecute_NoChanges_Rollback(t *testing.T) {
 		WhenArgsMatch(`ingeniero senior ejecutando`).
 		RespondStdout("hmm\n", 0)
 
-	r := env.Run("execute", "--validators", "none", "42")
+	r := env.Run("execute", "42")
 	if r.ExitCode != 2 {
 		t.Fatalf("expected exit 2, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
@@ -361,8 +315,8 @@ func TestExecute_NoChanges_Rollback(t *testing.T) {
 }
 
 // TestExecute_NoChanges_ExistingPR_Rollback: claude no toca archivos pero
-// hay un PR abierto; NO debe transicionar a executed/awaiting-human ni
-// refrescar el PR — rollback a status:plan y mensaje diferenciado.
+// hay un PR abierto; NO debe transicionar a executed ni refrescar el PR —
+// rollback a status:plan y mensaje diferenciado.
 func TestExecute_NoChanges_ExistingPR_Rollback(t *testing.T) {
 	env := setupExecuteEnv(t)
 	scriptExecutePrechecks(env)
@@ -383,7 +337,7 @@ func TestExecute_NoChanges_ExistingPR_Rollback(t *testing.T) {
 		WhenArgsMatch(`ingeniero senior ejecutando`).
 		RespondStdout("noop\n", 0)
 
-	r := env.Run("execute", "--validators", "none", "42")
+	r := env.Run("execute", "42")
 	if r.ExitCode != 2 {
 		t.Fatalf("expected exit 2, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
@@ -406,12 +360,7 @@ func TestExecute_NoChanges_ExistingPR_Rollback(t *testing.T) {
 	}
 }
 
-// TestExecute_ListCandidates_FiltersAwaiting: integration-style — esta prueba
-// solo verifica que `che execute` no liste issues con awaiting-human. La TUI
-// es difícil de testear directamente; chequeamos por side-effect del filter
-// cuando se corre el list interno.
-// Nota: este test no tiene sentido sin una ruta TUI; lo dejamos como test
-// unitario en execute_test.go y no acá.
+// (placeholder eliminado: el filter por awaiting-human ya no existe)
 
 // ---- helpers ----
 
@@ -504,7 +453,7 @@ func TestExecute_PreviousPRMerged_CreatesNewPR(t *testing.T) {
 	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue comment 42 --body-file`).RespondStdout("ok\n", 0)
 
-	out := env.MustRun("execute", "--validators", "none", "42")
+	out := env.MustRun("execute", "42")
 	harness.AssertContains(t, out, "https://github.com/acme/demo/pull/99")
 
 	inv := env.Invocations()
@@ -556,7 +505,7 @@ func TestExecute_PreviousPRClosed_NoAutoReopen(t *testing.T) {
 			"https://github.com/acme/demo/pull/7\n"+
 			"To reopen the PR, use `gh pr reopen`\n")
 
-	r := env.Run("execute", "--validators", "none", "42")
+	r := env.Run("execute", "42")
 	if r.ExitCode != 2 {
 		t.Fatalf("expected exit 2 (retry), got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
@@ -614,7 +563,7 @@ func TestExecute_PRCreateFails_PostPush_CleanupCorrect(t *testing.T) {
 	env.ExpectGh(`^pr create --draft`).RespondExitWithError(1,
 		"API rate limit exceeded; try again in 30 minutes\n")
 
-	r := env.Run("execute", "--validators", "none", "42")
+	r := env.Run("execute", "42")
 	if r.ExitCode != 2 {
 		t.Fatalf("expected exit 2 (retry), got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}

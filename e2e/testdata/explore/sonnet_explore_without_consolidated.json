@@ -1,0 +1,37 @@
+{
+  "summary": "Agregar comando `che explore <issue>`.",
+  "questions": [],
+  "assumptions": [
+    {
+      "what": "El análisis se postea como comentario único con secciones Markdown.",
+      "why": "Best practice."
+    }
+  ],
+  "risks": [
+    {
+      "risk": "El modelo alucina paths no factibles.",
+      "likelihood": "medium",
+      "impact": "medium",
+      "mitigation": "Pasarle extractos de archivos."
+    }
+  ],
+  "paths": [
+    {
+      "title": "Comando nuevo",
+      "sketch": "x",
+      "pros": ["p"],
+      "cons": ["c"],
+      "effort": "M",
+      "recommended": true
+    },
+    {
+      "title": "Extender idea",
+      "sketch": "x",
+      "pros": ["p"],
+      "cons": ["c"],
+      "effort": "S",
+      "recommended": false
+    }
+  ],
+  "next_step": "Implementar."
+}

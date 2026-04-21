@@ -1,5 +1,0 @@
-{
-  "verdict": "needs_human",
-  "summary": "El ejecutor dejó preguntas abiertas y creo que alguna requiere input del humano, pero no supe aislar cuál.",
-  "findings": []
-}
