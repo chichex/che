@@ -104,9 +104,9 @@ func TestExecute_GoldenPath(t *testing.T) {
 	}
 	// Primer edit: plan → executing.
 	edits[0].AssertArgsContain(t, "--add-label", "status:executing")
-	// Segundo edit: executing → executed + awaiting-human.
+	// Segundo edit: executing → executed. awaiting-human ya no se aplica
+	// (el gate vive en plan-validated:* / validated:*).
 	edits[1].AssertArgsContain(t, "--add-label", "status:executed")
-	edits[1].AssertArgsContain(t, "--add-label", "status:awaiting-human")
 
 	if comments := inv.FindCalls("gh", "issue", "comment", "42", "--body-file"); len(comments) != 1 {
 		t.Fatalf("expected 1 issue comment, got %d", len(comments))

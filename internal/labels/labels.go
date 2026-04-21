@@ -18,14 +18,16 @@ import (
 
 // Status labels que la máquina de estados de che maneja sobre cada issue.
 // Estos son los labels "mutables": cambian a medida que el issue avanza por
-// el embudo idea → explore → execute → close.
+// el embudo idea → explore → execute → close. En el modelo nuevo el estado
+// "esperando input humano" deja de existir como status:*; el gate de
+// intervención humana vive en los labels plan-validated:* (sobre issues) y
+// validated:* (sobre PRs), aplicados por `che validate`.
 const (
-	StatusIdea          = "status:idea"
-	StatusPlan          = "status:plan"
-	StatusExecuting     = "status:executing"
-	StatusExecuted      = "status:executed"
-	StatusAwaitingHuman = "status:awaiting-human"
-	StatusClosed        = "status:closed"
+	StatusIdea      = "status:idea"
+	StatusPlan      = "status:plan"
+	StatusExecuting = "status:executing"
+	StatusExecuted  = "status:executed"
+	StatusClosed    = "status:closed"
 )
 
 // Marker labels que no cambian con el estado — identifican el origen del
@@ -51,6 +53,24 @@ var AllValidated = []string{
 	ValidatedNeedsHuman,
 }
 
+// PlanValidated labels que che validate aplica sobre un issue (plan) reflejando
+// el verdict consolidado de los validadores del plan. Son mutuamente
+// excluyentes: antes de aplicar uno, se quitan los otros dos. `che execute`
+// los usa como gate (solo ejecuta si hay plan-validated:approve).
+const (
+	PlanValidatedApprove          = "plan-validated:approve"
+	PlanValidatedChangesRequested = "plan-validated:changes-requested"
+	PlanValidatedNeedsHuman       = "plan-validated:needs-human"
+)
+
+// AllPlanValidated lista los labels plan-validated:* — usado por validate
+// para saber cuáles remover antes de aplicar el nuevo.
+var AllPlanValidated = []string{
+	PlanValidatedApprove,
+	PlanValidatedChangesRequested,
+	PlanValidatedNeedsHuman,
+}
+
 // Transition representa un cambio de estado expresado como labels a remover
 // y labels a agregar. El orden no importa: `gh issue edit` aplica todo en
 // una sola llamada.
@@ -63,33 +83,29 @@ type Transition struct {
 // del resto de los flows (explore) no están acá todavía — cuando se extraiga
 // `internal/flow/common/` esos usos deberían migrar a este paquete.
 //
-// Claves: "from→to". Si el state de origen puede venir con o sin
-// awaiting-human, se acepta cualquiera de los dos (las transiciones quitan
-// awaiting-human explícitamente cuando corresponde).
+// Claves: "from→to". El modelo nuevo no maneja awaiting-human como estado
+// intermedio; los gates de intervención humana viven en los labels
+// plan-validated:* y validated:*, aplicados por `che validate`.
 var validTransitions = map[string]Transition{
-	// execute arranca: plan → executing (lock). Si había awaiting-human (por
-	// alguna razón excepcional: p.ej. revisión humana del plan después de
-	// consolidar) también se lo quitamos — execute asume que el plan está
-	// listo para ejecutar.
+	// execute arranca: plan → executing (lock).
 	StatusPlan + "→" + StatusExecuting: {
-		Remove: []string{StatusPlan, StatusAwaitingHuman},
+		Remove: []string{StatusPlan},
 		Add:    []string{StatusExecuting},
 	},
-	// execute termina OK: executing → executed + awaiting-human.
+	// execute termina OK: executing → executed.
 	StatusExecuting + "→" + StatusExecuted: {
 		Remove: []string{StatusExecuting},
-		Add:    []string{StatusExecuted, StatusAwaitingHuman},
+		Add:    []string{StatusExecuted},
 	},
 	// rollback: executing → plan (cualquier fallo post-lock).
 	StatusExecuting + "→" + StatusPlan: {
-		Remove: []string{StatusExecuting, StatusAwaitingHuman},
+		Remove: []string{StatusExecuting},
 		Add:    []string{StatusPlan},
 	},
-	// close termina OK: executed → closed. Se quita awaiting-human porque
-	// ya no hay nada que esperar de un humano, y los validated:* del PR
-	// quedan en el PR (no pertenecen al issue).
+	// close termina OK: executed → closed. Los validated:* del PR quedan en
+	// el PR (no pertenecen al issue).
 	StatusExecuted + "→" + StatusClosed: {
-		Remove: []string{StatusExecuted, StatusAwaitingHuman},
+		Remove: []string{StatusExecuted},
 		Add:    []string{StatusClosed},
 	},
 }

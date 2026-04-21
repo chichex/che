@@ -15,25 +15,25 @@ func TestTransitionFor_Valid(t *testing.T) {
 			from:    StatusPlan,
 			to:      StatusExecuting,
 			wantAdd: []string{StatusExecuting},
-			wantRem: []string{StatusPlan, StatusAwaitingHuman},
+			wantRem: []string{StatusPlan},
 		},
 		{
 			from:    StatusExecuting,
 			to:      StatusExecuted,
-			wantAdd: []string{StatusExecuted, StatusAwaitingHuman},
+			wantAdd: []string{StatusExecuted},
 			wantRem: []string{StatusExecuting},
 		},
 		{
 			from:    StatusExecuting,
 			to:      StatusPlan,
 			wantAdd: []string{StatusPlan},
-			wantRem: []string{StatusExecuting, StatusAwaitingHuman},
+			wantRem: []string{StatusExecuting},
 		},
 		{
 			from:    StatusExecuted,
 			to:      StatusClosed,
 			wantAdd: []string{StatusClosed},
-			wantRem: []string{StatusExecuted, StatusAwaitingHuman},
+			wantRem: []string{StatusExecuted},
 		},
 	}
 	for _, c := range cases {
@@ -56,11 +56,10 @@ func TestTransitionFor_Invalid(t *testing.T) {
 	cases := []struct {
 		from, to string
 	}{
-		{StatusIdea, StatusExecuting},     // no se puede saltar explore
-		{StatusExecuted, StatusPlan},      // no hay vuelta atrás desde executed
-		{StatusAwaitingHuman, StatusPlan}, // awaiting-human no es un estado "desde"
-		{"", StatusExecuting},             // from vacío
-		{StatusPlan, ""},                  // to vacío
+		{StatusIdea, StatusExecuting},         // no se puede saltar explore
+		{StatusExecuted, StatusPlan},          // no hay vuelta atrás desde executed
+		{"", StatusExecuting},                 // from vacío
+		{StatusPlan, ""},                      // to vacío
 		{StatusPlan, "status:ready-to-close"}, // estado no soportado todavía
 		{StatusPlan, StatusClosed},            // plan no va directo a closed (execute primero)
 		{StatusExecuting, StatusClosed},       // executing no va directo a closed (terminar exec primero)
