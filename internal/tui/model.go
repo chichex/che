@@ -41,6 +41,7 @@ const (
 	screenExecuteLoading
 	screenExecuteSelect
 	screenExecuteAgent
+	screenExecuteValidators
 	screenExecuteRunning
 	screenValidateLoading
 	screenValidateSelect
@@ -132,18 +133,23 @@ type Model struct {
 	exploreValidatorCursor int
 	exploreValidatorCount  map[explore.Agent]int
 
-	// selector de execute: lista de issues en status:plan.
-	executeCandidates []execute.Candidate
-	executeCursor     int
-	executeChosenRef  string
-	executeAgentIdx   int
-	executeChosenAgent execute.Agent
+	// selector de execute: lista de issues en status:plan, seguido de
+	// selector de ejecutor y panel de validadores (default "none" —
+	// counts vacío se renderiza como checkboxes vacíos y el spec llega
+	// vacío al flow).
+	executeCandidates      []execute.Candidate
+	executeCursor          int
+	executeChosenRef       string
+	executeAgentIdx        int
+	executeChosenAgent     execute.Agent
+	executeValidatorCursor int
+	executeValidatorCount  map[execute.Agent]int
 
 	// selector de validate: lista de PRs abiertos + panel de validadores.
-	validateCandidates     []validate.Candidate
-	validateCursor         int
-	validateChosenRef      string
-	validateChosenURL      string
+	validateCandidates      []validate.Candidate
+	validateCursor          int
+	validateChosenRef       string
+	validateChosenURL       string
 	validateValidatorCursor int
 	validateValidatorCount  map[validate.Agent]int
 
@@ -529,6 +535,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleExecuteSelectKey(msg)
 	case screenExecuteAgent:
 		return m.handleExecuteAgentKey(msg)
+	case screenExecuteValidators:
+		return m.handleExecuteValidatorsKey(msg)
 	case screenValidateSelect:
 		return m.handleValidateSelectKey(msg)
 	case screenValidateValidators:
@@ -621,6 +629,7 @@ func (m Model) handleExecuteSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		m.screen = screenMenu
 		m.executeCandidates = nil
+		m.executeValidatorCount = nil
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
@@ -643,6 +652,9 @@ func (m Model) handleExecuteSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		chosen := m.executeCandidates[m.executeCursor]
 		m.executeChosenRef = fmt.Sprint(chosen.Number)
 		m.executeAgentIdx = 0
+		// Default "none" en cada flow nuevo: limpiamos counts de runs previos
+		// para que la pantalla de validadores arranque sin nada marcado.
+		m.executeValidatorCount = nil
 		m.screen = screenExecuteAgent
 		return m, nil
 	}
@@ -665,15 +677,71 @@ func (m Model) handleExecuteAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		m.executeChosenAgent = execute.ValidAgents[m.executeAgentIdx]
-		return m.startExecuteFlow(m.executeChosenRef, m.executeChosenAgent)
+		return m.enterExecuteValidatorsScreen(), nil
 	}
 	for i := range execute.ValidAgents {
 		if k == fmt.Sprint(i+1) {
 			m.executeChosenAgent = execute.ValidAgents[i]
-			return m.startExecuteFlow(m.executeChosenRef, m.executeChosenAgent)
+			return m.enterExecuteValidatorsScreen(), nil
 		}
 	}
 	return m, nil
+}
+
+// enterExecuteValidatorsScreen lleva a la pantalla de selección de
+// validadores del flow execute. A diferencia de explore (que pre-selecciona
+// opus=1), acá el default es "none" — counts vacío se renderiza como
+// checkboxes sin marcar y, si el usuario confirma sin tocar nada, el spec
+// llega vacío a execute.Run (equivalente a --validators none).
+func (m Model) enterExecuteValidatorsScreen() Model {
+	m.executeValidatorCursor = 0
+	if m.executeValidatorCount == nil {
+		m.executeValidatorCount = map[execute.Agent]int{}
+	}
+	m.screen = screenExecuteValidators
+	return m
+}
+
+func (m Model) handleExecuteValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	switch k {
+	case "esc":
+		m.screen = screenExecuteAgent
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		m.executeValidatorCursor = (m.executeValidatorCursor - 1 + len(execute.ValidAgents)) % len(execute.ValidAgents)
+		return m, nil
+	case "down", "j":
+		m.executeValidatorCursor = (m.executeValidatorCursor + 1) % len(execute.ValidAgents)
+		return m, nil
+	case " ", "space", "x":
+		a := execute.ValidAgents[m.executeValidatorCursor]
+		m.executeValidatorCount[a] = (m.executeValidatorCount[a] + 1) % (maxValidatorsPerAgent + 1)
+		return m, nil
+	case "enter":
+		validators := executeValidatorsFromCounts(m.executeValidatorCount)
+		if len(validators) > 3 {
+			return m, nil
+		}
+		return m.startExecuteFlow(m.executeChosenRef, m.executeChosenAgent, validators)
+	}
+	return m, nil
+}
+
+// executeValidatorsFromCounts traduce el mapa de counts a una lista ordenada
+// de execute.Validator con Instance 1..N en el orden canónico de ValidAgents.
+// Mismo shape que validatorsFromCounts de explore.
+func executeValidatorsFromCounts(counts map[execute.Agent]int) []execute.Validator {
+	var out []execute.Validator
+	for _, a := range execute.ValidAgents {
+		n := counts[a]
+		for i := 1; i <= n; i++ {
+			out = append(out, execute.Validator{Agent: a, Instance: i})
+		}
+	}
+	return out
 }
 
 // loadValidateCandidatesCmd lista PRs abiertos del repo vía gh.
@@ -932,15 +1000,15 @@ func (m Model) startValidateFlow(prRef string, validators []validate.Validator) 
 }
 
 // startExecuteFlow arranca execute.Run en background sobre el issue elegido
-// con el agente seleccionado y sin validadores (default 'none' en la TUI —
-// el usuario interactivo típicamente quiere ver el PR listo, los validadores
-// se pueden disparar después desde CLI si hace falta).
+// con el agente seleccionado y la lista de validadores elegida desde la TUI.
+// Si validators es vacío, execute.Run actúa como con --validators none
+// (el usuario sigue pudiendo disparar validadores post-PR desde CLI).
 //
 // Deriva un subcontext cancelable del ctx raíz y lo guarda en m.cancelRun
 // para que el handler de Ctrl+C pueda cancelar solo esta corrida (dejando
 // el ctx raíz vivo para las siguientes). Si llega una señal externa, el
 // ctx raíz se cancela y cascadea.
-func (m Model) startExecuteFlow(issueRef string, agent execute.Agent) (tea.Model, tea.Cmd) {
+func (m Model) startExecuteFlow(issueRef string, agent execute.Agent, validators []execute.Validator) (tea.Model, tea.Cmd) {
 	m.screen = screenExecuteRunning
 	m.runStart = time.Now()
 	m.runLog = []string{}
@@ -952,10 +1020,11 @@ func (m Model) startExecuteFlow(issueRef string, agent execute.Agent) (tea.Model
 	go func(ch chan<- tea.Msg, runCtx context.Context) {
 		var stdout, stderr bytes.Buffer
 		code := execute.Run(issueRef, execute.Opts{
-			Stdout: &stdout,
-			Stderr: &stderr,
-			Agent:  agent,
-			Ctx:    runCtx,
+			Stdout:     &stdout,
+			Stderr:     &stderr,
+			Agent:      agent,
+			Validators: validators,
+			Ctx:        runCtx,
 			OnProgress: func(line string) {
 				ch <- progressMsg{line: line}
 			},
@@ -1173,6 +1242,7 @@ func (m Model) handleResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.exploreNew = nil
 	m.exploreResume = nil
 	m.executeCandidates = nil
+	m.executeValidatorCount = nil
 	m.validateCandidates = nil
 	m.closeReady = nil
 	m.closeBlocked = nil
@@ -1294,6 +1364,8 @@ func (m Model) View() string {
 		return renderExecuteSelect(m)
 	case screenExecuteAgent:
 		return renderExecuteAgent(m)
+	case screenExecuteValidators:
+		return renderExecuteValidators(m)
 	case screenExecuteRunning:
 		return renderRunning(m, "Ejecutando issue…", "Ctrl+C cancela")
 	case screenValidateLoading:
@@ -1497,6 +1569,50 @@ func renderExecuteAgent(m Model) string {
 	}
 	sb.WriteString("\n")
 	sb.WriteString(hintStyle.Render("↑/↓ navega · 1-3 atajo · Enter elige · Esc vuelve · Ctrl+C sale"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+// renderExecuteValidators espeja la pantalla de validadores de explore: lista
+// de checkboxes (0/1/2 por agente) con la misma descripción. Default "none":
+// si el usuario confirma sin tocar nada, execute.Run arranca sin validadores
+// (equivalente a `che execute --validators none`).
+func renderExecuteValidators(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Elegí validadores"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf(
+		"Issue #%s · ejecutor: %s — marcá con space (0 = sin validadores, máx 3)",
+		m.executeChosenRef, m.executeChosenAgent)))
+	sb.WriteString("\n\n")
+
+	total := 0
+	for i, a := range execute.ValidAgents {
+		count := m.executeValidatorCount[a]
+		total += count
+		box := renderCheckbox(count)
+		prefix := "  "
+		style := menuItemStyle
+		if i == m.executeValidatorCursor {
+			prefix = "▸ "
+			style = menuSelectedStyle
+		}
+		name := strings.ToUpper(string(a)[:1]) + string(a)[1:]
+		line := prefix + box + "  " + name
+		// Reusamos las descripciones de explore; los strings de Agent son
+		// idénticos entre paquetes ("opus"/"codex"/"gemini").
+		descKey := explore.Agent(string(a))
+		if desc, ok := validatorAgentDescriptions[descKey]; ok {
+			line += "  " + comingSoonStyle.Render("— "+desc)
+		}
+		sb.WriteString(style.Render(line) + "\n")
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString("  " + renderValidatorTotal(total) + "\n")
+
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("↑/↓ navega · Space cycle 0/1/2 · Enter manda · Esc vuelve · Ctrl+C sale"))
 	sb.WriteString("\n")
 	return sb.String()
 }
