@@ -1,0 +1,12 @@
+{
+  "number": 55,
+  "title": "Issue con status:plan preexistente sin ct:plan",
+  "body": "Alguien editó labels a mano y dejó status:plan sin ct:plan.\n",
+  "url": "https://github.com/acme/demo/issues/55",
+  "state": "OPEN",
+  "labels": [
+    {"name": "type:feature"},
+    {"name": "size:m"},
+    {"name": "status:plan"}
+  ]
+}

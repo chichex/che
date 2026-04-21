@@ -1,0 +1,8 @@
+{
+  "number": 77,
+  "title": "Un issue creado a mano sin labels",
+  "body": "No fue creado por che idea. No tiene ct:plan, ni type:*, ni size:*.\n",
+  "url": "https://github.com/acme/demo/issues/77",
+  "state": "OPEN",
+  "labels": []
+}

@@ -62,25 +62,237 @@ func TestExplore_IssueViewFails_Exit2(t *testing.T) {
 	env.Invocations().AssertNotCalled(t, "claude")
 }
 
-// TestExplore_IssueMissingCtPlanLabel_Exit3: issue fetched OK but doesn't
-// carry ct:plan → exit 3, no claude call, no state mutation.
-func TestExplore_IssueMissingCtPlanLabel_Exit3(t *testing.T) {
+// TestExplore_IssueMissingCtPlan_ClassifiesAndContinues: issue fetched OK
+// pero sin ct:plan → explore lo clasifica con el LLM (mismo prompt que
+// `che idea`), aplica los labels del pipeline (ct:plan, status:idea; type/
+// size ya estaban en la fixture) y continúa el flujo normal hasta el post
+// de comentario + transición a status:plan. El LLM de clasificación y el
+// de exploración se distinguen por regex sobre el prompt ("clasificador de
+// ideas" vs "ingeniero senior").
+func TestExplore_IssueMissingCtPlan_ClassifiesAndContinues(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 99`).RespondStdoutFromFixture("explore/gh_issue_view_without_ctplan.json", 0)
+	// 1) clasificador — mismo prompt que `che idea`.
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`clasificador de ideas`).
+		RespondStdoutFromFixture("idea/sonnet_single.json", 0)
+	// 2) explorer — prompt distinto.
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectGh(`^issue comment 99`).RespondStdout("https://github.com/acme/demo/issues/99#issuecomment-1\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 99 `).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("explore", "--validators", "none", "99")
+	harness.AssertContains(t, out, "Explored")
+
+	inv := env.Invocations()
+	// Ambos prompts deben haberse invocado (clasificador + explorador).
+	if n := len(inv.For("claude")); n != 2 {
+		t.Fatalf("expected 2 claude calls (classifier + explorer), got %d", n)
+	}
+	// El primer `gh issue edit` debe ser la aplicación de labels de
+	// reclasificación (agrega ct:plan + status:idea); la fixture ya tiene
+	// type:fix y size:s, así que esos NO se re-agregan.
+	edits := inv.FindCalls("gh", "issue", "edit", "99")
+	if len(edits) < 2 {
+		t.Fatalf("expected at least 2 gh issue edit calls (reclassify + status transition), got %d", len(edits))
+	}
+	edits[0].AssertArgsContain(t, "--add-label", "ct:plan", "--add-label", "status:idea")
+	// No debería re-agregar type:* o size:* porque ya estaban en la fixture.
+	reclassArgs := strings.Join(edits[0].Args, " ")
+	if strings.Contains(reclassArgs, "type:feature") || strings.Contains(reclassArgs, "size:m") {
+		t.Fatalf("reclassify edit debería preservar type/size existentes; args=%v", edits[0].Args)
+	}
+	// La última edit es la transición a status:plan.
+	edits[len(edits)-1].AssertArgsContain(t,
+		"--remove-label", "status:idea",
+		"--add-label", "status:plan")
+}
+
+// TestExplore_IssueMissingCtPlan_NoTypeSize_AppliesInferred: issue sin
+// ct:plan Y sin type/size → el LLM clasifica y el primer `gh issue edit` debe
+// aplicar también los labels inferidos (type:feature + size:m del fixture de
+// idea) además de ct:plan + status:idea. Cubre la rama principal del issue
+// #31: issues creados a mano sin ningún label del pipeline.
+func TestExplore_IssueMissingCtPlan_NoTypeSize_AppliesInferred(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 77`).RespondStdoutFromFixture("explore/gh_issue_view_without_labels.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`clasificador de ideas`).
+		RespondStdoutFromFixture("idea/sonnet_single.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectGh(`^issue comment 77`).RespondStdout("https://github.com/acme/demo/issues/77#issuecomment-1\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 77 `).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("explore", "--validators", "none", "77")
+	harness.AssertContains(t, out, "Explored")
+
+	inv := env.Invocations()
+	if n := len(inv.For("claude")); n != 2 {
+		t.Fatalf("expected 2 claude calls (classifier + explorer), got %d", n)
+	}
+	edits := inv.FindCalls("gh", "issue", "edit", "77")
+	if len(edits) < 2 {
+		t.Fatalf("expected at least 2 gh issue edit calls (reclassify + status transition), got %d", len(edits))
+	}
+	// La primera edit debe aplicar los 4 labels en una sola llamada atómica:
+	// ct:plan + status:idea + type/size inferidos por el LLM (feature / m del
+	// fixture idea/sonnet_single.json).
+	edits[0].AssertArgsContain(t,
+		"--add-label", "ct:plan",
+		"--add-label", "status:idea",
+		"--add-label", "type:feature",
+		"--add-label", "size:m",
+	)
+	// labels.Ensure debe haberse invocado para cada uno de esos labels (son los
+	// `gh label create --force` idempotentes antes del edit).
+	labelCreates := inv.FindCalls("gh", "label", "create")
+	joined := ""
+	for _, c := range labelCreates {
+		joined += " " + strings.Join(c.Args, " ")
+	}
+	for _, expected := range []string{"ct:plan", "status:idea", "type:feature", "size:m"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected gh label create for %q; calls=%v", expected, labelCreates)
+		}
+	}
+	// La última edit es la transición a status:plan.
+	edits[len(edits)-1].AssertArgsContain(t,
+		"--remove-label", "status:idea",
+		"--add-label", "status:plan")
+}
+
+// TestExplore_IssueMissingCtPlan_ClassifierFails_Exit2: si el LLM falla o
+// devuelve JSON inválido, explore aborta con exit 2 y NO aplica labels
+// parciales. El issue queda como estaba antes.
+func TestExplore_IssueMissingCtPlan_ClassifierFails_Exit2(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 99`).RespondStdoutFromFixture("explore/gh_issue_view_without_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`clasificador de ideas`).
+		RespondExitWithError(1, "network blip\n")
+
+	r := env.Run("explore", "99")
+	if r.ExitCode != 2 {
+		t.Fatalf("expected exit 2, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+
+	inv := env.Invocations()
+	// El explorador no se debería haber invocado — cortamos antes.
+	for _, c := range inv.For("claude") {
+		joined := strings.Join(c.Args, " ")
+		if strings.Contains(joined, "ingeniero senior") {
+			t.Fatalf("explorer prompt should not be invoked when classifier fails; got call with args=%v", c.Args)
+		}
+	}
+	// Nada de labels parciales aplicados al issue.
+	if edits := inv.FindCalls("gh", "issue", "edit", "99"); len(edits) > 0 {
+		t.Fatalf("expected no gh issue edit on classifier failure, got %+v", edits)
+	}
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) > 0 {
+		t.Fatalf("expected no gh issue comment on classifier failure, got %+v", comments)
+	}
+}
+
+// TestExplore_IssueMissingCtPlan_ClassifierInvalidResponse_Exit3: el LLM
+// invoca OK pero devuelve JSON con type fuera del enum (o size inválido,
+// title vacío, items=[]) → explore aborta con exit 3 (ExitSemantic), no con
+// 2 (ExitRetry). Esto cubre la rama del sentinel idea.ErrInvalidResponse:
+// reintentar con la misma entrada va a alucinar de nuevo, así que el error
+// es irremediable y NO debe mapearse a ExitRetry. Como consecuencia: el
+// explorador no se invoca y no quedan labels parciales en el issue.
+func TestExplore_IssueMissingCtPlan_ClassifierInvalidResponse_Exit3(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 99`).RespondStdoutFromFixture("explore/gh_issue_view_without_ctplan.json", 0)
+	// Classifier invoca OK pero el JSON tiene type="bug" (fuera del enum
+	// feature/fix/mejora/ux) → idea.validate devuelve ErrInvalidResponse.
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`clasificador de ideas`).
+		RespondStdoutFromFixture("idea/sonnet_invalid_type.json", 0)
 
 	r := env.Run("explore", "99")
 	if r.ExitCode != 3 {
-		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+		t.Fatalf("expected exit 3 (ExitSemantic via ErrInvalidResponse), got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
-	harness.AssertContains(t, r.Stderr, "ct:plan")
-	env.Invocations().AssertNotCalled(t, "claude")
-	if edits := env.Invocations().FindCalls("gh", "issue", "edit"); len(edits) > 0 {
-		t.Fatalf("unexpected gh issue edit calls: %+v", edits)
+
+	inv := env.Invocations()
+	// El explorador NO debe invocarse — cortamos en reclassify.
+	for _, c := range inv.For("claude") {
+		joined := strings.Join(c.Args, " ")
+		if strings.Contains(joined, "ingeniero senior") {
+			t.Fatalf("explorer prompt should not be invoked when classifier response is invalid; got call with args=%v", c.Args)
+		}
 	}
-	if comments := env.Invocations().FindCalls("gh", "issue", "comment", "--body-file"); len(comments) > 0 {
-		t.Fatalf("unexpected gh issue comment calls: %+v", comments)
+	// No labels parciales aplicados (el edit atómico nunca corre).
+	if edits := inv.FindCalls("gh", "issue", "edit", "99"); len(edits) > 0 {
+		t.Fatalf("expected no gh issue edit on invalid classifier response, got %+v", edits)
+	}
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) > 0 {
+		t.Fatalf("expected no gh issue comment on invalid classifier response, got %+v", comments)
+	}
+}
+
+// TestExplore_IssueMissingCtPlan_WithPreexistingStatus_PreservesStatus:
+// issue sin ct:plan pero con status:* preexistente (editado a mano) →
+// reclassify preserva el status y SOLO agrega ct:plan, sin meter un
+// status:idea arriba del status existente. Downstream, si ese status era
+// status:plan, el flow termina en "already explored" (ExitSemantic) porque
+// el gate decide después de reclassify mirando los labels resultantes.
+// Este test fija ese contrato — cuando se rediseñe el comportamiento,
+// flippear la aserción.
+func TestExplore_IssueMissingCtPlan_WithPreexistingStatus_PreservesStatus(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 55`).RespondStdoutFromFixture("explore/gh_issue_view_status_without_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`clasificador de ideas`).
+		RespondStdoutFromFixture("idea/sonnet_single.json", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 55 `).RespondStdout("ok\n", 0)
+
+	r := env.Run("explore", "55")
+	// El issue queda con status:plan tras reclassify → gate downstream
+	// decide "already explored" y corta con ExitSemantic.
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3 (already explored tras reclassify que preserva status), got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "already")
+
+	inv := env.Invocations()
+	// El reclassify edit debe agregar SOLO ct:plan. No status:idea (porque
+	// ya hay status:plan), no type/size (ya estaban en el fixture).
+	edits := inv.FindCalls("gh", "issue", "edit", "55")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 gh issue edit (reclassify only; flow corta en gate), got %d", len(edits))
+	}
+	edits[0].AssertArgsContain(t, "--add-label", "ct:plan")
+	reclassArgs := strings.Join(edits[0].Args, " ")
+	if strings.Contains(reclassArgs, "status:idea") {
+		t.Fatalf("reclassify debería preservar status:plan y NO agregar status:idea; args=%v", edits[0].Args)
+	}
+	if strings.Contains(reclassArgs, "type:feature") || strings.Contains(reclassArgs, "size:m") {
+		t.Fatalf("reclassify debería preservar type/size existentes; args=%v", edits[0].Args)
+	}
+	// El explorador NO se invoca porque el gate post-reclassify rechaza.
+	for _, c := range inv.For("claude") {
+		joined := strings.Join(c.Args, " ")
+		if strings.Contains(joined, "ingeniero senior") {
+			t.Fatalf("explorer prompt should not be invoked when issue ends up already-planned; got args=%v", c.Args)
+		}
 	}
 }
 

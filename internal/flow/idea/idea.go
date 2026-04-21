@@ -6,6 +6,7 @@ package idea
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,13 @@ import (
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
 )
+
+// ErrInvalidResponse indica que la respuesta del LLM parseó pero violó el
+// contrato (JSON sin items, type/size fuera del enum, title/idea vacíos).
+// Expuesto como sentinel para que callers externos (p.ej. explore) puedan
+// distinguir con errors.Is un error irremediable (LLM alucinó, reintentar no
+// sirve) de un fallo de invocación (red, binario caído).
+var ErrInvalidResponse = errors.New("invalid llm response")
 
 // Response es lo que esperamos que devuelva el agente de clasificación.
 type Response struct {
@@ -57,6 +65,32 @@ var (
 	validTypes = map[string]bool{"feature": true, "fix": true, "mejora": true, "ux": true}
 	validSizes = map[string]bool{"XS": true, "S": true, "M": true, "L": true, "XL": true}
 )
+
+// Classify invoca al LLM con el prompt de clasificación de ideas y devuelve
+// la respuesta validada. Expuesto para que otros flows (explore) puedan
+// reclassificar issues que no nacieron de `che idea` sin duplicar el prompt
+// ni las reglas de validación (type/size enums, criterios mínimos).
+//
+// El shape devuelto es idéntico al que usa `Run`: items[] con type, size,
+// title, criteria, etc. El caller que solo necesite type+size puede leer
+// Items[0].
+func Classify(text string, log *output.Logger) (*Response, error) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return nil, fmt.Errorf("%w: text is empty", ErrInvalidResponse)
+	}
+	if log == nil {
+		log = output.New(nil)
+	}
+	resp, err := callClaude(text, log)
+	if err != nil {
+		return nil, err
+	}
+	if err := validate(resp); err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
 
 // Run ejecuta el flow completo.
 func Run(text string, opts Opts) ExitCode {
@@ -269,20 +303,20 @@ Idea del usuario:
 
 func validate(r *Response) error {
 	if len(r.Items) == 0 {
-		return fmt.Errorf("items array is empty")
+		return fmt.Errorf("%w: items array is empty", ErrInvalidResponse)
 	}
 	for i, it := range r.Items {
 		if !validTypes[it.Type] {
-			return fmt.Errorf("item %d: type %q not in [feature fix mejora ux]", i, it.Type)
+			return fmt.Errorf("%w: item %d: type %q not in [feature fix mejora ux]", ErrInvalidResponse, i, it.Type)
 		}
 		if !validSizes[strings.ToUpper(it.Size)] {
-			return fmt.Errorf("item %d: size %q not in [XS S M L XL]", i, it.Size)
+			return fmt.Errorf("%w: item %d: size %q not in [XS S M L XL]", ErrInvalidResponse, i, it.Size)
 		}
 		if strings.TrimSpace(it.Title) == "" {
-			return fmt.Errorf("item %d: title is required", i)
+			return fmt.Errorf("%w: item %d: title is required", ErrInvalidResponse, i)
 		}
 		if strings.TrimSpace(it.Idea) == "" {
-			return fmt.Errorf("item %d: idea is required", i)
+			return fmt.Errorf("%w: item %d: idea is required", ErrInvalidResponse, i)
 		}
 	}
 	return nil
