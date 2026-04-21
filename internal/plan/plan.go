@@ -11,13 +11,14 @@
 // más de una ocurrencia del header "## Plan consolidado" (ambigüedad
 // irrecuperable). Para cualquier otro caso no-parseable (body vacío, header
 // ausente, header único sin sub-secciones) devuelve (&ConsolidatedPlan{
-// Summary: body}, nil) y loguea un warning — el caller puede seguir con un
-// plan degradado en vez de abortar.
+// Summary: body}, nil) silenciosamente — el caller inspecciona el resultado
+// (campos vacíos o HasConsolidatedHeader) y decide si seguir con un plan
+// degradado o abortar. El parser no escribe a stdout/stderr para no acoplar
+// el paquete al logger global ni ensuciar la CLI.
 package plan
 
 import (
 	"fmt"
-	"log"
 	"regexp"
 	"strings"
 )
@@ -117,9 +118,12 @@ var ErrAmbiguousPlan = fmt.Errorf("body has multiple '## Plan consolidado' heade
 //     accionable.
 //   - En cualquier otro caso (body vacío, header ausente, header único sin
 //     sub-secciones parseables, secciones vacías) devuelve
-//     (&ConsolidatedPlan{Summary: body}, nil) y loguea un warning. El
-//     ejecutor puede trabajar con eso aunque sea menos guiado — el issue
-//     legacy sigue siendo procesable.
+//     (&ConsolidatedPlan{Summary: body}, nil) sin loguear nada. El caller
+//     decide si el resultado es procesable: un plan con Summary=body (sin
+//     Goal/Steps/AC) es un issue legacy válido, pero un plan con header
+//     presente y sub-secciones vacías típicamente es un plan degradado que
+//     conviene re-consolidar — ese distinction la hace el caller (ver
+//     HasConsolidatedHeader).
 //
 // Detección y extracción son consistentes: ambas usan findRealHeaders, que
 // solo cuenta líneas que empiezan exactamente con el prefijo y están fuera
@@ -136,13 +140,9 @@ func Parse(body string) (*ConsolidatedPlan, error) {
 		return nil, ErrAmbiguousPlan
 	}
 
-	// Sin header real → fallback silencioso con warning.
+	// Sin header real → fallback silencioso. El caller ve que Goal/Steps/AC
+	// quedaron vacíos y actúa acorde.
 	if len(headers) == 0 {
-		if body != "" {
-			log.Printf("plan.Parse: body sin header '%s', usando summary=body como fallback", consolidatedHeader)
-		} else {
-			log.Printf("plan.Parse: body vacío, usando summary=\"\" como fallback")
-		}
 		return &ConsolidatedPlan{Summary: body}, nil
 	}
 
@@ -186,13 +186,23 @@ func Parse(body string) (*ConsolidatedPlan, error) {
 		p.RisksToMitigate = parseRisks(v)
 	}
 
-	// Header único pero sin contenido parseable: fallback con warning.
+	// Header único pero sin contenido parseable: fallback silencioso. El
+	// caller distingue este caso porque HasConsolidatedHeader devuelve true
+	// sobre el body pero Goal/Steps/AC quedan vacíos.
 	if p.Summary == "" && p.Goal == "" && len(p.Steps) == 0 && len(p.AcceptanceCriteria) == 0 {
-		log.Printf("plan.Parse: header '%s' presente pero sin sub-secciones parseables, usando summary=body como fallback", consolidatedHeader)
 		return &ConsolidatedPlan{Summary: body}, nil
 	}
 
 	return p, nil
+}
+
+// HasConsolidatedHeader indica si body tiene al menos una ocurrencia real
+// (fuera de prosa y de bloques fenced) del header "## Plan consolidado".
+// Es la misma detección que usa Parse para decidir el branch de fallback vs
+// extracción; se expone para que el caller pueda diferenciar un issue legacy
+// (sin header) de un plan degradado (con header pero sub-secciones vacías).
+func HasConsolidatedHeader(body string) bool {
+	return len(findRealHeaders(strings.TrimSpace(body), consolidatedHeader)) > 0
 }
 
 // findRealHeaders devuelve los offsets (en bytes) del comienzo de cada línea
@@ -216,12 +226,6 @@ func findRealHeaders(body, prefix string) []int {
 		offset += len(line) + 1
 	}
 	return positions
-}
-
-// countConsolidatedHeaders se mantiene como wrapper estable para tests; es
-// equivalente a len(findRealHeaders(body, consolidatedHeader)).
-func countConsolidatedHeaders(body string) int {
-	return len(findRealHeaders(body, consolidatedHeader))
 }
 
 // extractSection devuelve el texto entre un header (ej. "## X") y el próximo

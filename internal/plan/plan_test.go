@@ -59,6 +59,14 @@ func nonNilRisks(s []Risk) []Risk {
 	return s
 }
 
+// countConsolidatedHeaders es un helper de test equivalente a
+// len(findRealHeaders(body, consolidatedHeader)). Vive acá porque no tiene
+// callers de producción; los tests de abajo lo usan para aislar la lógica
+// de detección de headers reales (ignora prosa y bloques fenced).
+func countConsolidatedHeaders(body string) int {
+	return len(findRealHeaders(body, consolidatedHeader))
+}
+
 func TestRoundTrip_Minimal(t *testing.T) {
 	p := &ConsolidatedPlan{
 		Summary:            "una línea",
