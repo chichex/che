@@ -61,6 +61,28 @@ const (
 // ponemos tope 2 para mantener la suma razonable (1-3 validadores en total).
 const maxValidatorsPerAgent = 2
 
+// maxValidatorsTotal es el tope absoluto de validadores disparables en una
+// tanda, compartido por los 3 flows (explore, execute, validate). Está por
+// encima de maxValidatorsPerAgent porque el usuario puede combinar agentes
+// distintos, pero acota el costo total por run.
+const maxValidatorsTotal = 3
+
+// buildValidatorList traduce un mapa de counts a una lista ordenada de
+// validadores con Instance 1..N, respetando el orden canónico de agents.
+// Genérico para compartirse entre los 3 flows de validators (explore,
+// execute, validate) sin acoplar tipos; mk es el constructor concreto que
+// cada flow provee para envolver (Agent, instance) en su propio Validator.
+func buildValidatorList[A comparable, V any](agents []A, counts map[A]int, mk func(a A, inst int) V) []V {
+	var out []V
+	for _, a := range agents {
+		n := counts[a]
+		for i := 1; i <= n; i++ {
+			out = append(out, mk(a, i))
+		}
+	}
+	return out
+}
+
 // validatorAgentDescriptions son los textos cortos que se muestran al lado
 // de cada checkbox. Orden pensado para diversidad: Opus primero (mismo
 // ejecutor por default), después los otros dos.
@@ -722,7 +744,7 @@ func (m Model) handleExecuteValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		validators := executeValidatorsFromCounts(m.executeValidatorCount)
-		if len(validators) > 3 {
+		if len(validators) > maxValidatorsTotal {
 			return m, nil
 		}
 		return m.startExecuteFlow(m.executeChosenRef, m.executeChosenAgent, validators)
@@ -732,16 +754,12 @@ func (m Model) handleExecuteValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // executeValidatorsFromCounts traduce el mapa de counts a una lista ordenada
 // de execute.Validator con Instance 1..N en el orden canónico de ValidAgents.
-// Mismo shape que validatorsFromCounts de explore.
+// Mismo shape que validatorsFromCounts de explore — ambos delegan a
+// buildValidatorList para evitar drift.
 func executeValidatorsFromCounts(counts map[execute.Agent]int) []execute.Validator {
-	var out []execute.Validator
-	for _, a := range execute.ValidAgents {
-		n := counts[a]
-		for i := 1; i <= n; i++ {
-			out = append(out, execute.Validator{Agent: a, Instance: i})
-		}
-	}
-	return out
+	return buildValidatorList(execute.ValidAgents, counts, func(a execute.Agent, inst int) execute.Validator {
+		return execute.Validator{Agent: a, Instance: inst}
+	})
 }
 
 // loadValidateCandidatesCmd lista PRs abiertos del repo vía gh.
@@ -812,7 +830,7 @@ func (m Model) handleValidateValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		validators := validateValidatorsFromCounts(m.validateValidatorCount)
 		total := len(validators)
 		// validate REQUIERE al menos 1 validador (a diferencia de explore).
-		if total < 1 || total > 3 {
+		if total < 1 || total > maxValidatorsTotal {
 			return m, nil
 		}
 		return m.startValidateFlow(m.validateChosenRef, validators)
@@ -823,14 +841,9 @@ func (m Model) handleValidateValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 // validateValidatorsFromCounts traduce el mapa de counts del TUI a una lista
 // de validate.Validator con instance correcto en el orden canónico.
 func validateValidatorsFromCounts(counts map[validate.Agent]int) []validate.Validator {
-	var out []validate.Validator
-	for _, a := range validate.ValidAgents {
-		n := counts[a]
-		for i := 1; i <= n; i++ {
-			out = append(out, validate.Validator{Agent: a, Instance: i})
-		}
-	}
-	return out
+	return buildValidatorList(validate.ValidAgents, counts, func(a validate.Agent, inst int) validate.Validator {
+		return validate.Validator{Agent: a, Instance: inst}
+	})
 }
 
 // loadIterateCandidatesCmd lista PRs con validated:changes-requested —
@@ -1190,8 +1203,8 @@ func (m Model) handleExploreValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		validators := validatorsFromCounts(m.exploreValidatorCount)
 		total := len(validators)
-		// Reglas: 0 (skip) o 1-3 son válidos; 4+ no.
-		if total > 3 {
+		// Reglas: 0 (skip) o 1-N son válidos; N+1+ no.
+		if total > maxValidatorsTotal {
 			return m, nil
 		}
 		return m.startExploreFlow(m.exploreChosenRef, m.exploreChosenAgent, validators)
@@ -1202,14 +1215,9 @@ func (m Model) handleExploreValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // validatorsFromCounts traduce el mapa de counts a una lista de Validators
 // con instance correcto (1, 2, ...) en el orden canónico de ValidAgents.
 func validatorsFromCounts(counts map[explore.Agent]int) []explore.Validator {
-	var out []explore.Validator
-	for _, a := range explore.ValidAgents {
-		n := counts[a]
-		for i := 1; i <= n; i++ {
-			out = append(out, explore.Validator{Agent: a, Instance: i})
-		}
-	}
-	return out
+	return buildValidatorList(explore.ValidAgents, counts, func(a explore.Agent, inst int) explore.Validator {
+		return explore.Validator{Agent: a, Instance: inst}
+	})
 }
 
 func (m Model) handleIdeaInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
