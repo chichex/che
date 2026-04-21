@@ -195,8 +195,21 @@ type Model struct {
 
 	// resultado final
 	resultLines []string
-	resultOK    bool
+	resultKind  resultKind
 }
+
+// resultKind distingue el tipo de pantalla final:
+//   - resultInfo (zero value) — empty state informativo (sin items que
+//     mostrar, acción no aplicable). NO es error.
+//   - resultSuccess — el flow terminó OK.
+//   - resultError — error real: exit code no-OK, o fetch que falló.
+type resultKind int
+
+const (
+	resultInfo resultKind = iota
+	resultSuccess
+	resultError
+)
 
 // New construye el modelo inicial. version es el tag con el que se buildeó
 // el binario (ej. "0.0.8"). El repo y la branch se detectan en el momento.
@@ -370,13 +383,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case iterateCandidatesLoadedMsg:
 		if msg.err != nil {
 			m.screen = screenResult
-			m.resultOK = false
+			m.resultKind = resultError
 			m.resultLines = []string{"error: " + msg.err.Error()}
 			return m, nil
 		}
 		if len(msg.items) == 0 {
 			m.screen = screenResult
-			m.resultOK = false
+			m.resultKind = resultInfo
 			m.resultLines = []string{
 				"No hay PRs con validated:changes-requested en este repo.",
 				"Corré `che validate <pr>` y si pide cambios, volvé acá.",
@@ -391,13 +404,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case closeCandidatesLoadedMsg:
 		if msg.err != nil {
 			m.screen = screenResult
-			m.resultOK = false
+			m.resultKind = resultError
 			m.resultLines = []string{"error: " + msg.err.Error()}
 			return m, nil
 		}
 		if len(msg.ready)+len(msg.blocked) == 0 {
 			m.screen = screenResult
-			m.resultOK = false
+			m.resultKind = resultInfo
 			m.resultLines = []string{
 				"No hay PRs abiertos que cerrar en este repo.",
 				"Abrí un PR con `che execute` o validá uno existente antes.",
@@ -413,13 +426,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case validateCandidatesLoadedMsg:
 		if msg.err != nil {
 			m.screen = screenResult
-			m.resultOK = false
+			m.resultKind = resultError
 			m.resultLines = []string{"error: " + msg.err.Error()}
 			return m, nil
 		}
 		if len(msg.items) == 0 {
 			m.screen = screenResult
-			m.resultOK = false
+			m.resultKind = resultInfo
 			m.resultLines = []string{
 				"No hay PRs abiertos en este repo.",
 				"Abrí un PR antes (por ej. con `che execute`) y volvé a intentar.",
@@ -434,13 +447,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case executeCandidatesLoadedMsg:
 		if msg.err != nil {
 			m.screen = screenResult
-			m.resultOK = false
+			m.resultKind = resultError
 			m.resultLines = []string{"error: " + msg.err.Error()}
 			return m, nil
 		}
 		if len(msg.items) == 0 {
 			m.screen = screenResult
-			m.resultOK = false
+			m.resultKind = resultInfo
 			m.resultLines = []string{
 				"No hay issues con label ct:plan + status:plan listos para ejecutar.",
 				"Primero corré `che explore <issue>` sobre un issue en status:idea.",
@@ -455,7 +468,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case resumeInspectedMsg:
 		if msg.err != nil {
 			m.screen = screenResult
-			m.resultOK = false
+			m.resultKind = resultError
 			m.resultLines = []string{"error leyendo run anterior: " + msg.err.Error()}
 			return m, nil
 		}
@@ -474,13 +487,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case exploreCandidatesLoadedMsg:
 		if msg.err != nil {
 			m.screen = screenResult
-			m.resultOK = false
+			m.resultKind = resultError
 			m.resultLines = []string{"error: " + msg.err.Error()}
 			return m, nil
 		}
 		if len(msg.newItems) == 0 && len(msg.resumeItems) == 0 {
 			m.screen = screenResult
-			m.resultOK = false
+			m.resultKind = resultInfo
 			m.resultLines = []string{
 				"No hay issues con label ct:plan listos para explorar.",
 				"Tampoco hay issues en pausa esperando tu respuesta.",
@@ -509,7 +522,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // (URLs o errores); m.runLog se muestra arriba para preservar el contexto.
 func (m Model) finishRun(exitCode int, ok bool, stdout, stderr string) Model {
 	m.screen = screenResult
-	m.resultOK = ok
+	if ok {
+		m.resultKind = resultSuccess
+	} else {
+		m.resultKind = resultError
+	}
 	var lines []string
 	lines = append(lines, splitNonEmpty(stdout)...)
 	lines = append(lines, splitNonEmpty(stderr)...)
@@ -1872,10 +1889,13 @@ func exploreCandidateLine(c explore.Candidate, selected bool) string {
 
 func renderResult(m Model) string {
 	var sb strings.Builder
-	if m.resultOK {
+	switch m.resultKind {
+	case resultSuccess:
 		sb.WriteString(successStyle.Render("✓ Listo"))
-	} else {
+	case resultError:
 		sb.WriteString(errorStyle.Render("✗ Error"))
+	default: // resultInfo
+		sb.WriteString(titleStyle.Render("Sin resultados"))
 	}
 	sb.WriteString("\n")
 
@@ -1890,11 +1910,15 @@ func renderResult(m Model) string {
 		}
 	}
 
-	// Resumen final (URLs creadas o mensaje de error).
+	// Detalle final: URLs creadas / mensaje de error / explicación del
+	// empty state. El header "Resultado:" no tiene sentido para info
+	// (empty state) — ahí las lineas ya son la explicación completa.
 	if len(m.resultLines) > 0 {
 		sb.WriteString("\n")
-		sb.WriteString(subtitleStyle.Render("Resultado:"))
-		sb.WriteString("\n")
+		if m.resultKind != resultInfo {
+			sb.WriteString(subtitleStyle.Render("Resultado:"))
+			sb.WriteString("\n")
+		}
 		for _, line := range m.resultLines {
 			style := logLineStyle
 			if strings.HasPrefix(line, "error:") || strings.Contains(line, "(exit ") {
