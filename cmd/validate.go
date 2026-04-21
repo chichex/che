@@ -11,20 +11,25 @@ import (
 var validateValidatorsFlag string
 
 var validateCmd = &cobra.Command{
-	Use:   "validate <pr-ref>",
-	Short: "valida un PR corriendo validadores (opus/codex/gemini) sobre el diff y postea findings como comments",
-	Long: `validate toma una referencia a un PR abierto, descarga su diff, y corre
-1-3 validadores en paralelo (opus, codex, gemini) sobre el diff. Cada
-validador postea su análisis como un comment del PR, y al final se postea
-un comment resumen con la tabla de verdicts. validate es SYNC: espera a
-que todos los comments estén posteados antes de retornar.
+	Use:   "validate <ref>",
+	Short: "valida un plan (issue) o un PR corriendo validadores (opus/codex/gemini) y postea findings como comments",
+	Long: `validate detecta automáticamente si <ref> apunta a un issue en status:plan
+o a un PR abierto, y despacha al modo correspondiente:
 
-validate NO toca el draft/ready del PR, ni los labels del issue vinculado,
-ni cierra nada — solo comments.
+  che validate 42       # issue en status:plan → valida el plan consolidado del body,
+                        #   postea comments en el issue y aplica plan-validated:*
+  che validate 7        # PR abierto → valida el diff, postea comments en el PR y
+                        #   aplica validated:*
 
-Formatos aceptados para <pr-ref>:
+En ambos modos corren 1-3 validadores en paralelo (opus, codex, gemini);
+cada uno postea su análisis como un comment y al final se postea un comment
+resumen con la tabla de verdicts. validate es SYNC: espera a que todos los
+comments estén posteados antes de retornar.
+
+Formatos aceptados para <ref>:
   che validate 7
   che validate https://github.com/owner/repo/pull/7
+  che validate https://github.com/owner/repo/issues/42
   che validate owner/repo#7
 
 Validadores (--validators): 1-3 separados por coma, pueden repetir tipo
@@ -43,10 +48,10 @@ abrir el HTML.`,
 			os.Stderr.WriteString("error: invalid --validators: " + err.Error() + "\n")
 			os.Exit(int(validate.ExitSemantic))
 		}
-		if _, err := validate.ParsePRRef(args[0]); err != nil {
+		if _, err := validate.ParseRef(args[0]); err != nil {
 			cmd.SilenceUsage = true
 			cmd.SilenceErrors = true
-			os.Stderr.WriteString("error: invalid pr ref: " + err.Error() + "\n")
+			os.Stderr.WriteString("error: invalid ref: " + err.Error() + "\n")
 			os.Exit(int(validate.ExitSemantic))
 		}
 		code := validate.Run(args[0], validate.Opts{

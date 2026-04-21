@@ -44,7 +44,7 @@ Formatos aceptados para <pr-ref>:
 No hay flag --agent: close usa opus (claude) por diseño.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if _, err := validate.ParsePRRef(args[0]); err != nil {
+		if _, err := validate.ParseRef(args[0]); err != nil {
 			cmd.SilenceUsage = true
 			cmd.SilenceErrors = true
 			os.Stderr.WriteString("error: invalid pr ref: " + err.Error() + "\n")

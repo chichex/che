@@ -1,0 +1,6 @@
+{
+  "number": 42,
+  "title": "Agregar rate limiting al endpoint /login",
+  "state": "open",
+  "pull_request": null
+}

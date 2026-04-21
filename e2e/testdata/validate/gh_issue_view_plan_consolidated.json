@@ -1,0 +1,13 @@
+{
+  "number": 42,
+  "title": "Agregar rate limiting al endpoint /login",
+  "body": "## Plan consolidado (post-exploración)\n\n**Resumen:** Rate limit al login para frenar brute force.\n\n**Goal:** Bloquear >5 intentos/minuto por IP en /login.\n\n### Criterios de aceptación\n- [ ] El 6to intento dentro de una ventana de 60s devuelve HTTP 429.\n- [ ] El contador se resetea tras 60s de inactividad.\n- [ ] Tests unitarios cubren la ventana deslizante.\n\n### Approach\nMiddleware in-memory con LRU cacheada por IP. Se monta solo en /login; no global.\n\n### Pasos\n1. Agregar middleware ratelimit con LRU de tamaño 10_000.\n2. Wirearlo únicamente a /login en el router.\n3. Agregar test de ventana deslizante y test de expiración.\n\n### Riesgos a mitigar\n- **IPs compartidas (NAT)** (likelihood=low, impact=medium) — usar IP+user-agent como key.\n\n### Fuera de alcance\n- Rate limit global para otros endpoints.\n\n---\n\n## Idea original (de `che idea`)\n\nNecesitamos frenar brute force al login; alguien nos reportó 500 intentos/hora.\n",
+  "url": "https://github.com/acme/demo/issues/42",
+  "state": "OPEN",
+  "labels": [
+    {"name": "ct:plan"},
+    {"name": "status:plan"},
+    {"name": "type:feat"},
+    {"name": "size:s"}
+  ]
+}

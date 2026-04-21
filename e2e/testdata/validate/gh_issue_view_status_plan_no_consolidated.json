@@ -1,0 +1,11 @@
+{
+  "number": 42,
+  "title": "Issue con status:plan pero sin plan consolidado",
+  "body": "alguien puso el label a mano pero el body es solo texto libre sin header de plan consolidado.",
+  "url": "https://github.com/acme/demo/issues/42",
+  "state": "OPEN",
+  "labels": [
+    {"name": "ct:plan"},
+    {"name": "status:plan"}
+  ]
+}

@@ -121,7 +121,7 @@ func Run(prRef string, opts Opts) ExitCode {
 		log.Error("pr ref is empty")
 		return ExitSemantic
 	}
-	if _, err := validate.ParsePRRef(prRef); err != nil {
+	if _, err := validate.ParseRef(prRef); err != nil {
 		log.Error("pr ref invalido", output.F{Cause: err})
 		return ExitSemantic
 	}
