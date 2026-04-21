@@ -466,3 +466,64 @@ func TestValidateAndNormalize_ResumeRoundTrip_ApproveWithProductFinding(t *testi
 		t.Fatalf("expected resume prompt to NOT render codex#1 with verdict=approve (crudo pre-canonicalización); got:\n%s", prompt)
 	}
 }
+
+// TestCoversSamePlanQuestion_ParaphrasedWithWhy: caso real del issue chichex/cvm#20.
+// El validador copia la pregunta del plan cambiando un verbo ('debe generar' →
+// 'incluye') y concatena el "why" después del signo de pregunta. Las heurísticas
+// viejas (contains, quoted, meta+overlap) no lo detectan, y el finding duplicado
+// se filtra a "Observaciones adicionales". La similitud Jaccard sobre la primera
+// oración interrogativa sí debe pescarlo.
+func TestCoversSamePlanQuestion_ParaphrasedWithWhy(t *testing.T) {
+	planQs := []Question{
+		{Q: "¿El output de /idea es solo el issue en GitHub, o también debe generar un esqueleto de plan inicial (archivo local, comentario en el issue, o nota en memory)?", Blocker: true},
+	}
+	finding := "¿El output de /idea es solo el issue en GitHub, o también incluye un esqueleto de plan inicial (archivo local, comentario en el issue, o nota en memory)? El body lo deja explícitamente abierto en Notas/warnings y la respuesta define scope, integración con /pr y formato del output."
+
+	if !coversSamePlanQuestion(finding, normalizeQuestion(finding), planQs) {
+		t.Fatalf("expected paraphrased finding (verbo cambiado + why concatenado) to be detected as duplicate via Jaccard")
+	}
+}
+
+// TestCoversSamePlanQuestion_ParaphrasedReordered: segunda pregunta del mismo
+// issue — el validador reordena el orden de las opciones ("interactiva o
+// automática" en vez de "automática o pedir confirmación") y agrega un "why"
+// extenso. Mismo tema, debe deduplicarse.
+func TestCoversSamePlanQuestion_ParaphrasedReordered(t *testing.T) {
+	planQs := []Question{
+		{Q: "¿El skill debe inferir type/size automáticamente, o pedir confirmación interactiva al usuario antes de crear el issue?", Blocker: true},
+	}
+	finding := "¿La clasificación type/size debe ser interactiva (mostrar inferencia y pedir confirmación) o totalmente automática y silenciosa? Es una política UX que el repo no zanja con precedente claro (/issue no clasifica, /s sí pide selección) y determina la modalidad del skill."
+
+	if !coversSamePlanQuestion(finding, normalizeQuestion(finding), planQs) {
+		t.Fatalf("expected reordered paraphrase to be detected as duplicate via Jaccard")
+	}
+}
+
+// TestCollectValidatorQuestions_Issue20Paraphrase: end-to-end del caso real
+// del issue #20. Dos findings del validador que parafrasean las 2 preguntas
+// del plan deben descartarse — la lista de extras queda vacía.
+func TestCollectValidatorQuestions_Issue20Paraphrase(t *testing.T) {
+	planQs := []Question{
+		{Q: "¿El output de /idea es solo el issue en GitHub, o también debe generar un esqueleto de plan inicial (archivo local, comentario en el issue, o nota en memory)?", Blocker: true, Kind: KindProduct},
+		{Q: "¿El skill debe inferir type/size automáticamente, o pedir confirmación interactiva al usuario antes de crear el issue?", Blocker: true, Kind: KindProduct},
+	}
+	results := []validatorResult{
+		{
+			Validator: Validator{Agent: AgentOpus, Instance: 1},
+			Response: &ValidatorResponse{
+				Verdict: "needs_human",
+				Findings: []Finding{
+					{Severity: "blocker", Area: "questions", NeedsHuman: true, Kind: KindProduct,
+						Issue: "¿El output de /idea es solo el issue en GitHub, o también incluye un esqueleto de plan inicial (archivo local, comentario en el issue, o nota en memory)? El body lo deja explícitamente abierto en Notas/warnings y la respuesta define scope, integración con /pr y formato del output."},
+					{Severity: "blocker", Area: "questions", NeedsHuman: true, Kind: KindProduct,
+						Issue: "¿La clasificación type/size debe ser interactiva (mostrar inferencia y pedir confirmación) o totalmente automática y silenciosa? Es una política UX que el repo no zanja con precedente claro (/issue no clasifica, /s sí pide selección) y determina la modalidad del skill."},
+				},
+			},
+		},
+	}
+
+	extras := collectValidatorQuestions(results, planQs)
+	if len(extras) != 0 {
+		t.Fatalf("expected 2 paraphrased findings to be filtered as duplicates, got %d extras: %+v", len(extras), extras)
+	}
+}

@@ -1559,12 +1559,12 @@ Para cada pregunta en questions[] del plan, clasificala en tu review:
     * where="questions[<índice o texto>]"
     * kind="product"
     * needs_human=true
-    * issue: reformulá la pregunta del ejecutor con tus palabras si aporta claridad, o citala tal cual.
-    * suggestion: vacío, o una nota sobre por qué es irreducible.
+    * issue: CITÁ la pregunta del ejecutor TAL CUAL aparece en questions[].q (texto exacto, incluyendo "¿...?"). NO la reformules, NO cambies verbos, NO reordenes opciones, NO concatenes justificaciones ni "why" después del signo de pregunta. Si citás textualmente, el flow detecta que es un espejo y no la duplica en el pedido al humano. Si la reformulás, aparece duplicada.
+    * suggestion: acá va tu "why" o nota sobre por qué es irreducible (por qué ni el código ni el body la resuelven). NO metas esto dentro de issue — rompe el dedup.
   Ejemplo: ejecutor preguntó "¿El flow cancela automáticamente o espera siempre al humano?" con blocker=true kind=product. Finding espejo:
     {"severity": "blocker", "area": "questions", "where": "questions[0]", "kind": "product", "needs_human": true,
-     "issue": "Política de timeout del escape humano — cancelar automáticamente vs. esperar indefinidamente es decisión de producto.",
-     "suggestion": ""}
+     "issue": "¿El flow cancela automáticamente o espera siempre al humano?",
+     "suggestion": "Irreducible: es política de UX del proyecto, no se decide leyendo código."}
 - REGLA NEGATIVA DURA: NUNCA emitas verdict="needs_human" sin al menos un finding con kind="product" needs_human=true. Si no encontrás ninguna question product legítima ni ningún gap product propio, el verdict correcto es "approve" o "changes_requested" — nunca "needs_human" a secas. Un verdict=needs_human con findings=[] o solo findings technical/documented es un output inválido que el flow rechaza (degrada a changes_requested).
 - Si kind="technical" o kind="documented" (o sin kind pero claramente cae en una de esas dos categorías): ES UN BUG DEL EJECUTOR. Generá un finding con:
     * severity="minor"
@@ -1812,7 +1812,7 @@ func collectValidatorQuestions(results []validatorResult, planQs []Question) []e
 	return out
 }
 
-// coversSamePlanQuestion aplica 3 heurísticas para decidir si un finding
+// coversSamePlanQuestion aplica 4 heurísticas para decidir si un finding
 // del validador refiere a una pregunta del plan ya listada:
 //
 //  1. Contains exacto en cualquier dirección (caso trivial — cuando el
@@ -1824,6 +1824,12 @@ func collectValidatorQuestions(results []validatorResult, planQs []Question) []e
 //  3. Meta + overlap: si el finding usa una frase típica de "decisión de
 //     producto" / "escalar al humano" / "parte del modelo" y comparte
 //     3+ tokens significativos con alguna pregunta del plan → cubierta.
+//  4. Jaccard sobre la primera oración interrogativa: cuando el validador
+//     replantea la pregunta cambiando un verbo o reordenando términos (y
+//     a veces concatenando el "why" después del "?"), las 3 primeras no la
+//     pescan. Si la oración interrogativa del finding comparte ≥45% de
+//     tokens con alguna planQ (con mínimos para evitar falsos positivos
+//     en preguntas cortas), la consideramos cubierta.
 //
 // La lógica es conservadora: si el validador aporta genuinamente una
 // pregunta nueva que NO comparte tokens centrales ni se parafrasea como
@@ -1857,6 +1863,32 @@ func coversSamePlanQuestion(findingText, findingNorm string, planQs []Question) 
 			planSig := significantTokens(normalizeQuestion(pq.Q))
 			if countCommonTokens(findingSig, planSig) >= 3 {
 				return true
+			}
+		}
+	}
+
+	// (4) Jaccard sobre primera oración interrogativa.
+	if qText := extractFirstQuestion(findingText); qText != "" {
+		qSet := toTokenSet(significantTokens(normalizeQuestion(qText)))
+		if len(qSet) >= 4 {
+			for _, pq := range planQs {
+				planSet := toTokenSet(significantTokens(normalizeQuestion(pq.Q)))
+				if len(planSet) < 4 {
+					continue
+				}
+				shared := 0
+				for k := range qSet {
+					if planSet[k] {
+						shared++
+					}
+				}
+				if shared < 4 {
+					continue
+				}
+				union := len(qSet) + len(planSet) - shared
+				if union > 0 && float64(shared)/float64(union) >= 0.45 {
+					return true
+				}
 			}
 		}
 	}
@@ -2010,6 +2042,23 @@ func containsMetaPhrase(normalized string) bool {
 		}
 	}
 	return false
+}
+
+// extractFirstQuestion devuelve el texto de la primera oración interrogativa
+// del finding (desde '¿' si existe, o desde el inicio, hasta el primer '?').
+// Si no hay '?', devuelve "". Se usa para aislar la pregunta real del "why"
+// que algunos validadores concatenan después — sin esto, el ruido extra baja
+// la similitud y la heurística Jaccard falla.
+func extractFirstQuestion(text string) string {
+	q := strings.Index(text, "?")
+	if q < 0 {
+		return ""
+	}
+	start := 0
+	if openIdx := strings.Index(text[:q], "¿"); openIdx >= 0 {
+		start = openIdx
+	}
+	return strings.TrimSpace(text[start : q+1])
 }
 
 // isMetaFinding detecta cuando un finding del validador es una
