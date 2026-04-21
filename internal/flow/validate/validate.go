@@ -297,6 +297,18 @@ func Run(ref string, opts Opts) ExitCode {
 	log.Step("detectando si el ref es un issue o un PR")
 	target, err := detectTarget(ref)
 	if err != nil {
+		// resolveRefNumber falla solo si el formato del ref es irreparable
+		// (no número, no URL con /pull/N o /issues/N, no owner/repo#N). Eso
+		// es input inválido del usuario → ExitSemantic. El resto de los
+		// fallos vienen de `gh api` (red o 404) y son potencialmente
+		// remediables → ExitRetry. Nota: tras el fix de ParseRef, la rama
+		// semantic es prácticamente inalcanzable desde cmd/validate porque
+		// ya validamos antes; queda como defensa en profundidad para otros
+		// callers (TUI, futuros) que invoquen Run sin pre-validar.
+		if errors.Is(err, errInvalidRef) {
+			log.Error("ref invalido", output.F{Cause: err})
+			return ExitSemantic
+		}
 		log.Error("no se pudo determinar si es issue o PR", output.F{Cause: err})
 		return ExitRetry
 	}
@@ -483,6 +495,13 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 	return ExitOK
 }
 
+// errInvalidRef marca errores de detectTarget/resolveRefNumber que vienen
+// de un ref con formato irreparable (no número, no URL con /pull/ o
+// /issues/, no owner/repo#N). Permite al caller distinguir "input del
+// usuario malformado" (ExitSemantic) de "gh api falló" (ExitRetry) sin
+// tener que parsear strings.
+var errInvalidRef = errors.New("invalid ref")
+
 // detectTarget decide si un ref apunta a un issue o un PR. Consulta el
 // endpoint `gh api repos/:owner/:repo/issues/:n`, que devuelve el mismo
 // shape para issues y PRs pero con un campo `pull_request` no-null cuando
@@ -498,7 +517,7 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 func detectTarget(ref string) (Target, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return TargetUnknown, fmt.Errorf("empty ref")
+		return TargetUnknown, fmt.Errorf("%w: empty ref", errInvalidRef)
 	}
 	number, err := resolveRefNumber(ref)
 	if err != nil {
@@ -561,7 +580,7 @@ func resolveRefNumber(ref string) (int, error) {
 			}
 		}
 	}
-	return 0, fmt.Errorf("could not resolve number from ref %q", ref)
+	return 0, fmt.Errorf("%w: could not resolve number from ref %q", errInvalidRef, ref)
 }
 
 // consolidateVerdict devuelve el verdict consolidado (peor caso) de todos los
@@ -704,26 +723,33 @@ func filterValidatable(raw []PullRequest) []Candidate {
 	return res
 }
 
-// ParsePRRef acepta varios formatos de ref y devuelve una forma que gh
-// entiende:
+// ParseRef acepta varios formatos de ref a issue o PR y devuelve una forma
+// que gh entiende:
 //   - "7" → "7"
 //   - "owner/repo#7" → "owner/repo#7" (gh lo soporta nativo)
-//   - URL completa "https://github.com/owner/repo/pull/7" → tal cual (gh ok)
+//   - URL "https://github.com/owner/repo/pull/7" → tal cual (gh ok)
+//   - URL "https://github.com/owner/repo/issues/42" → tal cual (gh ok)
 //
-// El único formato que rechazamos es el vacío. Para el resto delegamos la
-// validación a `gh pr view` (si el ref es inválido, gh devuelve error y lo
-// propagamos con contexto).
-func ParsePRRef(ref string) (string, error) {
+// El único formato que rechazamos es el vacío o formas irreconocibles. Para
+// el resto delegamos la validación a `gh pr view` / `gh issue view` (si el
+// ref es inválido, gh devuelve error y lo propagamos con contexto).
+//
+// `che validate` lo usa para ambos targets (issue en status:plan o PR); los
+// flows PR-exclusive (iterate, close) siguen llamándolo — si el usuario
+// pasa un issue a esos, el preflight de `FetchPR` falla con un mensaje
+// claro.
+func ParseRef(ref string) (string, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return "", fmt.Errorf("pr ref is empty")
+		return "", fmt.Errorf("ref is empty")
 	}
 	// "7" o número puro → ok.
 	if _, err := strconv.Atoi(ref); err == nil {
 		return ref, nil
 	}
-	// URL de GitHub con /pull/<n> → ok.
-	if strings.HasPrefix(ref, "https://github.com/") && strings.Contains(ref, "/pull/") {
+	// URL de GitHub con /pull/<n> o /issues/<n> → ok.
+	if strings.HasPrefix(ref, "https://github.com/") &&
+		(strings.Contains(ref, "/pull/") || strings.Contains(ref, "/issues/")) {
 		return ref, nil
 	}
 	// owner/repo#N → ok.
@@ -735,7 +761,7 @@ func ParsePRRef(ref string) (string, error) {
 			}
 		}
 	}
-	return "", fmt.Errorf("unrecognized PR ref %q — accepted: '7', 'owner/repo#7', URL", ref)
+	return "", fmt.Errorf("unrecognized ref %q — accepted: '7', 'owner/repo#7', '/pull/N' URL, '/issues/N' URL", ref)
 }
 
 // ---- prechecks ----

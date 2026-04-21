@@ -48,7 +48,7 @@ abrir el HTML.`,
 			os.Stderr.WriteString("error: invalid --validators: " + err.Error() + "\n")
 			os.Exit(int(validate.ExitSemantic))
 		}
-		if _, err := validate.ParsePRRef(args[0]); err != nil {
+		if _, err := validate.ParseRef(args[0]); err != nil {
 			cmd.SilenceUsage = true
 			cmd.SilenceErrors = true
 			os.Stderr.WriteString("error: invalid ref: " + err.Error() + "\n")

@@ -13,7 +13,7 @@ import (
 	planpkg "github.com/chichex/che/internal/plan"
 )
 
-func TestParsePRRef(t *testing.T) {
+func TestParseRef(t *testing.T) {
 	cases := []struct {
 		name    string
 		in      string
@@ -22,16 +22,18 @@ func TestParsePRRef(t *testing.T) {
 		{"number", "7", false},
 		{"large number", "1234", false},
 		{"owner/repo#N", "acme/demo#7", false},
-		{"github URL", "https://github.com/acme/demo/pull/7", false},
+		{"github pull URL", "https://github.com/acme/demo/pull/7", false},
+		{"github issues URL", "https://github.com/acme/demo/issues/42", false},
 		{"empty", "", true},
 		{"whitespace", "   ", true},
 		{"plain text", "foo", true},
-		{"url without /pull/", "https://github.com/acme/demo/issues/7", true},
+		{"non-github URL", "https://gitlab.com/acme/demo/pull/7", true},
+		{"github URL without pull or issues", "https://github.com/acme/demo", true},
 		{"# without repo", "#7", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := ParsePRRef(c.in)
+			_, err := ParseRef(c.in)
 			if c.wantErr && err == nil {
 				t.Fatalf("expected error for %q, got nil", c.in)
 			}
