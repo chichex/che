@@ -479,6 +479,39 @@ func TestShouldCleanupWorktree(t *testing.T) {
 	}
 }
 
+// TestBranchOutcomeMessage cubre las tres ramas del stdout post-merge:
+// keep-branch, "already removed" (auto-delete pre-merge detectado), y el
+// caso default "Deleted branch". El branch "already removed" no se ejerce
+// en e2e porque allí seteamos CHE_CLOSE_SKIP_REMOTE_CHECK=1 (que fuerza
+// preRemoteKnown=false), así que este unit test es la única protección
+// contra regresiones en ese mensaje.
+func TestBranchOutcomeMessage(t *testing.T) {
+	cases := []struct {
+		name             string
+		branch           string
+		keepBranch       bool
+		preRemoteKnown   bool
+		preRemoteMissing bool
+		want             string
+	}{
+		{"keep-branch manda sobre todo lo demás", "feat/x", true, true, true, "Keeping branch feat/x (--keep-branch)"},
+		{"keep-branch sin info de remote", "feat/x", true, false, false, "Keeping branch feat/x (--keep-branch)"},
+		{"already removed: known + missing", "feat/x", false, true, true, "Branch feat/x already removed"},
+		{"deleted: remote conocido y presente pre-merge", "feat/x", false, true, false, "Deleted branch feat/x"},
+		{"deleted: remote desconocido (skip-check / red caída)", "feat/x", false, false, false, "Deleted branch feat/x"},
+		{"deleted: known=false ignora preRemoteMissing=true", "feat/x", false, false, true, "Deleted branch feat/x"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := branchOutcomeMessage(c.branch, c.keepBranch, c.preRemoteKnown, c.preRemoteMissing)
+			if got != c.want {
+				t.Fatalf("branchOutcomeMessage(%q, keep=%v, known=%v, missing=%v) = %q, want %q",
+					c.branch, c.keepBranch, c.preRemoteKnown, c.preRemoteMissing, got, c.want)
+			}
+		})
+	}
+}
+
 // TestIsCheManagedWorktree verifica que solo aceptamos paths bajo
 // `<repoRoot>/.worktrees/` como gestionados por che — el cleanup depende
 // de esto para no tocar el worktree principal ni worktrees del usuario.
@@ -513,31 +546,6 @@ func TestIsCheManagedWorktree(t *testing.T) {
 		})
 	}
 }
-
-func TestLooksLikeMissingBranch(t *testing.T) {
-	cases := []struct {
-		name string
-		err  error
-		want bool
-	}{
-		{"nil", nil, false},
-		{"unrelated", errTest("merge conflict"), false},
-		{"not found", errTest("branch feat/x not found"), true},
-		{"No such branch", errTest("No such branch: feat/x"), true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := looksLikeMissingBranch(c.err); got != c.want {
-				t.Errorf("got %v, want %v", got, c.want)
-			}
-		})
-	}
-}
-
-// errTest es un error trivial solo para los casos de looksLikeMissingBranch.
-type errTest string
-
-func (e errTest) Error() string { return string(e) }
 
 func TestFormatOpusLine(t *testing.T) {
 	cases := []struct {

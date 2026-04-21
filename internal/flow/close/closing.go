@@ -293,9 +293,14 @@ func hasBlockingLabel(p validate.PullRequest) bool {
 //   - Loop MaxFixAttempts: detectar problemas; si hay conflictos o CI rojo
 //     invocar opus en worktree (reuse .worktrees/issue-N si existe, o crear
 //     uno sobre la head branch del PR), commit+push, poll CI.
-//   - Merge con merge commit.
+//   - Merge con merge commit (--delete-branch salvo --keep-branch).
 //   - Cerrar issue asociado + transición de labels a status:closed.
-//   - Cleanup del worktree solo si fue creado por este run (reusado: dejar).
+//   - Cleanup del worktree (ver shouldCleanupWorktree):
+//     · --keep-branch inhibe siempre, aunque el worktree sea propio del run.
+//     · happy path (merge OK): limpia el worktree asociado, sea propio o
+//       reusado/auto-detectado bajo .worktrees/.
+//     · failure path: limpia solo si el worktree es propio del run, para no
+//       borrar trabajo del usuario en worktrees reusados.
 func Run(prRef string, opts Opts) ExitCode {
 	stdout, stderr := opts.Stdout, opts.Stderr
 	keepBranch := opts.KeepBranch
@@ -471,13 +476,7 @@ func Run(prRef string, opts Opts) ExitCode {
 	}
 	mergedOK = true
 
-	if keepBranch {
-		fmt.Fprintf(stdout, "Keeping branch %s (--keep-branch)\n", pr.HeadBranch)
-	} else if preRemoteKnown && preRemoteMissing {
-		fmt.Fprintf(stdout, "Branch %s already removed\n", pr.HeadBranch)
-	} else {
-		fmt.Fprintf(stdout, "Deleted branch %s\n", pr.HeadBranch)
-	}
+	fmt.Fprintln(stdout, branchOutcomeMessage(pr.HeadBranch, keepBranch, preRemoteKnown, preRemoteMissing))
 
 	// Cerrar issues asociados. Después del merge, los que tenían "closes #N"
 	// en el body del PR quedan OPEN un tiempo hasta que github procesa el
@@ -1227,24 +1226,30 @@ func shouldCleanupWorktree(mergedOK, keepBranch, wtOwned bool) bool {
 	return mergedOK || wtOwned
 }
 
+// branchOutcomeMessage formatea la línea de stdout post-merge sobre el destino
+// de la branch remota. Encapsula las tres ramas para poder testearlas sin
+// stubbear ls-remote:
+//   - keepBranch: el usuario pidió preservar.
+//   - preRemoteKnown && preRemoteMissing: la branch ya no estaba antes del
+//     merge (auto-delete previo o borrado manual), así que --delete-branch fue
+//     no-op y reportamos "already removed" para no mentir al usuario.
+//   - default: el merge --delete-branch borró la branch.
+func branchOutcomeMessage(branch string, keepBranch, preRemoteKnown, preRemoteMissing bool) string {
+	if keepBranch {
+		return fmt.Sprintf("Keeping branch %s (--keep-branch)", branch)
+	}
+	if preRemoteKnown && preRemoteMissing {
+		return fmt.Sprintf("Branch %s already removed", branch)
+	}
+	return fmt.Sprintf("Deleted branch %s", branch)
+}
+
 // samePath compara dos paths canonicalizándolos (resuelve symlinks para
 // evitar false negatives entre /var y /private/var en macOS).
 func samePath(a, b string) bool {
 	ca, _ := canonPath(a)
 	cb, _ := canonPath(b)
 	return ca == cb
-}
-
-// looksLikeMissingBranch detecta el caso en que `git branch -D` falla
-// porque la branch ya no existe. Duplica la lógica de
-// execute.isMissingBranchErr (no exportada) para no cruzar el boundary
-// de paquetes.
-func looksLikeMissingBranch(err error) bool {
-	if err == nil {
-		return false
-	}
-	m := err.Error()
-	return strings.Contains(m, "not found") || strings.Contains(m, "No such branch")
 }
 
 // remoteBranchExists consulta si refs/heads/<branch> existe en origin.
