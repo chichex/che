@@ -399,41 +399,43 @@ func TestGroupCloseable(t *testing.T) {
 	}
 }
 
+// TestMergePRArgs protege el contrato de que che close NUNCA pasa
+// --delete-branch a gh pr merge, independientemente de --keep-branch.
+// El delete remoto lo hacemos nosotros post-merge (gh api) porque
+// --delete-branch falla cuando la branch está checkouteada en un worktree
+// — el merge remoto ocurre igual, pero gh devuelve exit != 0 y el flow se
+// caería con ExitRetry aunque el PR ya esté mergeado.
 func TestMergePRArgs(t *testing.T) {
 	cases := []struct {
-		name       string
-		ref        string
-		keepBranch bool
-		want       []string
+		name string
+		ref  string
+		want []string
 	}{
 		{
-			name:       "default: merge con --delete-branch",
-			ref:        "7",
-			keepBranch: false,
-			want:       []string{"pr", "merge", "7", "--merge", "--delete-branch"},
+			name: "ref numérico",
+			ref:  "7",
+			want: []string{"pr", "merge", "7", "--merge"},
 		},
 		{
-			name:       "--keep-branch omite --delete-branch",
-			ref:        "7",
-			keepBranch: true,
-			want:       []string{"pr", "merge", "7", "--merge"},
-		},
-		{
-			name:       "ref URL funciona igual",
-			ref:        "https://github.com/acme/demo/pull/7",
-			keepBranch: false,
-			want:       []string{"pr", "merge", "https://github.com/acme/demo/pull/7", "--merge", "--delete-branch"},
+			name: "ref URL funciona igual",
+			ref:  "https://github.com/acme/demo/pull/7",
+			want: []string{"pr", "merge", "https://github.com/acme/demo/pull/7", "--merge"},
 		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := mergePRArgs(c.ref, c.keepBranch)
+			got := mergePRArgs(c.ref)
 			if len(got) != len(c.want) {
 				t.Fatalf("got %v, want %v", got, c.want)
 			}
 			for i := range got {
 				if got[i] != c.want[i] {
 					t.Fatalf("got %v, want %v", got, c.want)
+				}
+			}
+			for _, a := range got {
+				if a == "--delete-branch" {
+					t.Fatalf("mergePRArgs debe NO incluir --delete-branch (el delete remoto es post-merge): got %v", got)
 				}
 			}
 		})
@@ -479,34 +481,44 @@ func TestShouldCleanupWorktree(t *testing.T) {
 	}
 }
 
-// TestBranchOutcomeMessage cubre las tres ramas del stdout post-merge:
-// keep-branch, "already removed" (auto-delete pre-merge detectado), y el
-// caso default "Deleted branch". El branch "already removed" no se ejerce
-// en e2e porque allí seteamos CHE_CLOSE_SKIP_REMOTE_CHECK=1 (que fuerza
-// preRemoteKnown=false), así que este unit test es la única protección
-// contra regresiones en ese mensaje.
+// TestBranchOutcomeMessage cubre las cuatro ramas del stdout post-merge:
+// keep-branch, "already removed" (auto-delete pre-merge detectado), "kept
+// on remote" (delete remoto falló post-merge), y el caso default "Deleted
+// branch". El branch "already removed" no se ejerce en e2e porque allí
+// seteamos CHE_CLOSE_SKIP_REMOTE_CHECK=1 (que fuerza preRemoteKnown=false),
+// así que este unit test es la única protección contra regresiones en ese
+// mensaje.
+//
+// Precedencia esperada: keepBranch > already-removed > remoteDeleteFailed
+// > default-deleted. keepBranch gana siempre (el usuario pidió preservar)
+// y already-removed va antes que remoteDeleteFailed porque si la branch ya
+// no estaba pre-merge no tiene sentido decir "delete failed".
 func TestBranchOutcomeMessage(t *testing.T) {
 	cases := []struct {
-		name             string
-		branch           string
-		keepBranch       bool
-		preRemoteKnown   bool
-		preRemoteMissing bool
-		want             string
+		name               string
+		branch             string
+		keepBranch         bool
+		preRemoteKnown     bool
+		preRemoteMissing   bool
+		remoteDeleteFailed bool
+		want               string
 	}{
-		{"keep-branch manda sobre todo lo demás", "feat/x", true, true, true, "Keeping branch feat/x (--keep-branch)"},
-		{"keep-branch sin info de remote", "feat/x", true, false, false, "Keeping branch feat/x (--keep-branch)"},
-		{"already removed: known + missing", "feat/x", false, true, true, "Branch feat/x already removed"},
-		{"deleted: remote conocido y presente pre-merge", "feat/x", false, true, false, "Deleted branch feat/x"},
-		{"deleted: remote desconocido (skip-check / red caída)", "feat/x", false, false, false, "Deleted branch feat/x"},
-		{"deleted: known=false ignora preRemoteMissing=true", "feat/x", false, false, true, "Deleted branch feat/x"},
+		{"keep-branch manda sobre todo lo demás", "feat/x", true, true, true, false, "Keeping branch feat/x (--keep-branch)"},
+		{"keep-branch sin info de remote", "feat/x", true, false, false, false, "Keeping branch feat/x (--keep-branch)"},
+		{"keep-branch gana a remoteDeleteFailed (imposible en la práctica pero robusto)", "feat/x", true, false, false, true, "Keeping branch feat/x (--keep-branch)"},
+		{"already removed: known + missing", "feat/x", false, true, true, false, "Branch feat/x already removed"},
+		{"delete remoto falló post-merge", "feat/x", false, true, false, true, "Branch feat/x kept on remote (delete failed)"},
+		{"delete falló con remote desconocido pre-merge", "feat/x", false, false, false, true, "Branch feat/x kept on remote (delete failed)"},
+		{"deleted: remote conocido y presente pre-merge", "feat/x", false, true, false, false, "Deleted branch feat/x"},
+		{"deleted: remote desconocido (skip-check / red caída)", "feat/x", false, false, false, false, "Deleted branch feat/x"},
+		{"deleted: known=false ignora preRemoteMissing=true", "feat/x", false, false, true, false, "Deleted branch feat/x"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := branchOutcomeMessage(c.branch, c.keepBranch, c.preRemoteKnown, c.preRemoteMissing)
+			got := branchOutcomeMessage(c.branch, c.keepBranch, c.preRemoteKnown, c.preRemoteMissing, c.remoteDeleteFailed)
 			if got != c.want {
-				t.Fatalf("branchOutcomeMessage(%q, keep=%v, known=%v, missing=%v) = %q, want %q",
-					c.branch, c.keepBranch, c.preRemoteKnown, c.preRemoteMissing, got, c.want)
+				t.Fatalf("branchOutcomeMessage(%q, keep=%v, known=%v, missing=%v, deleteFailed=%v) = %q, want %q",
+					c.branch, c.keepBranch, c.preRemoteKnown, c.preRemoteMissing, c.remoteDeleteFailed, got, c.want)
 			}
 		})
 	}

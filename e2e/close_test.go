@@ -67,7 +67,8 @@ func TestClose_ChangesRequestedLabel_WarnsButProceeds(t *testing.T) {
 
 	env.ExpectGh(`^pr view 7`).RespondStdoutFromFixture("close/gh_pr_view_changes_requested.json", 0)
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
-	env.ExpectGh(`^pr merge 7 --merge --delete-branch$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/git/refs/heads/feat/x$`).RespondStdout("", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
@@ -79,9 +80,16 @@ func TestClose_ChangesRequestedLabel_WarnsButProceeds(t *testing.T) {
 	// El warning aparece en stderr pero no bloquea.
 	harness.AssertContains(t, r.Stderr, "changes-requested")
 	harness.AssertContains(t, r.Stderr, "warning")
-	// Sí debe haber mergeado con --delete-branch.
-	if merges := env.Invocations().FindCalls("gh", "pr merge 7 --merge --delete-branch"); len(merges) != 1 {
-		t.Fatalf("expected 1 gh pr merge --delete-branch call, got %d", len(merges))
+	inv := env.Invocations()
+	if merges := inv.FindCalls("gh", "pr merge 7 --merge"); len(merges) != 1 {
+		t.Fatalf("expected 1 gh pr merge call, got %d", len(merges))
+	}
+	// Nunca pasamos --delete-branch: el delete remoto es separado (gh api).
+	if deletes := inv.FindCalls("gh", "pr merge", "--delete-branch"); len(deletes) != 0 {
+		t.Fatalf("expected 0 gh pr merge --delete-branch calls, got %d", len(deletes))
+	}
+	if apiDels := inv.FindCalls("gh", "api -X DELETE", "refs/heads/feat/x"); len(apiDels) != 1 {
+		t.Fatalf("expected 1 gh api DELETE refs/heads/feat/x call, got %d", len(apiDels))
 	}
 }
 
@@ -106,8 +114,9 @@ func TestClose_GoldenPath_DraftToReadyAndMerge(t *testing.T) {
 	// FetchChecks iter 1 — todos SUCCESS.
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
 
-	// Merge con --delete-branch (default).
-	env.ExpectGh(`^pr merge 7 --merge --delete-branch$`).RespondStdout("Merged PR #7\n", 0)
+	// Merge (sin --delete-branch — lo hacemos nosotros con gh api post-merge).
+	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged PR #7\n", 0)
+	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/git/refs/heads/exec/42-nuevo-flow$`).RespondStdout("", 0)
 
 	// Cerrar issue + transition labels (executed → closed).
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
@@ -127,8 +136,17 @@ func TestClose_GoldenPath_DraftToReadyAndMerge(t *testing.T) {
 	if reads := inv.FindCalls("gh", "pr ready 7"); len(reads) != 1 {
 		t.Fatalf("expected 1 gh pr ready call, got %d", len(reads))
 	}
-	if merges := inv.FindCalls("gh", "pr merge 7 --merge --delete-branch"); len(merges) != 1 {
-		t.Fatalf("expected 1 gh pr merge --delete-branch call, got %d", len(merges))
+	if merges := inv.FindCalls("gh", "pr merge 7 --merge"); len(merges) != 1 {
+		t.Fatalf("expected 1 gh pr merge call, got %d", len(merges))
+	}
+	// El merge NO debe pasar --delete-branch: evitamos que gh intente borrar
+	// la branch local, lo cual falla cuando está checkouteada en un worktree
+	// (caso típico: che execute deja un worktree por PR).
+	if deletes := inv.FindCalls("gh", "pr merge", "--delete-branch"); len(deletes) != 0 {
+		t.Fatalf("expected 0 gh pr merge --delete-branch calls, got %d", len(deletes))
+	}
+	if apiDels := inv.FindCalls("gh", "api -X DELETE", "refs/heads/exec/42-nuevo-flow"); len(apiDels) != 1 {
+		t.Fatalf("expected 1 gh api DELETE call for remote branch, got %d", len(apiDels))
 	}
 	if closes := inv.FindCalls("gh", "issue close 42"); len(closes) != 1 {
 		t.Fatalf("expected 1 gh issue close call, got %d", len(closes))
@@ -166,7 +184,8 @@ func TestClose_NotDraft_SkipsReady(t *testing.T) {
 }`, 0)
 
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
-	env.ExpectGh(`^pr merge 7 --merge --delete-branch$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/git/refs/heads/feat/ready$`).RespondStdout("", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
@@ -245,7 +264,8 @@ func TestClose_Default_CleansCheManagedWorktree(t *testing.T) {
   "labels": []
 }`, 0)
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
-	env.ExpectGh(`^pr merge 7 --merge --delete-branch$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/git/refs/heads/feat/managed$`).RespondStdout("", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
@@ -332,7 +352,8 @@ func TestClose_Default_DoesNotTouchMainWorktree(t *testing.T) {
   "labels": []
 }`, 0)
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
-	env.ExpectGh(`^pr merge 7 --merge --delete-branch$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/git/refs/heads/feat/on-main$`).RespondStdout("", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
@@ -377,7 +398,8 @@ func TestClose_Default_DoesNotTouchExternalWorktree(t *testing.T) {
   "labels": []
 }`, 0)
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
-	env.ExpectGh(`^pr merge 7 --merge --delete-branch$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/git/refs/heads/feat/external$`).RespondStdout("", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
@@ -390,6 +412,56 @@ func TestClose_Default_DoesNotTouchExternalWorktree(t *testing.T) {
 	if !branchExists(t, env.RepoDir, branch) {
 		t.Fatalf("expected local branch %s to remain (not a che-managed worktree)", branch)
 	}
+}
+
+// TestClose_RemoteDeleteFails_WarnsButExitsOK: el merge en GitHub OK pero el
+// delete de la branch remota (gh api DELETE) falla — el flow debe warnear,
+// reportar "kept on remote", y salir 0 (no ExitRetry).
+//
+// Este es el caso que motivó el refactor: pasar --delete-branch a gh pr
+// merge arrastraba un exit != 0 cuando la branch estaba checkouteada en
+// un worktree, incluso si el merge remoto se había hecho. Al separar merge
+// y delete, un delete fallido no invalida el merge.
+func TestClose_RemoteDeleteFails_WarnsButExitsOK(t *testing.T) {
+	env := setupCloseEnv(t)
+	scriptClosePrechecks(env)
+	env.SetEnv("CHE_CLOSE_SKIP_REMOTE_CHECK", "1")
+
+	env.ExpectGh(`^pr view 7`).RespondStdout(`{
+  "number": 7,
+  "title": "feat: delete fails",
+  "url": "https://github.com/acme/demo/pull/7",
+  "state": "OPEN",
+  "isDraft": false,
+  "headRefName": "feat/delete-fails",
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "CLEAN",
+  "author": {"login": "acme-bot"},
+  "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
+  "labels": []
+}`, 0)
+	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
+	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
+	// El api DELETE devuelve un error cualquiera distinto a "Reference does
+	// not exist" (ese caso es idempotente y no warnearía).
+	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/git/refs/heads/feat/delete-fails$`).
+		RespondExitWithError(1, "HTTP 403: You need admin access to delete branches\n")
+	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	r := env.Run("close", "7")
+	if r.ExitCode != 0 {
+		t.Fatalf("expected exit 0 (merge OK, delete remoto es best-effort), got %d\nstderr: %s",
+			r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stdout, "Branch feat/delete-fails kept on remote (delete failed)")
+	harness.AssertContains(t, r.Stderr, "warning")
+	harness.AssertContains(t, r.Stderr, "git push origin --delete feat/delete-fails")
+	// El merge debe haber sucedido y el issue cerrado — el delete fallido
+	// no invalida el resto del flow.
+	harness.AssertContains(t, r.Stdout, "Closed PR")
+	harness.AssertContains(t, r.Stdout, "#42")
 }
 
 // TestClose_ConflictsExhaustAttempts_Exit2: PR con CONFLICTING en las 4

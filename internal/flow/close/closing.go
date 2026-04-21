@@ -294,7 +294,11 @@ func hasBlockingLabel(p validate.PullRequest) bool {
 //   - Loop MaxFixAttempts: detectar problemas; si hay conflictos o CI rojo
 //     invocar opus en worktree (reuse .worktrees/issue-N si existe, o crear
 //     uno sobre la head branch del PR), commit+push, poll CI.
-//   - Merge con merge commit (--delete-branch salvo --keep-branch).
+//   - Merge con merge commit. Post-merge, delete de la branch remota vía
+//     gh api (salvo --keep-branch). No pasamos --delete-branch a gh pr
+//     merge: ese flag hace delete local también, que falla si la branch
+//     está checkouteada en un worktree y arrastra el exit code aunque el
+//     merge remoto haya ocurrido.
 //   - Cerrar issue asociado + transición de labels a status:closed.
 //   - Cleanup del worktree (ver shouldCleanupWorktree):
 //     · --keep-branch inhibe siempre, aunque el worktree sea propio del run.
@@ -467,7 +471,7 @@ func Run(prRef string, opts Opts) ExitCode {
 	}
 
 	// Snapshot del remote antes del merge para distinguir "lo borramos"
-	// de "ya no estaba" (auto-delete de GitHub) tras un merge --delete-branch.
+	// de "ya no estaba" (auto-delete de GitHub o borrado manual previo).
 	preRemoteMissing, preRemoteKnown := false, false
 	if !keepBranch {
 		exists, known := remoteBranchExists(repoRoot, pr.HeadBranch)
@@ -476,13 +480,26 @@ func Run(prRef string, opts Opts) ExitCode {
 	}
 
 	log.Step(fmt.Sprintf("mergeando PR #%d con merge commit", pr.Number))
-	if err := mergePR(prRef, keepBranch); err != nil {
+	if err := mergePR(prRef); err != nil {
 		log.Error("gh pr merge fallo", output.F{PR: pr.Number, Cause: err})
 		return ExitRetry
 	}
 	mergedOK = true
 
-	fmt.Fprintln(stdout, branchOutcomeMessage(pr.HeadBranch, keepBranch, preRemoteKnown, preRemoteMissing))
+	// Delete remoto post-merge. Solo si el usuario no pidió --keep-branch y
+	// la branch seguía en remote antes del merge. Si falla, warn y seguimos:
+	// el merge ya ocurrió, no queremos devolver ExitRetry por un cleanup.
+	remoteDeleteFailed := false
+	if !keepBranch && !(preRemoteKnown && preRemoteMissing) {
+		if err := deleteRemoteBranch(pr.HeadBranch); err != nil {
+			log.Warn(fmt.Sprintf("warning: no pude borrar branch remota %s — borrala a mano con: git push origin --delete %s",
+				pr.HeadBranch, pr.HeadBranch),
+				output.F{Cause: err})
+			remoteDeleteFailed = true
+		}
+	}
+
+	fmt.Fprintln(stdout, branchOutcomeMessage(pr.HeadBranch, keepBranch, preRemoteKnown, preRemoteMissing, remoteDeleteFailed))
 
 	// Cerrar issues asociados. Después del merge, los que tenían "closes #N"
 	// en el body del PR quedan OPEN un tiempo hasta que github procesa el
@@ -1121,12 +1138,13 @@ func prReady(ref string) error {
 // mergePR mergea el PR con merge commit (--merge). No usamos --auto porque
 // ya chequeamos CI antes; --auto suma latencia innecesaria.
 //
-// Si keepBranch=false (default), agrega --delete-branch para que gh borre
-// la branch remota y local en el mismo paso. Si la local está checkouteada
-// en un worktree activo, gh emite un warning pero no falla — el cleanup
-// del worktree post-merge se encarga del residual.
-func mergePR(ref string, keepBranch bool) error {
-	args := mergePRArgs(ref, keepBranch)
+// No pasamos --delete-branch: gh hace el merge remoto + delete de branch en
+// un solo paso, pero el delete local falla (exit != 0) cuando la branch
+// está checkouteada en un worktree, aunque el merge remoto haya ocurrido.
+// Separamos las dos operaciones: mergePR hace solo el merge, y post-merge
+// llamamos a deleteRemoteBranch + cleanupWorktree para el resto.
+func mergePR(ref string) error {
+	args := mergePRArgs(ref)
 	cmd := exec.Command("gh", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1136,12 +1154,36 @@ func mergePR(ref string, keepBranch bool) error {
 }
 
 // mergePRArgs construye los args de gh pr merge. Extraído para testabilidad.
-func mergePRArgs(ref string, keepBranch bool) []string {
-	args := []string{"pr", "merge", ref, "--merge"}
-	if !keepBranch {
-		args = append(args, "--delete-branch")
+func mergePRArgs(ref string) []string {
+	return []string{"pr", "merge", ref, "--merge"}
+}
+
+// deleteRemoteBranch borra la branch remota vía `gh api`. Lo hacemos
+// nosotros en vez de pasar --delete-branch a gh pr merge porque ese flag
+// hace merge + delete local + delete remoto de manera atómica, y el delete
+// local falla si la branch está checkouteada en un worktree (che execute
+// deja un worktree por PR) — arrastrando el exit code aunque el merge haya
+// ocurrido.
+//
+// Usamos gh api y no `git push origin --delete` porque el resto del flow
+// está en gh (precheck, auth, pr view, pr merge) — mantener una sola capa
+// de creds simplifica el diagnóstico cuando falla.
+//
+// Idempotente: si la branch ya no existe remotamente (GitHub auto-delete
+// le ganó, o alguien la borró antes), devolvemos nil.
+func deleteRemoteBranch(branch string) error {
+	path := "repos/{owner}/{repo}/git/refs/heads/" + branch
+	cmd := exec.Command("gh", "api", "-X", "DELETE", path)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
 	}
-	return args
+	stderr := strings.TrimSpace(string(out))
+	if strings.Contains(stderr, "Reference does not exist") ||
+		strings.Contains(stderr, "Not Found") {
+		return nil
+	}
+	return fmt.Errorf("gh api: %s", stderr)
 }
 
 // issueClose cierra un issue (gh issue close). Idempotente: si ya está
@@ -1181,7 +1223,7 @@ func cleanupWorktree(ctx context.Context, log *output.Logger, repoRoot string, w
 		return
 	}
 	if samePath(repoRoot, wt.Path) {
-		log.Warn(fmt.Sprintf("warning: la branch del PR estaba checkouteada en el worktree principal (%s) — che close no modifica el cwd del usuario. La branch remota fue borrada por gh pr merge --delete-branch; la local queda hasta que la elimines con git branch -D %s", wt.Path, wt.Branch))
+		log.Warn(fmt.Sprintf("warning: la branch del PR estaba checkouteada en el worktree principal (%s) — che close no modifica el cwd del usuario. La branch remota fue borrada post-merge; la local queda hasta que la elimines con git branch -D %s", wt.Path, wt.Branch))
 		return
 	}
 	if !isCheManagedWorktree(repoRoot, wt.Path) {
@@ -1230,19 +1272,23 @@ func shouldCleanupWorktree(mergedOK, keepBranch, wtOwned bool) bool {
 }
 
 // branchOutcomeMessage formatea la línea de stdout post-merge sobre el destino
-// de la branch remota. Encapsula las tres ramas para poder testearlas sin
-// stubbear ls-remote:
+// de la branch remota. Encapsula los casos para poder testearlos sin
+// stubbear ls-remote ni el delete remoto:
 //   - keepBranch: el usuario pidió preservar.
 //   - preRemoteKnown && preRemoteMissing: la branch ya no estaba antes del
-//     merge (auto-delete previo o borrado manual), así que --delete-branch fue
-//     no-op y reportamos "already removed" para no mentir al usuario.
-//   - default: el merge --delete-branch borró la branch.
-func branchOutcomeMessage(branch string, keepBranch, preRemoteKnown, preRemoteMissing bool) string {
+//     merge (auto-delete previo o borrado manual). No intentamos borrar.
+//   - remoteDeleteFailed: el merge OK pero el delete remoto posterior falló
+//     — reportamos para que el humano la borre a mano.
+//   - default: el delete remoto borró la branch.
+func branchOutcomeMessage(branch string, keepBranch, preRemoteKnown, preRemoteMissing, remoteDeleteFailed bool) string {
 	if keepBranch {
 		return fmt.Sprintf("Keeping branch %s (--keep-branch)", branch)
 	}
 	if preRemoteKnown && preRemoteMissing {
 		return fmt.Sprintf("Branch %s already removed", branch)
+	}
+	if remoteDeleteFailed {
+		return fmt.Sprintf("Branch %s kept on remote (delete failed)", branch)
 	}
 	return fmt.Sprintf("Deleted branch %s", branch)
 }

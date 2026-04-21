@@ -24,9 +24,12 @@ var closeCmd = &cobra.Command{
      commit+push y close espera a que CI re-evalúe.
   4. Repite hasta 3 intentos totales. Si persisten problemas, sale con
      exit 2 (retry) sin mergear.
-  5. Si todo verde, mergea con merge commit (gh pr merge --merge) y borra
-     la branch remota + local (--delete-branch). El worktree asociado se
-     remueve para dejar el repo limpio. Usá --keep-branch para opt-out.
+  5. Si todo verde, mergea con merge commit (gh pr merge --merge) y después
+     borra la branch remota via gh api (NO pasamos --delete-branch: ese flag
+     arrastra el delete local y falla cuando la branch está en un worktree,
+     rompiendo el flow aunque el merge remoto haya ocurrido). El worktree
+     asociado y la branch local se limpian aparte. Usá --keep-branch para
+     opt-out del delete.
   6. Cierra los issues asociados vía "Closes #N" del PR y les aplica la
      transición de labels status:executed → status:closed.
 
