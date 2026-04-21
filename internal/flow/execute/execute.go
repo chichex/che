@@ -21,7 +21,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,6 +28,7 @@ import (
 
 	"github.com/chichex/che/internal/comments"
 	"github.com/chichex/che/internal/labels"
+	planpkg "github.com/chichex/che/internal/plan"
 )
 
 // validatorRole es el valor del campo `role` en el header claude-cli de los
@@ -218,16 +218,59 @@ type Candidate struct {
 	Title  string
 }
 
-// ConsolidatedPlan es el subset del body consolidado que execute usa para
-// armar el prompt del ejecutor. Mantiene los mismos nombres que
-// explore.ConsolidatedPlan pero evita importar explore para no acoplar.
-type ConsolidatedPlan struct {
-	Summary            string
-	Goal               string
-	AcceptanceCriteria []string
-	Approach           string
-	Steps              []string
-	OutOfScope         []string
+// ConsolidatedPlan es un type alias al shape canónico en internal/plan. Los
+// campos que execute usa son un subset (no consume RisksToMitigate) pero el
+// shape es el mismo para evitar duplicación y drift con explore.
+type ConsolidatedPlan = planpkg.ConsolidatedPlan
+
+// isPlanEmpty devuelve true si el plan no tiene NINGÚN contenido procesable.
+// Honra el contrato de planpkg.Parse: el fallback con Summary=body (issue
+// legacy sin header consolidado) sigue siendo procesable, así que no lo
+// bloqueamos. Solo abortamos cuando el body está totalmente vacío y el
+// fallback dejó todos los campos en cero — ahí sí no hay nada que mandar al
+// agente.
+func isPlanEmpty(p *ConsolidatedPlan) bool {
+	if p == nil {
+		return true
+	}
+	return p.Summary == "" && p.Goal == "" && len(p.Steps) == 0 && len(p.AcceptanceCriteria) == 0
+}
+
+// Sentinel errors devueltos por preparePlan para que Run mapee cada caso a
+// un mensaje accionable con el número de issue. No se wrapean ErrAmbiguousPlan
+// ni errores de Parse — esos se propagan directamente.
+var (
+	errPlanEmpty    = errors.New("plan empty: body sin contenido procesable")
+	errPlanDegraded = errors.New("plan degraded: header consolidado presente pero sub-secciones vacías")
+)
+
+// preparePlan parsea el body del issue y valida que el resultado sea
+// procesable por el ejecutor. Reglas:
+//
+//   - Cualquier error de planpkg.Parse (incluyendo ErrAmbiguousPlan) se
+//     propaga tal cual — Run lo mapea a su mensaje correspondiente.
+//   - Body completamente vacío → errPlanEmpty. No hay nada que mandar al
+//     agente.
+//   - Body con header "## Plan consolidado" real pero sin Goal/Steps/AC
+//     parseables → errPlanDegraded. El fallback de Parse deja Summary=body,
+//     pero ese body tiene forma de plan estructurado que no se consolidó
+//     bien; mandar ese texto al ejecutor produce un run degradado sin las
+//     guías reales. Preferimos cortar y pedir re-consolidación.
+//   - Body sin header (issue legacy) con Summary=body es válido: sigue
+//     siendo procesable aunque menos guiado.
+func preparePlan(body string) (*ConsolidatedPlan, error) {
+	p, err := planpkg.Parse(body)
+	if err != nil {
+		return nil, err
+	}
+	if isPlanEmpty(p) {
+		return nil, errPlanEmpty
+	}
+	if planpkg.HasConsolidatedHeader(body) &&
+		p.Goal == "" && len(p.Steps) == 0 && len(p.AcceptanceCriteria) == 0 {
+		return nil, errPlanDegraded
+	}
+	return p, nil
 }
 
 // Run ejecuta el flow completo sobre un issue. Decisiones claves:
@@ -316,9 +359,21 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitSemantic
 	}
 
-	plan, err := parseConsolidatedPlan(issue.Body)
+	plan, err := preparePlan(issue.Body)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		switch {
+		case errors.Is(err, planpkg.ErrAmbiguousPlan):
+			// Ambigüedad (>1 header "## Plan consolidado"): no podemos elegir.
+			fmt.Fprintf(stderr, "error: issue #%d tiene múltiples '## Plan consolidado' en el body — editalo para dejar uno solo y reintentá\n", issue.Number)
+		case errors.Is(err, errPlanEmpty):
+			fmt.Fprintf(stderr, "error: issue #%d tiene el body vacío — agregá descripción o corré `che explore %d`\n", issue.Number, issue.Number)
+		case errors.Is(err, errPlanDegraded):
+			// Header consolidado presente pero sub-secciones vacías: mejor
+			// re-consolidar que mandar un plan degradado al ejecutor.
+			fmt.Fprintf(stderr, "error: issue #%d tiene '## Plan consolidado' pero las sub-secciones (Goal/Pasos/Criterios) no parsean — reconsolidalo con `che explore %d`\n", issue.Number, issue.Number)
+		default:
+			fmt.Fprintf(stderr, "error: parsing plan for issue #%d: %v\n", issue.Number, err)
+		}
 		return ExitSemantic
 	}
 
@@ -777,152 +832,6 @@ func gate(i *Issue) error {
 		return fmt.Errorf("issue #%d is not status:plan — corré `che explore %d` primero", i.Number, i.Number)
 	}
 	return nil
-}
-
-// ---- parseo del plan consolidado ----
-
-// parseConsolidatedPlan extrae las secciones del body consolidado que escribe
-// `che explore`. Es tolerante: si la sección "Plan consolidado" no existe,
-// arma un plan con summary=body y todas las demás secciones vacías — el
-// agente puede trabajar con eso aunque sea menos guiado.
-func parseConsolidatedPlan(body string) (*ConsolidatedPlan, error) {
-	body = strings.TrimSpace(body)
-	if body == "" {
-		return nil, fmt.Errorf("issue body is empty")
-	}
-
-	// Si no hay header de plan consolidado, devolvemos fallback.
-	if !strings.Contains(body, "## Plan consolidado") {
-		return &ConsolidatedPlan{Summary: body}, nil
-	}
-
-	// Extrae cada sección buscando headers conocidos.
-	p := &ConsolidatedPlan{}
-	if v := extractSection(body, "## Plan consolidado"); v != "" {
-		// La primera línea suele ser "**Resumen:** ..."
-		if idx := strings.Index(v, "**Resumen:**"); idx >= 0 {
-			rest := v[idx+len("**Resumen:**"):]
-			if nl := strings.Index(rest, "\n\n"); nl >= 0 {
-				p.Summary = strings.TrimSpace(rest[:nl])
-			} else {
-				p.Summary = strings.TrimSpace(rest)
-			}
-		}
-		if idx := strings.Index(v, "**Goal:**"); idx >= 0 {
-			rest := v[idx+len("**Goal:**"):]
-			if nl := strings.Index(rest, "\n\n"); nl >= 0 {
-				p.Goal = strings.TrimSpace(rest[:nl])
-			} else {
-				p.Goal = strings.TrimSpace(rest)
-			}
-		}
-	}
-	if v := extractSection(body, "### Criterios de aceptación"); v != "" {
-		p.AcceptanceCriteria = parseChecklist(v)
-	}
-	if v := extractSection(body, "### Approach"); v != "" {
-		p.Approach = strings.TrimSpace(v)
-	}
-	if v := extractSection(body, "### Pasos"); v != "" {
-		p.Steps = parseNumbered(v)
-	}
-	if v := extractSection(body, "### Fuera de alcance"); v != "" {
-		p.OutOfScope = parseBullets(v)
-	}
-
-	if p.Summary == "" && p.Goal == "" && len(p.Steps) == 0 {
-		return nil, fmt.Errorf("issue body has a '## Plan consolidado' header but no parseable content — revisá que `che explore` haya terminado bien")
-	}
-
-	return p, nil
-}
-
-// extractSection devuelve el texto entre un header (ej. "## X") y el próximo
-// header de nivel <= al del header dado. Devuelve "" si no encuentra.
-func extractSection(body, header string) string {
-	idx := strings.Index(body, header)
-	if idx < 0 {
-		return ""
-	}
-	rest := body[idx+len(header):]
-	// Busca el próximo "#..." a principio de línea.
-	lines := strings.Split(rest, "\n")
-	var out []string
-	// Determinar el nivel del header (# count).
-	level := 0
-	for _, c := range header {
-		if c == '#' {
-			level++
-		} else {
-			break
-		}
-	}
-	for i, line := range lines {
-		if i == 0 {
-			out = append(out, line)
-			continue
-		}
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") {
-			// Contar nivel.
-			n := 0
-			for _, c := range trimmed {
-				if c == '#' {
-					n++
-				} else {
-					break
-				}
-			}
-			if n > 0 && n <= level {
-				break
-			}
-		}
-		out = append(out, line)
-	}
-	return strings.TrimSpace(strings.Join(out, "\n"))
-}
-
-// parseChecklist extrae items de un bloque "- [ ] foo\n- [ ] bar".
-var checklistRe = regexp.MustCompile(`^\s*-\s*\[.\]\s*(.+)$`)
-
-func parseChecklist(s string) []string {
-	var out []string
-	for _, line := range strings.Split(s, "\n") {
-		if m := checklistRe.FindStringSubmatch(line); m != nil {
-			out = append(out, strings.TrimSpace(m[1]))
-		}
-	}
-	return out
-}
-
-// parseNumbered extrae items de "1. foo\n2. bar".
-var numberedRe = regexp.MustCompile(`^\s*\d+\.\s+(.+)$`)
-
-func parseNumbered(s string) []string {
-	var out []string
-	for _, line := range strings.Split(s, "\n") {
-		if m := numberedRe.FindStringSubmatch(line); m != nil {
-			out = append(out, strings.TrimSpace(m[1]))
-		}
-	}
-	return out
-}
-
-// parseBullets extrae items de "- foo\n- bar".
-var bulletRe = regexp.MustCompile(`^\s*-\s+(.+)$`)
-
-func parseBullets(s string) []string {
-	var out []string
-	for _, line := range strings.Split(s, "\n") {
-		if m := bulletRe.FindStringSubmatch(line); m != nil {
-			text := strings.TrimSpace(m[1])
-			// Saltarse checklist items que ya matchean el otro regex.
-			if !strings.HasPrefix(text, "[") {
-				out = append(out, text)
-			}
-		}
-	}
-	return out
 }
 
 // ---- prompt builder ----

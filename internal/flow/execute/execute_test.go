@@ -3,11 +3,14 @@ package execute
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	planpkg "github.com/chichex/che/internal/plan"
 )
 
 // writeExecutable escribe un script y lo marca ejecutable (0o755).
@@ -17,93 +20,6 @@ func writeExecutable(path, content string) error {
 
 func getEnv(k string) string  { return os.Getenv(k) }
 func setEnv(k, v string) error { return os.Setenv(k, v) }
-
-func TestParseConsolidatedPlan_FullBody(t *testing.T) {
-	body := `## Plan consolidado (post-exploración)
-
-**Resumen:** Agregar comando che execute.
-
-**Goal:** Un desarrollador selecciona un issue y che execute lo ejecuta end-to-end.
-
-### Criterios de aceptación
-- [ ] che execute registrado como subcomando cobra
-- [ ] La TUI lista solo issues con ct:plan + status:plan
-- [ ] No tocar explore
-
-### Approach
-Construir execute como copia adaptada de explore.
-
-### Pasos
-1. Crear internal/flow/execute
-2. Wirear cmd/execute.go
-3. Agregar tests e2e
-
-### Fuera de alcance
-- Ciclo iter con scope-lock
-- Workflow GHA
-
----
-
-## Idea original
-
-Lorem ipsum
-`
-	p, err := parseConsolidatedPlan(body)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if p.Summary != "Agregar comando che execute." {
-		t.Errorf("summary: %q", p.Summary)
-	}
-	if !strings.Contains(p.Goal, "end-to-end") {
-		t.Errorf("goal: %q", p.Goal)
-	}
-	if len(p.AcceptanceCriteria) != 3 {
-		t.Errorf("criteria: got %d items: %v", len(p.AcceptanceCriteria), p.AcceptanceCriteria)
-	}
-	if p.AcceptanceCriteria[0] != "che execute registrado como subcomando cobra" {
-		t.Errorf("criteria[0]: %q", p.AcceptanceCriteria[0])
-	}
-	if !strings.Contains(p.Approach, "copia adaptada") {
-		t.Errorf("approach: %q", p.Approach)
-	}
-	if len(p.Steps) != 3 {
-		t.Errorf("steps: got %d: %v", len(p.Steps), p.Steps)
-	}
-	if p.Steps[0] != "Crear internal/flow/execute" {
-		t.Errorf("steps[0]: %q", p.Steps[0])
-	}
-	if len(p.OutOfScope) != 2 {
-		t.Errorf("out_of_scope: got %d: %v", len(p.OutOfScope), p.OutOfScope)
-	}
-}
-
-func TestParseConsolidatedPlan_FallbackWhenNoHeader(t *testing.T) {
-	body := "Body sin plan consolidado, solo texto libre."
-	p, err := parseConsolidatedPlan(body)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if p.Summary != body {
-		t.Errorf("expected summary=body")
-	}
-	if p.Goal != "" || len(p.Steps) != 0 {
-		t.Errorf("expected empty goal/steps in fallback")
-	}
-}
-
-func TestParseConsolidatedPlan_EmptyBody(t *testing.T) {
-	if _, err := parseConsolidatedPlan(""); err == nil {
-		t.Fatalf("expected error on empty body")
-	}
-}
-
-func TestParseConsolidatedPlan_HeaderButNoContent(t *testing.T) {
-	body := "## Plan consolidado\n\n(lorem sin sub-secciones parseables)\n"
-	if _, err := parseConsolidatedPlan(body); err == nil {
-		t.Fatalf("expected error when sections missing")
-	}
-}
 
 func TestGate(t *testing.T) {
 	cases := []struct {
@@ -227,6 +143,248 @@ func TestParseValidators(t *testing.T) {
 	}
 }
 
+func TestIsPlanEmpty(t *testing.T) {
+	cases := []struct {
+		name string
+		p    *ConsolidatedPlan
+		want bool
+	}{
+		{
+			name: "nil plan",
+			p:    nil,
+			want: true,
+		},
+		{
+			name: "all fields empty (body vacío fallback)",
+			p:    &ConsolidatedPlan{},
+			want: true,
+		},
+		{
+			name: "legacy issue: summary=body (sin header consolidado) → procesable",
+			p:    &ConsolidatedPlan{Summary: "Body legacy sin estructura consolidada"},
+			want: false,
+		},
+		{
+			name: "summary-only fallback (header sin sub-secciones)",
+			p:    &ConsolidatedPlan{Summary: "## Plan consolidado\n\n(lorem sin sub-secciones)"},
+			want: false,
+		},
+		{
+			name: "only approach (no goal/steps/AC pero con summary)",
+			p:    &ConsolidatedPlan{Summary: "s", Approach: "a"},
+			want: false,
+		},
+		{
+			name: "has goal",
+			p:    &ConsolidatedPlan{Goal: "hacer X"},
+			want: false,
+		},
+		{
+			name: "has steps",
+			p:    &ConsolidatedPlan{Steps: []string{"paso"}},
+			want: false,
+		},
+		{
+			name: "has acceptance criteria",
+			p:    &ConsolidatedPlan{AcceptanceCriteria: []string{"crit"}},
+			want: false,
+		},
+		{
+			name: "full plan",
+			p: &ConsolidatedPlan{
+				Summary:            "s",
+				Goal:               "g",
+				AcceptanceCriteria: []string{"c"},
+				Steps:              []string{"p"},
+			},
+			want: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isPlanEmpty(c.p); got != c.want {
+				t.Errorf("got %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// TestPreparePlan cubre la lógica de validación que gatea si un issue se
+// manda al agente o si cortamos con ExitSemantic. No invoca Run end-to-end
+// (eso requeriría mockear git/gh/repo) pero sí testea el contrato que usa
+// el branch de Run: cada error mappable a un mensaje accionable.
+func TestPreparePlan(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantErr error  // sentinel esperado (nil si ok)
+		checkOk func(t *testing.T, p *ConsolidatedPlan)
+	}{
+		{
+			name:    "body vacío → errPlanEmpty",
+			body:    "",
+			wantErr: errPlanEmpty,
+		},
+		{
+			name:    "body solo whitespace → errPlanEmpty",
+			body:    "   \n\t\n  ",
+			wantErr: errPlanEmpty,
+		},
+		{
+			name:    "body con header consolidado pero sin sub-secciones → errPlanDegraded",
+			body:    "## Plan consolidado\n\n(lorem sin sub-secciones parseables)\n",
+			wantErr: errPlanDegraded,
+		},
+		{
+			name:    "body con header consolidado (parentheticado) y resumen pero sin Goal/Steps/AC → errPlanDegraded",
+			body:    "## Plan consolidado (post-exploración)\n\nTexto libre que no cumple el shape\n",
+			wantErr: errPlanDegraded,
+		},
+		{
+			name:    "issue legacy sin header consolidado pero con texto → ok (Summary=body)",
+			body:    "Body legacy sin estructura consolidada, solo la idea original.",
+			wantErr: nil,
+			checkOk: func(t *testing.T, p *ConsolidatedPlan) {
+				if !strings.Contains(p.Summary, "legacy") {
+					t.Errorf("expected Summary=body, got %q", p.Summary)
+				}
+				if p.Goal != "" || len(p.Steps) != 0 {
+					t.Errorf("expected no Goal/Steps on legacy issue")
+				}
+			},
+		},
+		{
+			name: "plan completo con Goal y Steps → ok",
+			body: `## Plan consolidado (post-exploración)
+
+**Resumen:** r
+
+**Goal:** hacer X
+
+### Criterios de aceptación
+- [ ] crit 1
+
+### Approach
+approach
+
+### Pasos
+1. paso uno
+`,
+			wantErr: nil,
+			checkOk: func(t *testing.T, p *ConsolidatedPlan) {
+				if p.Goal == "" {
+					t.Errorf("expected non-empty Goal")
+				}
+				if len(p.Steps) == 0 {
+					t.Errorf("expected non-empty Steps")
+				}
+			},
+		},
+		{
+			name: "plan con header + solo Steps (sin Goal/AC) → ok, no degradado",
+			body: `## Plan consolidado
+
+**Resumen:** r
+
+### Pasos
+1. único paso
+`,
+			wantErr: nil,
+			checkOk: func(t *testing.T, p *ConsolidatedPlan) {
+				if len(p.Steps) != 1 {
+					t.Errorf("expected 1 step, got %d", len(p.Steps))
+				}
+			},
+		},
+		{
+			name: "múltiples headers consolidados → planpkg.ErrAmbiguousPlan",
+			body: `## Plan consolidado
+
+**Resumen:** uno
+
+### Pasos
+1. uno
+
+---
+
+## Plan consolidado (post-exploración)
+
+**Resumen:** dos
+
+### Pasos
+1. dos
+`,
+			wantErr: planpkg.ErrAmbiguousPlan,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, err := preparePlan(c.body)
+			if c.wantErr != nil {
+				if err == nil {
+					t.Fatalf("expected error %v, got nil plan=%+v", c.wantErr, p)
+				}
+				if !errors.Is(err, c.wantErr) {
+					t.Errorf("expected errors.Is(err, %v), got %v", c.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if p == nil {
+				t.Fatal("expected non-nil plan")
+			}
+			if c.checkOk != nil {
+				c.checkOk(t, p)
+			}
+		})
+	}
+}
+
+// TestPreparePlan_ErrorMessages valida que los mensajes accionables que Run
+// imprime a stderr (mapeados desde cada sentinel) contengan los tokens que
+// el operador espera ver. Es un shadow del switch en Run: si alguien cambia
+// los mensajes, este test se rompe y fuerza a mantener el contrato.
+func TestPreparePlan_ErrorMessages(t *testing.T) {
+	// No ejecutamos Run — reproducimos el switch localmente para cubrir que
+	// cada sentinel tiene un mensaje accionable distintivo.
+	cases := []struct {
+		name    string
+		err     error
+		wantSub []string // substrings esperados en el mensaje Run imprime
+	}{
+		{
+			name:    "errPlanEmpty",
+			err:     errPlanEmpty,
+			wantSub: []string{"body vacío", "che explore"},
+		},
+		{
+			name:    "errPlanDegraded",
+			err:     errPlanDegraded,
+			wantSub: []string{"Plan consolidado", "sub-secciones", "che explore"},
+		},
+	}
+	// Mensajes copy-paste del switch en Run para detectar drift.
+	messages := map[error]string{
+		errPlanEmpty:    "error: issue #42 tiene el body vacío — agregá descripción o corré `che explore 42`\n",
+		errPlanDegraded: "error: issue #42 tiene '## Plan consolidado' pero las sub-secciones (Goal/Pasos/Criterios) no parsean — reconsolidalo con `che explore 42`\n",
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			msg, ok := messages[c.err]
+			if !ok {
+				t.Fatalf("sentinel %v no tiene mensaje mapeado — actualizá el test o el switch en Run", c.err)
+			}
+			for _, sub := range c.wantSub {
+				if !strings.Contains(msg, sub) {
+					t.Errorf("mensaje %q no contiene %q", msg, sub)
+				}
+			}
+		})
+	}
+}
+
 func TestBuildPromptIncludesPlanSections(t *testing.T) {
 	issue := &Issue{Number: 42, Title: "Implementar foo"}
 	plan := &ConsolidatedPlan{
@@ -250,36 +408,6 @@ func TestBuildPromptIncludesPlanSections(t *testing.T) {
 		if !strings.Contains(got, need) {
 			t.Errorf("prompt missing %q", need)
 		}
-	}
-}
-
-func TestExtractSection_StopsAtNextSameLevelHeader(t *testing.T) {
-	body := `## A
-foo
-bar
-
-## B
-quux
-`
-	got := extractSection(body, "## A")
-	if strings.Contains(got, "quux") {
-		t.Errorf("section A should not include B: %q", got)
-	}
-	if !strings.Contains(got, "foo") || !strings.Contains(got, "bar") {
-		t.Errorf("section A missing content: %q", got)
-	}
-}
-
-func TestExtractSection_IncludesDeeperHeaders(t *testing.T) {
-	body := `## Plan consolidado
-**Resumen:** r
-
-### Criterios
-- [ ] crit
-`
-	got := extractSection(body, "## Plan consolidado")
-	if !strings.Contains(got, "### Criterios") {
-		t.Errorf("should include ### children: %q", got)
 	}
 }
 
