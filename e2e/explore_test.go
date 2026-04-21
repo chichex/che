@@ -495,11 +495,22 @@ func TestExplore_Validators_TechnicalNeedsHuman_DoesNotPause(t *testing.T) {
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
-	out := env.MustRun("explore", "--validators", "codex,gemini", "42")
+	r := env.Run("explore", "--validators", "codex,gemini", "42")
+	if r.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
 	// Cierra en status:plan, no awaiting.
-	harness.AssertContains(t, out, "Explored")
-	if strings.Contains(out, "awaiting-human") {
-		t.Fatalf("flow should NOT pause when findings are technical/documented only; got: %s", out)
+	harness.AssertContains(t, r.Stdout, "Explored")
+	if strings.Contains(r.Stdout+r.Stderr, "awaiting-human") {
+		t.Fatalf("flow should NOT pause when findings are technical/documented only; got stdout: %s\nstderr: %s", r.Stdout, r.Stderr)
+	}
+	// Canonicalización: el crudo del fixture era needs_human pero sin
+	// findings product → degrada a changes_requested. La línea de
+	// Validation report en stdout debe reflejarlo.
+	harness.AssertContains(t, r.Stdout, "Validation report")
+	harness.AssertContains(t, r.Stdout, "codex#1: changes_requested")
+	if strings.Contains(r.Stdout, "codex#1: needs_human") {
+		t.Fatalf("stdout should NOT render raw verdict=needs_human after canonicalization; got: %s", r.Stdout)
 	}
 
 	inv := env.Invocations()
@@ -748,4 +759,153 @@ func TestExplore_Resume_NoHumanAnswer_Exit3(t *testing.T) {
 func scriptExplorePrechecks(env *harness.Env) {
 	env.ExpectGit(`^remote get-url origin`).RespondStdout("https://github.com/acme/demo.git\n", 0)
 	env.ExpectGh(`^auth status`).RespondStdout("Logged in as acme\n", 0)
+}
+
+// TestExplore_Validators_NeedsHumanWithoutFindings_DegradesToPlan verifica el
+// fix 2b: un validator que emite verdict=needs_human con findings=[] (o sin
+// findings product) es un output inválido. El flow debe degradarlo a
+// changes_requested in-place: label final status:plan (no awaiting-human),
+// header del comment dice changes_requested (efectivo post-normalización),
+// stderr contiene el warning, y NO se postea human-request.
+func TestExplore_Validators_NeedsHumanWithoutFindings_DegradesToPlan(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`validador técnico`).
+		RespondStdoutFromFixture("explore/sonnet_validator_needs_human_no_findings.json", 0)
+	// 2 comments: executor + 1 validator. NO human-request.
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-e\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-c\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	r := env.Run("explore", "--validators", "codex", "42")
+	if r.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	combined := r.Stdout + r.Stderr
+	harness.AssertContains(t, combined, "Explored")
+	// Render efectivo: el reporte en stdout muestra changes_requested, no
+	// needs_human (el crudo del fixture).
+	harness.AssertContains(t, combined, "changes_requested")
+	if strings.Contains(combined, "awaiting-human") {
+		t.Fatalf("flow should NOT pause when needs_human has no product finding; got: %s", combined)
+	}
+	// Warning de degradación en stderr.
+	harness.AssertContains(t, r.Stderr, "degrading to changes_requested")
+
+	inv := env.Invocations()
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) != 2 {
+		t.Fatalf("expected 2 comments (executor + 1 validator, NO human-request), got %d", len(comments))
+	}
+	edits := inv.FindCalls("gh", "issue", "edit", "42")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 label edit (status:plan), got %d", len(edits))
+	}
+	edits[0].AssertArgsContain(t, "--add-label", "status:plan")
+	if strings.Contains(strings.Join(edits[0].Args, " "), "status:awaiting-human") {
+		t.Fatalf("status:awaiting-human should NOT be applied; got %v", edits[0].Args)
+	}
+}
+
+// TestExplore_Validators_ApproveButProductFinding_PausesAndRendersAsNeedsHuman
+// verifica el fix 2c: un validator con verdict=approve crudo pero con un
+// finding kind=product needs_human=true debe pausar el flow (hasHumanGaps
+// todavía dispara) y el render efectivo debe mostrar needs_human en los
+// outputs, no approve.
+func TestExplore_Validators_ApproveButProductFinding_PausesAndRendersAsNeedsHuman(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`validador técnico`).
+		RespondStdoutFromFixture("explore/sonnet_validator_approve_with_product_finding.json", 0)
+	// 3 comments: executor + 1 validator + 1 human-request.
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-e\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-c\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-human\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	r := env.Run("explore", "--validators", "codex", "42")
+	if r.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	// Verdict canonicalizado: la línea de Validation report en stdout debe
+	// mostrar needs_human para codex#1 aunque el crudo del fixture era approve.
+	// Asserto contra r.Stdout específicamente (no combined) para no pasar
+	// falso-positivo por el JSON embebido del fixture echoeado vía streamPipe.
+	harness.AssertContains(t, r.Stdout, "Validation report")
+	harness.AssertContains(t, r.Stdout, "codex#1: needs_human")
+	if strings.Contains(r.Stdout, "codex#1: approve") {
+		t.Fatalf("stdout should NOT render raw verdict=approve after canonicalization; got: %s", r.Stdout)
+	}
+	combined := r.Stdout + r.Stderr
+	harness.AssertContains(t, combined, "awaiting-human")
+
+	inv := env.Invocations()
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) != 3 {
+		t.Fatalf("expected 3 comments (executor + 1 validator + human-request), got %d", len(comments))
+	}
+	edits := inv.FindCalls("gh", "issue", "edit", "42")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 label edit, got %d", len(edits))
+	}
+	edits[0].AssertArgsContain(t, "--add-label", "status:awaiting-human")
+	if strings.Contains(strings.Join(edits[0].Args, " "), "status:plan") {
+		t.Fatalf("status:plan should NOT be applied when needs_human effective; got %v", edits[0].Args)
+	}
+}
+
+// TestExplore_ExecutorBlockerQuestion_NotMirrored_DoesNotPause fija el
+// contrato actual como memoria ejecutable: si el ejecutor deja una pregunta
+// blocker=true kind=product pero el validator responde approve sin espejarla,
+// el flow NO pausa (status:plan). El edge case queda documentado acá;
+// cuando se resuelva en un issue separado este test se flipea.
+func TestExplore_ExecutorBlockerQuestion_NotMirrored_DoesNotPause(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior`).
+		RespondStdoutFromFixture("explore/sonnet_explore_with_product_blocker_question.json", 0)
+	env.ExpectAgent("codex").
+		WhenArgsMatch(`validador técnico`).
+		RespondStdoutFromFixture("explore/sonnet_validator_approve.json", 0)
+	// 2 comments: executor + 1 validator. NO human-request porque el
+	// validator no espejó la question.
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-e\n", 0)
+	env.ExpectGh(`^issue comment 42`).Consumable().RespondStdout("url-c\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	r := env.Run("explore", "--validators", "codex", "42")
+	if r.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	combined := r.Stdout + r.Stderr
+	harness.AssertContains(t, combined, "Explored")
+	if strings.Contains(combined, "awaiting-human") {
+		t.Fatalf("flow should NOT pause when validator approves and doesn't mirror executor question; got: %s", combined)
+	}
+
+	inv := env.Invocations()
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) != 2 {
+		t.Fatalf("expected 2 comments (executor + 1 validator, NO human-request), got %d", len(comments))
+	}
+	edits := inv.FindCalls("gh", "issue", "edit", "42")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 label edit (status:plan), got %d", len(edits))
+	}
+	edits[0].AssertArgsContain(t, "--add-label", "status:plan")
 }
