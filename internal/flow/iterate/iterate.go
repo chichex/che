@@ -23,18 +23,17 @@
 package iterate
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/chichex/che/internal/agent"
 	"github.com/chichex/che/internal/flow/execute"
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
@@ -371,158 +370,51 @@ func RenderIterateComment(iter int, commitSubjects []string) string {
 	return sb.String()
 }
 
-// ---- agent invocation (copy-adapted del patrón de close/execute) ----
+// ---- agent invocation (delega en internal/agent) ----
 
+// runAgent invoca a opus sobre el worktree (cwd=cwd) en modo stream-json
+// para que cada tool_use aparezca en los logs vía formatOpusLine.
+//
+// Iterate NO usa process group isolation (a diferencia de execute): cancel
+// por timeout mata el PID directo. Históricamente el flow se usa en entornos
+// donde opus no forkea herramientas problemáticas (los commits/push los hace
+// iterate después, no opus), así que no hace falta. Si en el futuro esto
+// cambia, se setea KillGrace=N*time.Second y listo.
 func runAgent(cwd, prompt string, log *output.Logger) error {
-	ctx, cancel := context.WithTimeout(context.Background(), AgentTimeout)
-	defer cancel()
-
-	args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
-	cmd := exec.CommandContext(ctx, AgentBinary, args...)
-	cmd.Dir = cwd
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting %s: %w", AgentBinary, err)
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	var stderrBuf strings.Builder
-	go streamPipe(&wg, stdoutPipe, nil, log, "opus: ", formatOpusLine)
-	go streamPipe(&wg, stderrPipe, &stderrBuf, log, "opus stderr: ", nil)
-	wg.Wait()
-
-	waitErr := cmd.Wait()
-	if ctx.Err() == context.DeadlineExceeded {
-		if se := strings.TrimSpace(stderrBuf.String()); se != "" {
+	res, err := agent.Run(agent.AgentOpus, prompt, agent.RunOpts{
+		Dir:     cwd,
+		Timeout: AgentTimeout,
+		Format:  agent.OutputStreamJSON,
+		OnLine: func(line string) {
+			if log != nil {
+				log.Step("opus: " + line)
+			}
+		},
+		OnStderrLine: func(line string) {
+			if log != nil {
+				log.Step("opus stderr: " + line)
+			}
+		},
+		StreamFormatter: formatOpusLine,
+	})
+	if errors.Is(err, agent.ErrTimeout) {
+		if se := strings.TrimSpace(res.Stderr); se != "" {
 			return fmt.Errorf("opus timed out after %s; stderr: %s", AgentTimeout, se)
 		}
 		return fmt.Errorf("opus timed out after %s (subí CHE_ITERATE_AGENT_TIMEOUT_SECS)", AgentTimeout)
 	}
-	if waitErr != nil {
-		if ee, ok := waitErr.(*exec.ExitError); ok {
-			return fmt.Errorf("opus exit %d: %s", ee.ExitCode(), strings.TrimSpace(stderrBuf.String()))
-		}
-		return waitErr
+	var ee *agent.ExitError
+	if errors.As(err, &ee) {
+		return fmt.Errorf("opus exit %d: %s", ee.ExitCode, ee.Stderr)
 	}
-	return nil
+	return err
 }
 
-func streamPipe(wg *sync.WaitGroup, r io.Reader, acc *strings.Builder, log *output.Logger, prefix string, format func(string) (string, bool)) {
-	defer wg.Done()
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if acc != nil {
-			acc.WriteString(line + "\n")
-		}
-		out := line
-		if format != nil {
-			msg, ok := format(line)
-			if !ok {
-				continue
-			}
-			out = msg
-		}
-		if strings.TrimSpace(out) != "" && log != nil {
-			log.Step(prefix + out)
-		}
-	}
-}
-
+// formatOpusLine es un thin wrapper sobre agent.FormatOpusLine con el prefijo
+// histórico que usa iterate ("tool: "). Los tests de este paquete lo
+// ejercitan directamente con asserts sobre strings exactos.
 func formatOpusLine(line string) (string, bool) {
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
-		return "", false
-	}
-	if !strings.HasPrefix(trimmed, "{") {
-		return line, true
-	}
-	var ev struct {
-		Type    string `json:"type"`
-		Subtype string `json:"subtype"`
-		Message struct {
-			Content []struct {
-				Type  string                 `json:"type"`
-				Name  string                 `json:"name"`
-				Input map[string]interface{} `json:"input"`
-			} `json:"content"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal([]byte(trimmed), &ev); err != nil {
-		return line, true
-	}
-	switch ev.Type {
-	case "system":
-		if ev.Subtype == "init" {
-			return "sesión lista, arrancando…", true
-		}
-	case "assistant":
-		for _, c := range ev.Message.Content {
-			if c.Type == "tool_use" {
-				return describeOpusTool(c.Name, c.Input), true
-			}
-		}
-	case "result":
-		if ev.Subtype == "success" {
-			return "agente terminó OK", true
-		}
-		if ev.Subtype != "" {
-			return "agente terminó (" + ev.Subtype + ")", true
-		}
-	}
-	return "", false
-}
-
-// describeOpusTool arma el detalle que acompaña al nombre de la tool:
-// path para edits/reads, comando truncado para Bash, patrón para
-// Glob/Grep. Copia del helper de execute — mismo formato para que el
-// usuario reconozca los logs de distintos flows.
-func describeOpusTool(name string, input map[string]interface{}) string {
-	detail := ""
-	switch name {
-	case "Read", "Write", "Edit", "NotebookEdit":
-		if v, ok := input["file_path"].(string); ok {
-			detail = v
-		}
-	case "Bash":
-		if v, ok := input["command"].(string); ok {
-			detail = truncate(v, 80)
-		}
-	case "Glob", "Grep":
-		if v, ok := input["pattern"].(string); ok {
-			detail = v
-		}
-	case "Task":
-		if v, ok := input["description"].(string); ok {
-			detail = v
-		}
-	case "WebFetch":
-		if v, ok := input["url"].(string); ok {
-			detail = v
-		}
-	}
-	if detail == "" {
-		return "tool: " + name
-	}
-	return "tool: " + name + " " + detail
-}
-
-func truncate(s string, max int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= max {
-		return s
-	}
-	return s[:max-1] + "…"
+	return agent.FormatOpusLine(line, "tool: ")
 }
 
 // ---- worktree resolution (copy-adapted de close) ----
