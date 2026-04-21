@@ -312,6 +312,77 @@ func TestCountConsolidatedHeaders(t *testing.T) {
 	}
 }
 
+func TestParse_NoRealHeaderEvenWithSubSectionsAndProseMention(t *testing.T) {
+	// Regresión: el body NO tiene un header real "## Plan consolidado" — la
+	// cadena solo aparece en prosa o dentro de un bloque fenced. Aunque haya
+	// sub-secciones tipo `### Pasos` en el body, NO debería parsearse como
+	// si fuera un plan válido. La detección y la extracción usan el mismo
+	// criterio (línea de header real fuera de fences), así que el resultado
+	// esperado es el fallback (Summary=body, sin Goal/Steps/AC).
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "mención en prosa + ### Pasos posterior",
+			body: "Quiero discutir el ## Plan consolidado en esta línea de prosa.\n" +
+				"\n" +
+				"### Pasos\n" +
+				"1. paso fantasma\n",
+		},
+		{
+			name: "mención dentro de fence + ### Pasos posterior",
+			body: "Acá un ejemplo de cómo NO escribir un plan:\n" +
+				"\n" +
+				"```markdown\n" +
+				"## Plan consolidado\n" +
+				"**Resumen:** ejemplo dentro de un fence\n" +
+				"```\n" +
+				"\n" +
+				"### Pasos\n" +
+				"1. paso fantasma\n",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p, err := Parse(c.body)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if p.Goal != "" {
+				t.Errorf("expected empty Goal (no real header), got %q", p.Goal)
+			}
+			if len(p.Steps) != 0 {
+				t.Errorf("expected empty Steps (no real header), got %v", p.Steps)
+			}
+			if len(p.AcceptanceCriteria) != 0 {
+				t.Errorf("expected empty AcceptanceCriteria, got %v", p.AcceptanceCriteria)
+			}
+			if !strings.Contains(p.Summary, "paso fantasma") {
+				t.Errorf("expected fallback Summary=body (que incluye 'paso fantasma'), got %q", p.Summary)
+			}
+		})
+	}
+}
+
+func TestExtractSection_IgnoresHeaderInProseAndFence(t *testing.T) {
+	// extractSection debe usar el mismo criterio de "header real" que
+	// findRealHeaders: una mención del prefijo en prosa o dentro de un fence
+	// no cuenta como sección.
+	body := "Esto menciona el ### Approach pero no es un header real.\n" +
+		"\n" +
+		"```\n" +
+		"### Approach dentro de un fence tampoco cuenta\n" +
+		"con texto\n" +
+		"```\n" +
+		"\n" +
+		"texto final fuera de cualquier sección.\n"
+	got := extractSection(body, "### Approach")
+	if got != "" {
+		t.Errorf("expected empty (no real header), got %q", got)
+	}
+}
+
 func TestParse_FallbackWhenNoHeader(t *testing.T) {
 	body := "Body sin plan consolidado, solo texto libre."
 	p, err := Parse(body)
