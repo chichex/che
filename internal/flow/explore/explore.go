@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -581,6 +582,13 @@ func Run(issueRef string, opts Opts) ExitCode {
 	if issue.State == "OPEN" && !issue.HasLabel(labels.CtPlan) {
 		if err := reclassifyIssue(issueRef, issue, log); err != nil {
 			log.Error("reclasificación del issue falló", output.F{Issue: issue.Number, Cause: err})
+			// Un LLM que alucina enums (o devuelve JSON roto) es irremediable:
+			// reintentar con la misma entrada va a alucinar de nuevo. Lo
+			// diferenciamos de un fallo de invocación (red, binario) que sí es
+			// retryable. idea.ErrInvalidResponse es el sentinel.
+			if errors.Is(err, idea.ErrInvalidResponse) {
+				return ExitSemantic
+			}
 			return ExitRetry
 		}
 	}
@@ -968,8 +976,11 @@ func reclassifyIssue(ref string, issue *Issue, log *output.Logger) error {
 	it := resp.Items[0]
 
 	// Si el issue ya tiene un type:* o size:*, lo respetamos. La
-	// clasificación del LLM es un fallback para issues sin nada.
-	hasType, hasSize := false, false
+	// clasificación del LLM es un fallback para issues sin nada. Ídem con
+	// status:* — si alguien editó labels a mano y dejó el issue con
+	// status:plan pero sin ct:plan, no queremos sumar status:idea arriba
+	// (GitHub aceptaría ambos y el flow quedaría con dos status:*).
+	hasType, hasSize, hasStatus := false, false, false
 	for _, l := range issue.Labels {
 		if strings.HasPrefix(l.Name, "type:") {
 			hasType = true
@@ -977,9 +988,18 @@ func reclassifyIssue(ref string, issue *Issue, log *output.Logger) error {
 		if strings.HasPrefix(l.Name, "size:") {
 			hasSize = true
 		}
+		if strings.HasPrefix(l.Name, "status:") {
+			hasStatus = true
+		}
 	}
 
-	toAdd := []string{labels.CtPlan, labels.StatusIdea}
+	toAdd := []string{labels.CtPlan}
+	if !hasStatus {
+		toAdd = append(toAdd, labels.StatusIdea)
+	} else {
+		log.Warn("issue con status:* preexistente sin ct:plan; preservando el status actual",
+			output.F{Issue: issue.Number})
+	}
 	if !hasType {
 		toAdd = append(toAdd, "type:"+it.Type)
 	}
