@@ -222,13 +222,49 @@ type ConsolidatedPlan = planpkg.ConsolidatedPlan
 // legacy sin header consolidado) sigue siendo procesable, así que no lo
 // bloqueamos. Solo abortamos cuando el body está totalmente vacío y el
 // fallback dejó todos los campos en cero — ahí sí no hay nada que mandar al
-// agente. La estrictez previa (exigir Goal/Steps/AC) era scope creep
-// respecto al contrato y rompía issues legacy.
+// agente.
 func isPlanEmpty(p *ConsolidatedPlan) bool {
 	if p == nil {
 		return true
 	}
 	return p.Summary == "" && p.Goal == "" && len(p.Steps) == 0 && len(p.AcceptanceCriteria) == 0
+}
+
+// Sentinel errors devueltos por preparePlan para que Run mapee cada caso a
+// un mensaje accionable con el número de issue. No se wrapean ErrAmbiguousPlan
+// ni errores de Parse — esos se propagan directamente.
+var (
+	errPlanEmpty    = errors.New("plan empty: body sin contenido procesable")
+	errPlanDegraded = errors.New("plan degraded: header consolidado presente pero sub-secciones vacías")
+)
+
+// preparePlan parsea el body del issue y valida que el resultado sea
+// procesable por el ejecutor. Reglas:
+//
+//   - Cualquier error de planpkg.Parse (incluyendo ErrAmbiguousPlan) se
+//     propaga tal cual — Run lo mapea a su mensaje correspondiente.
+//   - Body completamente vacío → errPlanEmpty. No hay nada que mandar al
+//     agente.
+//   - Body con header "## Plan consolidado" real pero sin Goal/Steps/AC
+//     parseables → errPlanDegraded. El fallback de Parse deja Summary=body,
+//     pero ese body tiene forma de plan estructurado que no se consolidó
+//     bien; mandar ese texto al ejecutor produce un run degradado sin las
+//     guías reales. Preferimos cortar y pedir re-consolidación.
+//   - Body sin header (issue legacy) con Summary=body es válido: sigue
+//     siendo procesable aunque menos guiado.
+func preparePlan(body string) (*ConsolidatedPlan, error) {
+	p, err := planpkg.Parse(body)
+	if err != nil {
+		return nil, err
+	}
+	if isPlanEmpty(p) {
+		return nil, errPlanEmpty
+	}
+	if planpkg.HasConsolidatedHeader(body) &&
+		p.Goal == "" && len(p.Steps) == 0 && len(p.AcceptanceCriteria) == 0 {
+		return nil, errPlanDegraded
+	}
+	return p, nil
 }
 
 // Run ejecuta el flow completo sobre un issue. Decisiones claves:
@@ -317,26 +353,21 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitSemantic
 	}
 
-	plan, err := planpkg.Parse(issue.Body)
+	plan, err := preparePlan(issue.Body)
 	if err != nil {
-		// Ambigüedad (>1 header "## Plan consolidado"): no podemos elegir,
-		// abortamos con mensaje accionable que identifica el issue.
-		if errors.Is(err, planpkg.ErrAmbiguousPlan) {
+		switch {
+		case errors.Is(err, planpkg.ErrAmbiguousPlan):
+			// Ambigüedad (>1 header "## Plan consolidado"): no podemos elegir.
 			fmt.Fprintf(stderr, "error: issue #%d tiene múltiples '## Plan consolidado' en el body — editalo para dejar uno solo y reintentá\n", issue.Number)
-			return ExitSemantic
+		case errors.Is(err, errPlanEmpty):
+			fmt.Fprintf(stderr, "error: issue #%d tiene el body vacío — agregá descripción o corré `che explore %d`\n", issue.Number, issue.Number)
+		case errors.Is(err, errPlanDegraded):
+			// Header consolidado presente pero sub-secciones vacías: mejor
+			// re-consolidar que mandar un plan degradado al ejecutor.
+			fmt.Fprintf(stderr, "error: issue #%d tiene '## Plan consolidado' pero las sub-secciones (Goal/Pasos/Criterios) no parsean — reconsolidalo con `che explore %d`\n", issue.Number, issue.Number)
+		default:
+			fmt.Fprintf(stderr, "error: parsing plan for issue #%d: %v\n", issue.Number, err)
 		}
-		fmt.Fprintf(stderr, "error: parsing plan for issue #%d: %v\n", issue.Number, err)
-		return ExitSemantic
-	}
-
-	// planpkg.Parse es permisivo: para body vacío devuelve fallback con
-	// Summary="" y para issues legacy sin header consolidado devuelve
-	// Summary=body. Solo cortamos cuando el plan quedó completamente vacío
-	// (body trimmed == ""), porque ahí no hay nada que mandar al agente.
-	// Cualquier otro fallback con Summary poblado sigue siendo procesable
-	// per el contrato de planpkg.Parse.
-	if isPlanEmpty(plan) {
-		fmt.Fprintf(stderr, "error: issue #%d tiene el body vacío — agregá descripción o corré `che explore %d`\n", issue.Number, issue.Number)
 		return ExitSemantic
 	}
 
