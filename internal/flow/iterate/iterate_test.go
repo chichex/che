@@ -1,12 +1,14 @@
 package iterate
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
+	planpkg "github.com/chichex/che/internal/plan"
 )
 
 func TestFilterIterable(t *testing.T) {
@@ -222,6 +224,227 @@ func TestSanitizeBranchSlug(t *testing.T) {
 		if got := sanitizeBranchSlug(in); got != want {
 			t.Errorf("sanitizeBranchSlug(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestExtractOriginalBody(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			"plan consolidado + idea original separados",
+			"## Plan consolidado (post-exploración)\n\n**Resumen:** x\n\n---\n\n## Idea original (de `che idea`)\n\n## Idea\nnecesito foo\n",
+			"## Idea\nnecesito foo\n",
+		},
+		{
+			"sin idea original → devuelve body completo",
+			"## Plan consolidado\n\n**Resumen:** x\n",
+			"## Plan consolidado\n\n**Resumen:** x\n",
+		},
+		{
+			"idea original sin doble newline",
+			"## Idea original\nfoo\nbar",
+			"foo\nbar",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := extractOriginalBody(c.in)
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+func TestParseIteratedPlan(t *testing.T) {
+	goodPlan := planpkg.ConsolidatedPlan{
+		Summary:            "s", Goal: "g", Approach: "a",
+		AcceptanceCriteria: []string{"ac1"},
+		Steps:              []string{"s1"},
+	}
+	goodJSON, _ := json.Marshal(goodPlan)
+
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{"plain JSON ok", string(goodJSON), false},
+		{"JSON con code fence", "```json\n" + string(goodJSON) + "\n```\n", false},
+		{"JSON con texto antes", "Acá va el plan:\n" + string(goodJSON), false},
+		{"JSON inválido", "not a json", true},
+		{"sin summary", `{"goal":"g","approach":"a","acceptance_criteria":["ac"],"steps":["s"]}`, true},
+		{"sin goal", `{"summary":"s","approach":"a","acceptance_criteria":["ac"],"steps":["s"]}`, true},
+		{"sin approach", `{"summary":"s","goal":"g","acceptance_criteria":["ac"],"steps":["s"]}`, true},
+		{"sin acceptance_criteria", `{"summary":"s","goal":"g","approach":"a","steps":["s"]}`, true},
+		{"sin steps", `{"summary":"s","goal":"g","approach":"a","acceptance_criteria":["ac"]}`, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := parseIteratedPlan(c.raw)
+			if c.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !c.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestPlansEqual(t *testing.T) {
+	a := &planpkg.ConsolidatedPlan{
+		Summary: "s", Goal: "g", Approach: "a",
+		AcceptanceCriteria: []string{"ac"},
+		Steps:              []string{"s1"},
+	}
+	// Misma shape, campos iguales → iguales.
+	b := &planpkg.ConsolidatedPlan{
+		Summary: "s", Goal: "g", Approach: "a",
+		AcceptanceCriteria: []string{"ac"},
+		Steps:              []string{"s1"},
+	}
+	if !plansEqual(a, b) {
+		t.Errorf("iguales deberían ser iguales")
+	}
+	// Cambio de summary → distintos.
+	c := &planpkg.ConsolidatedPlan{
+		Summary: "x", Goal: "g", Approach: "a",
+		AcceptanceCriteria: []string{"ac"},
+		Steps:              []string{"s1"},
+	}
+	if plansEqual(a, c) {
+		t.Errorf("summary distinto deberían ser distintos")
+	}
+	// Orden de steps distinto → distintos.
+	d := &planpkg.ConsolidatedPlan{
+		Summary: "s", Goal: "g", Approach: "a",
+		AcceptanceCriteria: []string{"ac"},
+		Steps:              []string{"s2", "s1"},
+	}
+	e := &planpkg.ConsolidatedPlan{
+		Summary: "s", Goal: "g", Approach: "a",
+		AcceptanceCriteria: []string{"ac"},
+		Steps:              []string{"s1", "s2"},
+	}
+	if plansEqual(d, e) {
+		t.Errorf("orden distinto deberían ser distintos")
+	}
+}
+
+func TestBuildPlanIteratePrompt(t *testing.T) {
+	issue := &validate.Issue{
+		Number: 42,
+		Title:  "feat: foo",
+		URL:    "https://github.com/acme/demo/issues/42",
+		Body:   "body original",
+	}
+	currentPlan := &planpkg.ConsolidatedPlan{
+		Summary: "plan actual", Goal: "g", Approach: "a",
+		AcceptanceCriteria: []string{"ac1"},
+		Steps:              []string{"step uno"},
+	}
+	findings := []string{
+		"<!-- claude-cli: flow=validate iter=1 agent=opus instance=1 role=validator -->\n## findings\n- falta cubrir edge case X",
+	}
+	prompt := BuildPlanIteratePrompt(issue, "body original", currentPlan, findings, 1)
+
+	must := []string{
+		"Issue #42",
+		"feat: foo",
+		"body original",
+		"plan actual",
+		"step uno",
+		"falta cubrir edge case X",
+		"Plan consolidado actual",
+		"Findings de los validadores",
+		"delta mínimo",
+		"kind=product",
+		"Iter de iterate: 1",
+	}
+	for _, s := range must {
+		if !strings.Contains(prompt, s) {
+			t.Errorf("prompt missing %q", s)
+		}
+	}
+}
+
+func TestBuildPlanIteratePrompt_MultipleFindings(t *testing.T) {
+	issue := &validate.Issue{Number: 1, Title: "t"}
+	currentPlan := &planpkg.ConsolidatedPlan{
+		Summary: "s", Goal: "g", Approach: "a",
+		AcceptanceCriteria: []string{"ac"},
+		Steps:              []string{"s1"},
+	}
+	findings := []string{"primer validator", "segundo validator"}
+	prompt := BuildPlanIteratePrompt(issue, "body", currentPlan, findings, 1)
+	if !strings.Contains(prompt, "primer validator") || !strings.Contains(prompt, "segundo validator") {
+		t.Errorf("prompt no incluye los 2 findings")
+	}
+	if !strings.Contains(prompt, "---") {
+		t.Errorf("prompt no separa los findings con '---'")
+	}
+}
+
+func TestRenderIteratePlanComment(t *testing.T) {
+	body := RenderIteratePlanComment(2, 3)
+	must := []string{
+		"<!-- claude-cli: flow=iterate iter=2 agent=opus instance=1 role=executor -->",
+		"## [che · iterate · plan · iter:2]",
+		"3 validador",
+		"plan-validated:changes-requested",
+		"che validate",
+	}
+	for _, s := range must {
+		if !strings.Contains(body, s) {
+			t.Errorf("comment missing %q", s)
+		}
+	}
+}
+
+func TestFilterIterablePlanCandidates(t *testing.T) {
+	mk := func(n int, title, url string) validate.Issue {
+		return validate.Issue{Number: n, Title: title, URL: url}
+	}
+	cases := []struct {
+		name    string
+		in      []validate.Issue
+		wantLen int
+	}{
+		{"empty", nil, 0},
+		{"todo incluido (el filtro lo hace gh --label)", []validate.Issue{
+			mk(1, "a", "u1"), mk(2, "b", "u2"),
+		}, 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := filterIterablePlanCandidates(c.in)
+			if len(got) != c.wantLen {
+				t.Fatalf("want %d, got %d", c.wantLen, len(got))
+			}
+		})
+	}
+
+	// Asegurar projection correcta (number/title/url)
+	in := []validate.Issue{mk(7, "título", "https://...")}
+	got := filterIterablePlanCandidates(in)
+	if len(got) != 1 {
+		t.Fatalf("expected 1, got %d", len(got))
+	}
+	if got[0].Number != 7 || got[0].Title != "título" || got[0].URL != "https://..." {
+		t.Errorf("projection incorrecta: %+v", got[0])
+	}
+}
+
+// TestLabelsConstants es un smoke test: si el nombre del label
+// plan-validated:changes-requested cambia en labels.go, este test rompe
+// — es un canario para evitar drift entre iterate y el paquete labels.
+func TestLabelsConstants(t *testing.T) {
+	if labels.PlanValidatedChangesRequested != "plan-validated:changes-requested" {
+		t.Errorf("unexpected label constant: %q", labels.PlanValidatedChangesRequested)
 	}
 }
 

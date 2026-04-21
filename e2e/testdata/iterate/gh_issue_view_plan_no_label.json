@@ -1,0 +1,11 @@
+{
+  "number": 42,
+  "title": "Agregar rate limiting al endpoint /login",
+  "body": "## Plan consolidado (post-exploración)\n\n**Resumen:** x\n\n**Goal:** g\n\n### Criterios de aceptación\n- [ ] c\n\n### Approach\na\n\n### Pasos\n1. s\n\n---\n\n## Idea original (de `che idea`)\n\nbody original\n",
+  "url": "https://github.com/acme/demo/issues/42",
+  "state": "OPEN",
+  "labels": [
+    {"name": "ct:plan"},
+    {"name": "status:plan"}
+  ]
+}
