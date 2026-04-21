@@ -31,6 +31,28 @@ import (
 	"github.com/chichex/che/internal/output"
 )
 
+// Target discrimina el tipo de ref que recibió `che validate`. La detección
+// corre contra `gh api repos/{owner}/{repo}/issues/{n}`: ese endpoint devuelve
+// el mismo shape para issues y PRs, con la diferencia de que los PRs incluyen
+// un campo `pull_request` no-null. Ambos targets comparten el runner de
+// validadores en paralelo, la consolidación de verdict y el render de
+// comments; lo que cambia es qué se valida (diff vs plan del body), dónde
+// se postea el comment (pr vs issue) y qué label se aplica (validated:* vs
+// plan-validated:*).
+type Target int
+
+const (
+	// TargetUnknown es el valor cero; no debería retornarlo detectTarget
+	// salvo que haya un bug.
+	TargetUnknown Target = iota
+	// TargetPlan indica que el ref apunta a un issue (no-PR) y el modo
+	// plan del flow aplica: valida el body consolidado del issue.
+	TargetPlan
+	// TargetPR indica que el ref apunta a un pull request; modo PR
+	// (comportamiento histórico: valida el diff).
+	TargetPR
+)
+
 // ExitCode es el código de salida semántico para el caller.
 type ExitCode int
 
@@ -231,19 +253,17 @@ type validatorResult struct {
 	Err       error
 }
 
-// Run ejecuta el flow completo sobre un PR. Es sync: espera a que todos los
-// validadores terminen y sus comments estén posteados antes de retornar.
-// Decisiones:
-//   - Preflight: gh auth + remote github.
-//   - Fetch del PR: gh pr view --json ...
-//   - Diff: gh pr diff <n>
-//   - Iter: max(flow=validate) + 1 sobre comments previos.
-//   - Validadores: goroutines en paralelo, wait sin timeout global (cada uno
-//     tiene su AgentTimeout individual — si se cuelga, muere).
-//   - Comments: 1 por validador con título visible + header HTML + 1 resumen
-//     final con tabla.
-//   - Stdout: reporte resumido (verdict + findings count por validador).
-func Run(prRef string, opts Opts) ExitCode {
+// Run ejecuta el flow despachando por tipo de ref. Detecta si <ref> es un
+// issue (modo plan) o un PR (modo PR actual) usando `gh api` y delega. La
+// API pública del paquete no cambia — cmd/validate.go sigue llamando a
+// validate.Run(ref, opts) sin saber qué target tocó.
+//
+// Preflight común (gh auth + remote) vive en el despachador: es idéntico en
+// ambos modos y no queremos repetirlo en runPR/runPlan. El preflight también
+// corre ANTES de detectTarget para que errores de entorno (no auth, no
+// remote github) no disparen una llamada a `gh api` que igual va a fallar —
+// así el usuario ve el error accionable primero.
+func Run(ref string, opts Opts) ExitCode {
 	stdout := opts.Stdout
 	if stdout == nil {
 		stdout = io.Discard
@@ -253,12 +273,11 @@ func Run(prRef string, opts Opts) ExitCode {
 		log = output.New(nil)
 	}
 
-	prRef = strings.TrimSpace(prRef)
-	if prRef == "" {
-		log.Error("pr ref is empty")
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		log.Error("ref is empty")
 		return ExitSemantic
 	}
-
 	if len(opts.Validators) == 0 {
 		log.Error("at least 1 validator is required")
 		return ExitSemantic
@@ -274,6 +293,29 @@ func Run(prRef string, opts Opts) ExitCode {
 		return ExitRetry
 	}
 
+	log.Step("detectando si el ref es un issue o un PR")
+	target, err := detectTarget(ref)
+	if err != nil {
+		log.Error("no se pudo determinar si es issue o PR", output.F{Cause: err})
+		return ExitRetry
+	}
+	switch target {
+	case TargetPR:
+		return runPR(ref, opts, stdout, log)
+	case TargetPlan:
+		// TODO (próximo commit): implementar runPlan.
+		log.Error("target plan (issue) aún no implementado — solo PR por ahora")
+		return ExitSemantic
+	default:
+		log.Error(fmt.Sprintf("tipo de ref desconocido: %v", target))
+		return ExitRetry
+	}
+}
+
+// runPR es el flow histórico: valida el diff de un PR abierto, postea
+// comments en el PR y aplica validated:*. El preflight (auth + remote)
+// ya corrió en Run.
+func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCode {
 	log.Info("obteniendo PR desde GitHub")
 	pr, err := FetchPR(prRef)
 	if err != nil {
@@ -305,7 +347,8 @@ func Run(prRef string, opts Opts) ExitCode {
 	iter := DetermineIter(comments)
 
 	log.Info(fmt.Sprintf("corriendo %d validador(es) en paralelo", len(opts.Validators)), output.F{Iter: iter, PR: pr.Number})
-	results := runValidatorsParallel(pr, diff, opts.Validators, log)
+	prompt := buildPRValidatorPrompt(pr, diff)
+	results := runValidatorsParallel(prompt, opts.Validators, log)
 
 	log.Step("posteando comments de validadores")
 	for _, r := range results {
@@ -345,6 +388,87 @@ func Run(prRef string, opts Opts) ExitCode {
 	fmt.Fprintln(stdout, renderReport(results))
 	fmt.Fprintf(stdout, "che ya dejó los comments en el PR %s\n", pr.URL)
 	return ExitOK
+}
+
+// detectTarget decide si un ref apunta a un issue o un PR. Consulta el
+// endpoint `gh api repos/:owner/:repo/issues/:n`, que devuelve el mismo
+// shape para issues y PRs pero con un campo `pull_request` no-null cuando
+// es un PR (documentado en la REST API de GitHub). Es el approach más
+// confiable: no depende de errores como "not a pull request" que tienen
+// wording sensible a idioma o versión de gh.
+//
+// Para soportar refs que no son números puros (URL, owner/repo#N), usamos
+// `gh issue view <ref> --json number` primero para obtener el número
+// canónico; eso nos da el número aunque el ref sea "https://.../pull/7"
+// (gh normaliza: a un PR lo acepta también como issue en el REST view).
+// Si eso falla caemos a detectar si es un número directo; si no, error.
+func detectTarget(ref string) (Target, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return TargetUnknown, fmt.Errorf("empty ref")
+	}
+	number, err := resolveRefNumber(ref)
+	if err != nil {
+		return TargetUnknown, err
+	}
+	cmd := exec.Command("gh", "api", fmt.Sprintf("repos/{owner}/{repo}/issues/%d", number))
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return TargetUnknown, fmt.Errorf("gh api issues/%d: %s", number, strings.TrimSpace(string(ee.Stderr)))
+		}
+		return TargetUnknown, err
+	}
+	// Parseamos solo los campos que necesitamos. pull_request aparece como
+	// objeto cuando el número corresponde a un PR; está ausente o null en
+	// issues regulares. json.RawMessage nos deja distinguir null de objeto
+	// sin depender del shape interno (que es documentado pero extenso).
+	var probe struct {
+		PullRequest json.RawMessage `json:"pull_request"`
+	}
+	if err := json.Unmarshal(out, &probe); err != nil {
+		return TargetUnknown, fmt.Errorf("parse gh api output: %w", err)
+	}
+	if len(probe.PullRequest) > 0 && string(probe.PullRequest) != "null" {
+		return TargetPR, nil
+	}
+	return TargetPlan, nil
+}
+
+// resolveRefNumber devuelve el número del issue/PR que corresponde al ref.
+// Si el ref es un número puro, lo devuelve tal cual (sin tocar red). Para
+// URLs / owner/repo#N extraemos el número con parsing local — no llamamos
+// a gh para evitar un round-trip extra cuando el usuario tipeó "7" o una
+// URL perfectamente formada. Los refs que no matcheamos acá los dejamos
+// caer al caller (detectTarget) con un error accionable.
+func resolveRefNumber(ref string) (int, error) {
+	if n, err := strconv.Atoi(ref); err == nil {
+		return n, nil
+	}
+	if strings.Contains(ref, "#") {
+		parts := strings.SplitN(ref, "#", 2)
+		if len(parts) == 2 {
+			if n, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
+				return n, nil
+			}
+		}
+	}
+	// URL de GitHub: /pull/N o /issues/N.
+	for _, segment := range []string{"/pull/", "/issues/"} {
+		if i := strings.Index(ref, segment); i >= 0 {
+			tail := ref[i+len(segment):]
+			// cortar query / fragment / path extra
+			for _, sep := range []string{"/", "?", "#"} {
+				if j := strings.Index(tail, sep); j >= 0 {
+					tail = tail[:j]
+				}
+			}
+			if n, err := strconv.Atoi(tail); err == nil {
+				return n, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("could not resolve number from ref %q", ref)
 }
 
 // consolidateVerdict devuelve el verdict consolidado (peor caso) de todos los
@@ -605,7 +729,11 @@ func FetchPRComments(ref string) ([]PRComment, error) {
 // devuelve el slice alineado con el input. Ninguno cancela a los otros — los
 // errores quedan en el validatorResult individual y se reportan como "ERROR"
 // en el comment correspondiente.
-func runValidatorsParallel(pr *PullRequest, diff string, validators []Validator, log *output.Logger) []validatorResult {
+//
+// El prompt es el mismo para todos los validadores de un run dado (cambia
+// solo según el target: PR vs plan). Lo recibimos como string construido
+// afuera para que el runner sea agnóstico de qué se valida.
+func runValidatorsParallel(prompt string, validators []Validator, log *output.Logger) []validatorResult {
 	results := make([]validatorResult, len(validators))
 	var wg sync.WaitGroup
 	for i, v := range validators {
@@ -614,7 +742,7 @@ func runValidatorsParallel(pr *PullRequest, diff string, validators []Validator,
 			defer wg.Done()
 			label := fmt.Sprintf("%s#%d", v.Agent, v.Instance)
 			log.Step(label + ": consultando")
-			resp, err := callValidator(v, pr, diff, log, label)
+			resp, err := callValidator(v, prompt, log, label)
 			results[i] = validatorResult{Validator: v, Response: resp, Err: err}
 		}(i, v)
 	}
@@ -622,10 +750,10 @@ func runValidatorsParallel(pr *PullRequest, diff string, validators []Validator,
 	return results
 }
 
-// callValidator invoca al binario del agente validador con el prompt del PR
-// diff y parsea la respuesta.
-func callValidator(v Validator, pr *PullRequest, diff string, log *output.Logger, label string) (*Response, error) {
-	prompt := buildValidatorPrompt(pr, diff)
+// callValidator invoca al binario del agente validador con el prompt dado y
+// parsea la respuesta. El prompt ya viene construido desde el caller (build
+// PR o build plan); el validador no distingue el target.
+func callValidator(v Validator, prompt string, log *output.Logger, label string) (*Response, error) {
 	out, err := runAgentCmd(v.Agent, prompt, log, label+": ")
 	if err != nil {
 		return nil, err
@@ -711,9 +839,12 @@ func parseResponse(raw string) (*Response, error) {
 
 // ---- prompt builder ----
 
-// buildValidatorPrompt arma el prompt del validador: le da el título del PR
-// y el diff, y le pide un JSON estructurado con el verdict y los findings.
-func buildValidatorPrompt(pr *PullRequest, diff string) string {
+// buildPRValidatorPrompt arma el prompt del validador en modo PR: le da el
+// título del PR y el diff, y le pide un JSON estructurado con el verdict y
+// los findings. El contrato de respuesta (verdict/summary/findings con kind
+// product/technical/documented) se comparte con buildPlanValidatorPrompt —
+// la diferencia es qué se valida (código ya escrito vs plan por escribirse).
+func buildPRValidatorPrompt(pr *PullRequest, diff string) string {
 	var sb strings.Builder
 	sb.WriteString(`Sos un validador técnico senior. Otro agente implementó cambios en un PR.
 Tu tarea es leer el DIFF del PR y marcar lo que falta o está mal — NO reimplementar nada.
