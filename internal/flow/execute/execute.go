@@ -28,6 +28,7 @@ import (
 
 	"github.com/chichex/che/internal/comments"
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/output"
 	planpkg "github.com/chichex/che/internal/plan"
 )
 
@@ -138,12 +139,12 @@ var ValidatorsWaitTimeout = func() time.Duration {
 	return 10 * time.Minute
 }()
 
-// Opts agrupa los writers, la callback de progreso y el agente ejecutor.
+// Opts agrupa el writer de stdout (payload: "Executed ...", "PR: ..."),
+// el logger estructurado (progress + errors) y el agente ejecutor.
 type Opts struct {
-	Stdout     io.Writer
-	Stderr     io.Writer
-	OnProgress func(string)
-	Agent      Agent
+	Stdout io.Writer
+	Out    *output.Logger
+	Agent  Agent
 	// Validators son los agentes que postean findings en el PR después de
 	// crearlo. execute NO espera por ellos (fire-and-forget).
 	Validators []Validator
@@ -285,11 +286,21 @@ func preparePlan(body string) (*ConsolidatedPlan, error) {
 //   - Rollback: si algo falla después del lock, revertir a status:plan y
 //     limpiar worktree.
 func Run(issueRef string, opts Opts) ExitCode {
-	stdout, stderr := opts.Stdout, opts.Stderr
-	progress := opts.OnProgress
-	if progress == nil {
-		progress = func(string) {}
+	stdout := opts.Stdout
+	if stdout == nil {
+		stdout = io.Discard
 	}
+	log := opts.Out
+	if log == nil {
+		log = output.New(nil)
+	}
+	// stderr + progress adapters: permiten reusar helpers legacy sin
+	// tocar sus firmas. Cada línea al stderr se emite como log.Warn
+	// (en execute, los fmt.Fprintf(stderr, ...) son mayoría warnings
+	// best-effort + errors; usar Warn evita ruido cuando el flow continúa).
+	stderr := log.AsWriter(output.LevelWarn)
+	progress := func(s string) { log.Step(s) }
+	_ = stderr // puede no usarse si todos los call-sites ya usan log directo
 
 	// Instalar signal handling si el caller no pasó un context. cmd/execute.go
 	// instala el suyo (para mapear SIGINT → exit 130 explícito); la TUI pasa

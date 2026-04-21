@@ -20,6 +20,7 @@ import (
 
 	"github.com/chichex/che/internal/comments"
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/output"
 	"github.com/chichex/che/internal/plan"
 )
 
@@ -207,15 +208,16 @@ func ParseValidators(s string) ([]Validator, error) {
 	return out, nil
 }
 
-// Opts agrupa los writers, la callback de progreso, el agente ejecutor y la
-// lista de validadores. Si OnProgress es nil, el flow corre silencioso. Si
-// Agent es "", se usa DefaultAgent. Si Validators es nil, no se corre la
-// etapa de validación (comportamiento v0.0.11).
+// Opts agrupa el writer de stdout (payload: "Explored ...", "Paused ...",
+// "Resumed and consolidated ..." + validation report), el logger
+// estructurado (progress + errors), el agente ejecutor y la lista de
+// validadores. Si Out es nil el flow corre silencioso. Si Agent es "",
+// se usa DefaultAgent. Si Validators es nil, no se corre la etapa de
+// validación.
 type Opts struct {
-	Stdout     io.Writer
-	Stderr     io.Writer
-	OnProgress func(string)
-	Agent      Agent
+	Stdout io.Writer
+	Out    *output.Logger
+	Agent  Agent
 	Validators []Validator
 }
 
@@ -505,37 +507,45 @@ const MaxIterations = 3
 // issue: status:awaiting-human dispara reanudación, el resto es exploración
 // nueva. status:plan sin awaiting significa "ya explorado" y corta.
 func Run(issueRef string, opts Opts) ExitCode {
-	stdout, stderr := opts.Stdout, opts.Stderr
-	progress := opts.OnProgress
-	if progress == nil {
-		progress = func(string) {}
+	stdout := opts.Stdout
+	if stdout == nil {
+		stdout = io.Discard
 	}
+	log := opts.Out
+	if log == nil {
+		log = output.New(nil)
+	}
+	// stderr + progress adapters: permiten reusar helpers legacy
+	// (que reciben io.Writer + func(string)) sin tocar sus firmas. Cada
+	// linea al stderr se emite como log.Error; cada progress como log.Step.
+	stderr := log.AsWriter(output.LevelError)
+	progress := func(s string) { log.Step(s) }
 
 	issueRef = strings.TrimSpace(issueRef)
 	if issueRef == "" {
-		fmt.Fprintln(stderr, "error: issue ref is empty")
+		log.Error("issue ref is empty")
 		return ExitSemantic
 	}
 
-	progress("chequeando repo git y auth de GitHub…")
+	log.Info("chequeando repo git y auth de GitHub")
 	if err := precheckGitHubRemote(); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("github remote invalido", output.F{Cause: err})
 		return ExitRetry
 	}
 	if err := precheckGhAuth(); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("gh auth fallo", output.F{Cause: err})
 		return ExitRetry
 	}
 
-	progress("obteniendo issue desde GitHub…")
+	log.Info("obteniendo issue desde GitHub")
 	issue, err := fetchIssue(issueRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: fetching issue: %v\n", err)
+		log.Error("fetching issue failed", output.F{Cause: err})
 		return ExitRetry
 	}
 
 	if err := gateBasic(issue); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("gate failed", output.F{Issue: issue.Number, Cause: err})
 		return ExitSemantic
 	}
 
@@ -545,7 +555,8 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return runResume(issueRef, issue, opts, progress, stdout, stderr)
 	}
 	if issue.HasLabel(labels.StatusPlan) {
-		fmt.Fprintf(stderr, "error: issue #%d was already explored (status:plan present)\n", issue.Number)
+		log.Error(fmt.Sprintf("issue #%d was already explored (status:plan present)", issue.Number),
+			output.F{Issue: issue.Number, Labels: []string{labels.StatusPlan}})
 		return ExitSemantic
 	}
 	return runNew(issueRef, issue, opts, progress, stdout, stderr)

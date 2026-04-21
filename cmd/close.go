@@ -5,6 +5,7 @@ import (
 
 	closing "github.com/chichex/che/internal/flow/close"
 	"github.com/chichex/che/internal/flow/validate"
+	"github.com/chichex/che/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -48,7 +49,7 @@ No hay flag --agent: close usa opus (claude) por diseño.`,
 		}
 		code := closing.Run(args[0], closing.Opts{
 			Stdout:     cmd.OutOrStdout(),
-			Stderr:     cmd.ErrOrStderr(),
+			Out:        output.New(output.NewWriterSink(cmd.ErrOrStderr())),
 			KeepBranch: closeKeepBranch,
 		})
 		if code != closing.ExitOK {

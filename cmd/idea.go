@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/chichex/che/internal/flow/idea"
+	"github.com/chichex/che/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -34,7 +35,7 @@ Este subcomando es la ruta no-interactiva (scripting/CI). La TUI de che
 		}
 		code := idea.Run(text, idea.Opts{
 			Stdout: cmd.OutOrStdout(),
-			Stderr: cmd.ErrOrStderr(),
+			Out:    output.New(output.NewWriterSink(cmd.ErrOrStderr())),
 		})
 		if code != idea.ExitOK {
 			os.Exit(int(code))

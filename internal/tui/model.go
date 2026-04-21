@@ -25,6 +25,7 @@ import (
 	"github.com/chichex/che/internal/flow/idea"
 	"github.com/chichex/che/internal/flow/iterate"
 	"github.com/chichex/che/internal/flow/validate"
+	"github.com/chichex/che/internal/output"
 )
 
 type screen int
@@ -338,6 +339,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case progressMsg:
 		m.runLog = appendLog(m.runLog, msg.line)
 		// seguimos escuchando el channel
+		return m, waitForMsg(m.progressCh)
+
+	case eventMsg:
+		m.runLog = appendLog(m.runLog, renderEventLine(msg.ev))
+		return m, waitForMsg(m.progressCh)
+
+	case payloadMsg:
+		m.runLog = appendLog(m.runLog, logLineStyle.Render(msg.line))
 		return m, waitForMsg(m.progressCh)
 
 	case flowDoneMsg:
@@ -898,15 +907,12 @@ func (m Model) startIterateFlow(prRef string) (tea.Model, tea.Cmd) {
 	m.progressCh = make(chan tea.Msg, 64)
 
 	go func(ch chan<- tea.Msg) {
-		var stdout, stderr bytes.Buffer
+		var stderr bytes.Buffer
 		code := iterate.Run(prRef, iterate.Opts{
-			Stdout: &stdout,
-			Stderr: &stderr,
-			OnProgress: func(line string) {
-				ch <- progressMsg{line: line}
-			},
+			Stdout: newStdoutLineWriter(ch),
+			Out:    output.New(&eventSink{ch: ch}),
 		})
-		ch <- iterateDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
+		ch <- iterateDoneMsg{code: code, stdout: "", stderr: stderr.String()}
 	}(m.progressCh)
 
 	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
@@ -975,15 +981,12 @@ func (m Model) startCloseFlow(prRef string) (tea.Model, tea.Cmd) {
 	m.progressCh = make(chan tea.Msg, 64)
 
 	go func(ch chan<- tea.Msg) {
-		var stdout, stderr bytes.Buffer
+		var stderr bytes.Buffer
 		code := closing.Run(prRef, closing.Opts{
-			Stdout: &stdout,
-			Stderr: &stderr,
-			OnProgress: func(line string) {
-				ch <- progressMsg{line: line}
-			},
+			Stdout: newStdoutLineWriter(ch),
+			Out:    output.New(&eventSink{ch: ch}),
 		})
-		ch <- closeDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
+		ch <- closeDoneMsg{code: code, stdout: "", stderr: stderr.String()}
 	}(m.progressCh)
 
 	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
@@ -997,16 +1000,13 @@ func (m Model) startValidateFlow(prRef string, validators []validate.Validator) 
 	m.progressCh = make(chan tea.Msg, 64)
 
 	go func(ch chan<- tea.Msg) {
-		var stdout, stderr bytes.Buffer
+		var stderr bytes.Buffer
 		code := validate.Run(prRef, validate.Opts{
-			Stdout:     &stdout,
-			Stderr:     &stderr,
+			Stdout:     newStdoutLineWriter(ch),
+			Out:        output.New(&eventSink{ch: ch}),
 			Validators: validators,
-			OnProgress: func(line string) {
-				ch <- progressMsg{line: line}
-			},
 		})
-		ch <- validateDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
+		ch <- validateDoneMsg{code: code, stdout: "", stderr: stderr.String()}
 	}(m.progressCh)
 
 	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
@@ -1031,18 +1031,15 @@ func (m Model) startExecuteFlow(issueRef string, agent execute.Agent, validators
 	m.cancelRun = cancel
 
 	go func(ch chan<- tea.Msg, runCtx context.Context) {
-		var stdout, stderr bytes.Buffer
+		var stderr bytes.Buffer
 		code := execute.Run(issueRef, execute.Opts{
-			Stdout:     &stdout,
-			Stderr:     &stderr,
+			Stdout:     newStdoutLineWriter(ch),
+			Out:        output.New(&eventSink{ch: ch}),
 			Agent:      agent,
 			Validators: validators,
 			Ctx:        runCtx,
-			OnProgress: func(line string) {
-				ch <- progressMsg{line: line}
-			},
 		})
-		ch <- executeDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
+		ch <- executeDoneMsg{code: code, stdout: "", stderr: stderr.String()}
 	}(m.progressCh, runCtx)
 
 	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
@@ -1267,15 +1264,12 @@ func (m Model) startIdeaFlow(text string) (tea.Model, tea.Cmd) {
 	m.progressCh = make(chan tea.Msg, 64)
 
 	go func(ch chan<- tea.Msg) {
-		var stdout, stderr bytes.Buffer
+		var stderr bytes.Buffer
 		code := idea.Run(text, idea.Opts{
-			Stdout: &stdout,
-			Stderr: &stderr,
-			OnProgress: func(line string) {
-				ch <- progressMsg{line: line}
-			},
+			Stdout: newStdoutLineWriter(ch),
+			Out:    output.New(&eventSink{ch: ch}),
 		})
-		ch <- flowDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
+		ch <- flowDoneMsg{code: code, stdout: "", stderr: stderr.String()}
 	}(m.progressCh)
 
 	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())
@@ -1291,17 +1285,14 @@ func (m Model) startExploreFlow(issueRef string, agent explore.Agent, validators
 	m.progressCh = make(chan tea.Msg, 64)
 
 	go func(ch chan<- tea.Msg) {
-		var stdout, stderr bytes.Buffer
+		var stderr bytes.Buffer
 		code := explore.Run(issueRef, explore.Opts{
-			Stdout:     &stdout,
-			Stderr:     &stderr,
+			Stdout:     newStdoutLineWriter(ch),
+			Out:        output.New(&eventSink{ch: ch}),
 			Agent:      agent,
 			Validators: validators,
-			OnProgress: func(line string) {
-				ch <- progressMsg{line: line}
-			},
 		})
-		ch <- exploreDoneMsg{code: code, stdout: stdout.String(), stderr: stderr.String()}
+		ch <- exploreDoneMsg{code: code, stdout: "", stderr: stderr.String()}
 	}(m.progressCh)
 
 	return m, tea.Batch(waitForMsg(m.progressCh), tickCmd())

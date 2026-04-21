@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/output"
 )
 
 // ExitCode es el código de salida semántico para el caller.
@@ -140,11 +141,11 @@ func ParseValidators(s string) ([]Validator, error) {
 	return out, nil
 }
 
-// Opts agrupa los writers y la lista de validadores.
+// Opts agrupa el writer de stdout (payload: reporte final) y el logger
+// estructurado (progress + errors), más la lista de validadores.
 type Opts struct {
 	Stdout     io.Writer
-	Stderr     io.Writer
-	OnProgress func(string)
+	Out        *output.Logger
 	Validators []Validator
 }
 
@@ -301,88 +302,101 @@ type validatorResult struct {
 //     final con tabla.
 //   - Stdout: reporte resumido (verdict + findings count por validador).
 func Run(prRef string, opts Opts) ExitCode {
-	stdout, stderr := opts.Stdout, opts.Stderr
-	progress := opts.OnProgress
-	if progress == nil {
-		progress = func(string) {}
+	stdout := opts.Stdout
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	log := opts.Out
+	if log == nil {
+		log = output.New(nil)
 	}
 
 	prRef = strings.TrimSpace(prRef)
 	if prRef == "" {
-		fmt.Fprintln(stderr, "error: pr ref is empty")
+		log.Error("pr ref is empty")
 		return ExitSemantic
 	}
 
 	if len(opts.Validators) == 0 {
-		fmt.Fprintln(stderr, "error: at least 1 validator is required")
+		log.Error("at least 1 validator is required")
 		return ExitSemantic
 	}
 
-	progress("chequeando auth de GitHub…")
+	log.Info("chequeando auth de GitHub")
 	if err := precheckGitHubRemote(); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("github remote invalido", output.F{Cause: err})
 		return ExitRetry
 	}
 	if err := precheckGhAuth(); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("gh auth fallo", output.F{Cause: err})
 		return ExitRetry
 	}
 
-	progress("obteniendo PR desde GitHub…")
+	log.Info("obteniendo PR desde GitHub")
 	pr, err := FetchPR(prRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: fetching PR: %v\n", err)
+		log.Error("fetching PR failed", output.F{Cause: err})
 		return ExitRetry
 	}
 	if pr.State != "OPEN" {
-		fmt.Fprintf(stderr, "error: PR #%d is not OPEN (state=%s)\n", pr.Number, pr.State)
+		log.Error(fmt.Sprintf("PR #%d is not OPEN (state=%s)", pr.Number, pr.State))
 		return ExitSemantic
 	}
 
-	progress("descargando diff del PR…")
+	log.Step("descargando diff del PR", output.F{PR: pr.Number})
 	diff, err := FetchDiff(prRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: fetching diff: %v\n", err)
+		log.Error("fetching diff failed", output.F{Cause: err})
 		return ExitRetry
 	}
 	if strings.TrimSpace(diff) == "" {
-		fmt.Fprintf(stderr, "error: diff del PR #%d está vacío — ¿está mergeado o no tiene cambios?\n", pr.Number)
+		log.Error(fmt.Sprintf("diff del PR #%d está vacío — ¿está mergeado o no tiene cambios?", pr.Number))
 		return ExitSemantic
 	}
 
-	progress("leyendo comments previos para calcular iter…")
+	log.Step("leyendo comments previos para calcular iter")
 	comments, err := FetchPRComments(prRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: fetching comments: %v\n", err)
+		log.Error("fetching comments failed", output.F{Cause: err})
 		return ExitRetry
 	}
 	iter := DetermineIter(comments)
 
-	progress(fmt.Sprintf("corriendo %d validador(es) en paralelo (iter=%d)…", len(opts.Validators), iter))
-	results := runValidatorsParallel(pr, diff, opts.Validators, progress)
+	log.Info(fmt.Sprintf("corriendo %d validador(es) en paralelo", len(opts.Validators)), output.F{Iter: iter, PR: pr.Number})
+	results := runValidatorsParallel(pr, diff, opts.Validators, log)
 
-	progress("posteando comments de validadores…")
+	log.Step("posteando comments de validadores")
 	for _, r := range results {
 		body := renderValidatorComment(r, iter)
 		if err := postPRComment(prRef, body); err != nil {
-			fmt.Fprintf(stderr, "error: posting %s#%d comment: %v\n",
-				r.Validator.Agent, r.Validator.Instance, err)
+			log.Error(fmt.Sprintf("posting %s#%d comment failed", r.Validator.Agent, r.Validator.Instance),
+				output.F{Validator: fmt.Sprintf("%s#%d", r.Validator.Agent, r.Validator.Instance), Cause: err})
 			return ExitRetry
 		}
+		verdict := ""
+		if r.Response != nil {
+			verdict = r.Response.Verdict
+		}
+		log.Success("comment posteado",
+			output.F{Validator: fmt.Sprintf("%s#%d", r.Validator.Agent, r.Validator.Instance), Verdict: verdict})
 	}
 
-	progress("posteando comment resumen…")
+	log.Step("posteando comment resumen")
 	summary := renderSummaryComment(results, iter)
 	if err := postPRComment(prRef, summary); err != nil {
-		fmt.Fprintf(stderr, "error: posting summary comment: %v\n", err)
+		log.Error("posting summary comment failed", output.F{Cause: err})
 		return ExitRetry
 	}
 
 	if verdict := consolidateVerdict(results); verdict != "" {
 		target := verdictToLabel(verdict)
-		progress("aplicando label " + target + " al PR…")
+		log.Step("aplicando label al PR", output.F{Labels: []string{target}, PR: pr.Number})
 		if err := applyValidatedLabel(prRef, pr, target); err != nil {
-			fmt.Fprintf(stderr, "warning: no pude aplicar label %s al PR: %v\n", target, err)
+			log.Warn("warning: no pude aplicar label al PR",
+				output.F{Labels: []string{target}, PR: pr.Number, Cause: err})
+		} else {
+			log.Success("verdict consolidado",
+				output.F{PR: pr.Number, Verdict: verdict, Labels: []string{target}})
 		}
 	}
 
@@ -649,7 +663,7 @@ func FetchPRComments(ref string) ([]PRComment, error) {
 // devuelve el slice alineado con el input. Ninguno cancela a los otros — los
 // errores quedan en el validatorResult individual y se reportan como "ERROR"
 // en el comment correspondiente.
-func runValidatorsParallel(pr *PullRequest, diff string, validators []Validator, progress func(string)) []validatorResult {
+func runValidatorsParallel(pr *PullRequest, diff string, validators []Validator, log *output.Logger) []validatorResult {
 	results := make([]validatorResult, len(validators))
 	var wg sync.WaitGroup
 	for i, v := range validators {
@@ -657,10 +671,8 @@ func runValidatorsParallel(pr *PullRequest, diff string, validators []Validator,
 		go func(i int, v Validator) {
 			defer wg.Done()
 			label := fmt.Sprintf("%s#%d", v.Agent, v.Instance)
-			progress(label + ": consultando…")
-			resp, err := callValidator(v, pr, diff, func(line string) {
-				progress(label + ": " + line)
-			})
+			log.Step(label + ": consultando")
+			resp, err := callValidator(v, pr, diff, log, label)
 			results[i] = validatorResult{Validator: v, Response: resp, Err: err}
 		}(i, v)
 	}
@@ -670,9 +682,9 @@ func runValidatorsParallel(pr *PullRequest, diff string, validators []Validator,
 
 // callValidator invoca al binario del agente validador con el prompt del PR
 // diff y parsea la respuesta.
-func callValidator(v Validator, pr *PullRequest, diff string, progress func(string)) (*Response, error) {
+func callValidator(v Validator, pr *PullRequest, diff string, log *output.Logger, label string) (*Response, error) {
 	prompt := buildValidatorPrompt(pr, diff)
-	out, err := runAgentCmd(v.Agent, prompt, progress, "")
+	out, err := runAgentCmd(v.Agent, prompt, log, label+": ")
 	if err != nil {
 		return nil, err
 	}
@@ -680,8 +692,8 @@ func callValidator(v Validator, pr *PullRequest, diff string, progress func(stri
 }
 
 // runAgentCmd invoca al binario del agente con el prompt construido. Streamea
-// stdout/stderr en vivo al progress y aplica AgentTimeout con context.
-func runAgentCmd(agent Agent, prompt string, progress func(string), progressPrefix string) (string, error) {
+// stdout/stderr en vivo al log y aplica AgentTimeout con context.
+func runAgentCmd(agent Agent, prompt string, log *output.Logger, progressPrefix string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), AgentTimeout)
 	defer cancel()
 
@@ -702,8 +714,8 @@ func runAgentCmd(agent Agent, prompt string, progress func(string), progressPref
 	var fullStdout, fullStderr strings.Builder
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go streamPipe(&wg, stdoutPipe, &fullStdout, progress, progressPrefix)
-	go streamPipe(&wg, stderrPipe, &fullStderr, progress, progressPrefix+"stderr: ")
+	go streamPipe(&wg, stdoutPipe, &fullStdout, log, progressPrefix)
+	go streamPipe(&wg, stderrPipe, &fullStderr, log, progressPrefix+"stderr: ")
 
 	wg.Wait()
 	waitErr := cmd.Wait()
@@ -722,15 +734,15 @@ func runAgentCmd(agent Agent, prompt string, progress func(string), progressPref
 	return fullStdout.String(), nil
 }
 
-func streamPipe(wg *sync.WaitGroup, r io.Reader, full *strings.Builder, progress func(string), prefix string) {
+func streamPipe(wg *sync.WaitGroup, r io.Reader, full *strings.Builder, log *output.Logger, prefix string) {
 	defer wg.Done()
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		full.WriteString(line + "\n")
-		if strings.TrimSpace(line) != "" && progress != nil {
-			progress(prefix + line)
+		if strings.TrimSpace(line) != "" && log != nil {
+			log.Step(prefix + line)
 		}
 	}
 }

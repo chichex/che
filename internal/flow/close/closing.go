@@ -30,6 +30,7 @@ import (
 	"github.com/chichex/che/internal/flow/execute"
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/output"
 )
 
 // ExitCode es el código de salida semántico para el caller.
@@ -86,11 +87,11 @@ var CIPollInterval = func() time.Duration {
 	return 15 * time.Second
 }()
 
-// Opts agrupa los writers y la callback de progreso.
+// Opts agrupa el writer de stdout (payload) y el logger estructurado
+// (progress + errors). Si Out es nil, el flow corre silencioso.
 type Opts struct {
-	Stdout     io.Writer
-	Stderr     io.Writer
-	OnProgress func(string)
+	Stdout io.Writer
+	Out    *output.Logger
 	// KeepBranch omite el --delete-branch del merge y el cleanup del
 	// worktree asociado. Default false: tras mergear, che close borra la
 	// branch remota/local y remueve el worktree para dejar el repo limpio.
@@ -302,58 +303,61 @@ func hasBlockingLabel(p validate.PullRequest) bool {
 //     · failure path: limpia solo si el worktree es propio del run, para no
 //       borrar trabajo del usuario en worktrees reusados.
 func Run(prRef string, opts Opts) ExitCode {
-	stdout, stderr := opts.Stdout, opts.Stderr
-	keepBranch := opts.KeepBranch
-	progress := opts.OnProgress
-	if progress == nil {
-		progress = func(string) {}
+	stdout := opts.Stdout
+	if stdout == nil {
+		stdout = io.Discard
 	}
+	log := opts.Out
+	if log == nil {
+		log = output.New(nil)
+	}
+	keepBranch := opts.KeepBranch
 
 	prRef = strings.TrimSpace(prRef)
 	if prRef == "" {
-		fmt.Fprintln(stderr, "error: pr ref is empty")
+		log.Error("pr ref is empty")
 		return ExitSemantic
 	}
 	if _, err := validate.ParsePRRef(prRef); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("pr ref invalido", output.F{Cause: err})
 		return ExitSemantic
 	}
 
-	progress("chequeando repo git y auth de GitHub…")
+	log.Info("chequeando repo git y auth de GitHub")
 	repoRoot, err := repoToplevel()
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("git repo invalido", output.F{Cause: err})
 		return ExitRetry
 	}
 	if err := precheckGitHubRemote(); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("github remote invalido", output.F{Cause: err})
 		return ExitRetry
 	}
 	if err := precheckGhAuth(); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("gh auth fallo", output.F{Cause: err})
 		return ExitRetry
 	}
 
-	progress("obteniendo PR desde GitHub…")
+	log.Info("obteniendo PR desde GitHub")
 	pr, err := FetchPR(prRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: fetching PR: %v\n", err)
+		log.Error("fetching PR failed", output.F{Cause: err})
 		return ExitRetry
 	}
 	if pr.State != "OPEN" {
-		fmt.Fprintf(stderr, "error: PR #%d is not OPEN (state=%s)\n", pr.Number, pr.State)
+		log.Error(fmt.Sprintf("PR #%d is not OPEN (state=%s)", pr.Number, pr.State))
 		return ExitSemantic
 	}
 
 	if blocking := BlockingVerdict(pr); blocking != "" {
-		fmt.Fprintf(stderr, "⚠ warning: PR #%d tiene label %s — procedo igual porque así lo pediste.\n",
-			pr.Number, blocking)
+		log.Warn(fmt.Sprintf("warning: PR #%d tiene verdict bloqueante — procedo igual porque así lo pediste", pr.Number),
+			output.F{Labels: []string{blocking}})
 	}
 
 	if pr.IsDraft {
-		progress(fmt.Sprintf("PR #%d está en draft — pasándolo a ready for review…", pr.Number))
+		log.Step(fmt.Sprintf("PR #%d está en draft — pasando a ready for review", pr.Number))
 		if err := prReady(prRef); err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
+			log.Error("gh pr ready fallo", output.F{PR: pr.Number, Cause: err})
 			return ExitRetry
 		}
 	}
@@ -381,7 +385,7 @@ func Run(prRef string, opts Opts) ExitCode {
 		}
 		wtCtx, wtCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer wtCancel()
-		cleanupWorktree(wtCtx, stderr, repoRoot, wt)
+		cleanupWorktree(wtCtx, log, repoRoot, wt)
 	}()
 
 	issueNum := firstClosingIssue(pr)
@@ -389,17 +393,17 @@ func Run(prRef string, opts Opts) ExitCode {
 	for attempt := 1; attempt <= MaxFixAttempts+1; attempt++ {
 		// Refrescar estado del PR (mergeable puede venir UNKNOWN en la
 		// primera vista; github lo computa lazy).
-		progress(fmt.Sprintf("chequeando estado del PR (intento %d/%d)…", attempt, MaxFixAttempts+1))
+		log.Step("chequeando estado del PR", output.F{Attempt: attempt, Total: MaxFixAttempts + 1, PR: pr.Number})
 		freshPR, err := FetchPR(prRef)
 		if err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
+			log.Error("fetching PR failed", output.F{Cause: err})
 			return ExitRetry
 		}
 		pr = freshPR
 
 		checks, err := FetchChecks(prRef)
 		if err != nil {
-			fmt.Fprintf(stderr, "error: %v\n", err)
+			log.Error("fetching checks failed", output.F{Cause: err})
 			return ExitRetry
 		}
 
@@ -409,22 +413,24 @@ func Run(prRef string, opts Opts) ExitCode {
 		lastProblems = problems
 
 		if len(problems) == 0 {
-			progress("PR mergeable y CI verde — procediendo al merge")
+			log.Success("PR mergeable y CI verde", output.F{PR: pr.Number})
 			break
 		}
 
 		if attempt > MaxFixAttempts {
-			fmt.Fprintf(stderr, "error: agotados %d intentos de fix; problemas restantes: %s\n",
-				MaxFixAttempts, strings.Join(problems, ", "))
+			log.Error(fmt.Sprintf("agotados %d intentos de fix; problemas restantes: %s",
+				MaxFixAttempts, strings.Join(problems, ", ")),
+				output.F{PR: pr.Number})
 			return ExitRetry
 		}
 
-		progress(fmt.Sprintf("problemas detectados: %s — intentando fix con opus", strings.Join(problems, ", ")))
+		log.Warn(fmt.Sprintf("problemas detectados: %s — intentando fix con opus", strings.Join(problems, ", ")),
+			output.F{PR: pr.Number, Agent: "opus"})
 
 		if wt == nil {
 			w, owned, err := resolveWorktree(repoRoot, issueNum, pr.HeadBranch)
 			if err != nil {
-				fmt.Fprintf(stderr, "error: %v\n", err)
+				log.Error("resolver worktree fallo", output.F{Cause: err})
 				return ExitRetry
 			}
 			wt = w
@@ -432,16 +438,16 @@ func Run(prRef string, opts Opts) ExitCode {
 		}
 
 		prompt := buildFixPrompt(pr, conflict, failingChecks(checks))
-		if err := runAgent(wt.Path, prompt, progress); err != nil {
-			fmt.Fprintf(stderr, "error: agente falló: %v\n", err)
+		if err := runAgent(wt.Path, prompt, log); err != nil {
+			log.Error("agente falló", output.F{Agent: "opus", Cause: err})
 			return ExitRetry
 		}
 
-		progress("esperando que CI re-evalúe tras el push del agente…")
-		if err := waitCIStable(prRef, progress); err != nil {
+		log.Step("esperando que CI re-evalúe tras el push del agente")
+		if err := waitCIStable(prRef, log); err != nil {
 			// waitCIStable no retorna error fatal si vencía el timeout —
 			// solo si gh explotó. En timeout seguimos al próximo intento.
-			fmt.Fprintf(stderr, "warning: %v\n", err)
+			log.Warn(fmt.Sprintf("warning: %v", err))
 		}
 	}
 
@@ -469,9 +475,9 @@ func Run(prRef string, opts Opts) ExitCode {
 		preRemoteKnown = known
 	}
 
-	progress(fmt.Sprintf("mergeando PR #%d con merge commit…", pr.Number))
+	log.Step(fmt.Sprintf("mergeando PR #%d con merge commit", pr.Number))
 	if err := mergePR(prRef, keepBranch); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("gh pr merge fallo", output.F{PR: pr.Number, Cause: err})
 		return ExitRetry
 	}
 	mergedOK = true
@@ -482,8 +488,9 @@ func Run(prRef string, opts Opts) ExitCode {
 	// en el body del PR quedan OPEN un tiempo hasta que github procesa el
 	// auto-close; hacemos un close explícito para no depender de eso y para
 	// aplicar la transición de labels atómicamente con el cierre.
-	closedIssues := closeAssociatedIssues(pr, stderr, progress)
+	closedIssues := closeAssociatedIssues(pr, log)
 
+	log.Success("merged PR", output.F{PR: pr.Number, URL: pr.URL})
 	fmt.Fprintf(stdout, "Closed PR %s\n", pr.URL)
 	if len(closedIssues) > 0 {
 		fmt.Fprintf(stdout, "Cerrado(s) issue(s): %s\n", joinInts(closedIssues))
@@ -529,7 +536,7 @@ func firstClosingIssue(pr *PullRequest) int {
 // (status:executed → status:closed). Errores no fatales (log + seguir).
 // Devuelve la lista de números de issues que se cerraron efectivamente
 // (para reporte en stdout).
-func closeAssociatedIssues(pr *PullRequest, stderr io.Writer, progress func(string)) []int {
+func closeAssociatedIssues(pr *PullRequest, log *output.Logger) []int {
 	var closed []int
 	for _, ref := range pr.ClosingIssuesReferences {
 		if ref.Number == 0 {
@@ -539,17 +546,19 @@ func closeAssociatedIssues(pr *PullRequest, stderr io.Writer, progress func(stri
 		// Si github ya lo cerró por el merge auto, el issueClose es
 		// idempotente (devuelve error que ignoramos) pero la transición de
 		// labels sí queremos aplicarla igual.
-		progress(fmt.Sprintf("cerrando issue #%d…", ref.Number))
+		log.Step("cerrando issue", output.F{Issue: ref.Number})
 		if err := issueClose(refStr); err != nil {
-			fmt.Fprintf(stderr, "warning: no se pudo cerrar issue #%d: %v\n", ref.Number, err)
+			log.Warn(fmt.Sprintf("warning: no se pudo cerrar issue #%d", ref.Number),
+				output.F{Issue: ref.Number, Cause: err})
 		} else {
 			closed = append(closed, ref.Number)
+			log.Success("issue cerrado", output.F{Issue: ref.Number, Labels: []string{labels.StatusClosed}})
 		}
 		// Transición de labels. Best-effort: si el issue no estaba en
 		// status:executed, la transición falla — lo logueamos y seguimos.
 		if err := labels.Apply(refStr, labels.StatusExecuted, labels.StatusClosed); err != nil {
-			fmt.Fprintf(stderr, "warning: labels del issue #%d no transicionaron a status:closed: %v\n",
-				ref.Number, err)
+			log.Warn(fmt.Sprintf("warning: labels del issue #%d no transicionaron a status:closed", ref.Number),
+				output.F{Issue: ref.Number, Cause: err})
 		}
 	}
 	return closed
@@ -841,7 +850,7 @@ func buildFixPrompt(pr *PullRequest, conflicts bool, failingChecks []Check) stri
 // en el worktree para que los tool use (Edit, Bash) afecten esa copia del
 // repo. Usa stream-json + formatOpusLine para que los eventos aparezcan en
 // el progress. Mismo patrón que execute.runAgent.
-func runAgent(cwd, prompt string, progress func(string)) error {
+func runAgent(cwd, prompt string, log *output.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), AgentTimeout)
 	defer cancel()
 
@@ -864,8 +873,8 @@ func runAgent(cwd, prompt string, progress func(string)) error {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	var stderrBuf strings.Builder
-	go streamPipe(&wg, stdoutPipe, nil, progress, "opus: ", formatOpusLine)
-	go streamPipe(&wg, stderrPipe, &stderrBuf, progress, "opus stderr: ", nil)
+	go streamPipe(&wg, stdoutPipe, nil, log, "opus: ", formatOpusLine)
+	go streamPipe(&wg, stderrPipe, &stderrBuf, log, "opus stderr: ", nil)
 	wg.Wait()
 
 	waitErr := cmd.Wait()
@@ -886,7 +895,7 @@ func runAgent(cwd, prompt string, progress func(string)) error {
 
 // streamPipe lee un pipe y reenvía las líneas al progress. Si format no
 // es nil, cada línea se pasa por él. Igual patrón que execute.
-func streamPipe(wg *sync.WaitGroup, r io.Reader, acc *strings.Builder, progress func(string), prefix string, format func(string) (string, bool)) {
+func streamPipe(wg *sync.WaitGroup, r io.Reader, acc *strings.Builder, log *output.Logger, prefix string, format func(string) (string, bool)) {
 	defer wg.Done()
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
@@ -903,8 +912,8 @@ func streamPipe(wg *sync.WaitGroup, r io.Reader, acc *strings.Builder, progress 
 			}
 			out = msg
 		}
-		if strings.TrimSpace(out) != "" && progress != nil {
-			progress(prefix + out)
+		if strings.TrimSpace(out) != "" && log != nil {
+			log.Step(prefix + out)
 		}
 	}
 }
@@ -1167,20 +1176,20 @@ func runGit(repoRoot string, args ...string) error {
 // worktree creado por el usuario fuera de ese prefijo, NO lo tocamos —
 // avisamos por stderr para que el humano decida. Hacerlo gratis sería un
 // side effect no anunciado del `che close`.
-func cleanupWorktree(ctx context.Context, stderr io.Writer, repoRoot string, wt *execute.Worktree) {
+func cleanupWorktree(ctx context.Context, log *output.Logger, repoRoot string, wt *execute.Worktree) {
 	if wt == nil {
 		return
 	}
 	if samePath(repoRoot, wt.Path) {
-		fmt.Fprintf(stderr, "warning: la branch del PR estaba checkouteada en el worktree principal (%s) — che close no modifica el cwd del usuario. La branch remota fue borrada por `gh pr merge --delete-branch`; la local queda hasta que la elimines con `git branch -D %s`.\n", wt.Path, wt.Branch)
+		log.Warn(fmt.Sprintf("warning: la branch del PR estaba checkouteada en el worktree principal (%s) — che close no modifica el cwd del usuario. La branch remota fue borrada por gh pr merge --delete-branch; la local queda hasta que la elimines con git branch -D %s", wt.Path, wt.Branch))
 		return
 	}
 	if !isCheManagedWorktree(repoRoot, wt.Path) {
-		fmt.Fprintf(stderr, "warning: la branch del PR estaba checkouteada en un worktree fuera de `.worktrees/` (%s) — che close no toca worktrees que no creó. Limpialo a mano si querés con `git worktree remove %s`.\n", wt.Path, wt.Path)
+		log.Warn(fmt.Sprintf("warning: la branch del PR estaba checkouteada en un worktree fuera de .worktrees/ (%s) — che close no toca worktrees que no creó. Limpialo a mano con git worktree remove %s", wt.Path, wt.Path))
 		return
 	}
 	if err := wt.Cleanup(ctx, repoRoot, false); err != nil {
-		fmt.Fprintf(stderr, "warning: cleanup local parcial: %v — revisá `git worktree list` y `git branch` para limpiar a mano\n", err)
+		log.Warn("cleanup local parcial — revisá git worktree list y git branch para limpiar a mano", output.F{Cause: err})
 	}
 }
 
@@ -1271,7 +1280,7 @@ func remoteBranchExists(repoRoot, branch string) (exists bool, known bool) {
 // waitCIStable pollea `gh pr checks` hasta que el CI deje de estar pending
 // o venza CIPollTimeout. No retorna error de timeout — solo de gh roto.
 // El Run evalúa el CI final en la siguiente iteración del loop.
-func waitCIStable(ref string, progress func(string)) error {
+func waitCIStable(ref string, log *output.Logger) error {
 	deadline := time.Now().Add(CIPollTimeout)
 	for {
 		checks, err := FetchChecks(ref)
@@ -1285,7 +1294,7 @@ func waitCIStable(ref string, progress func(string)) error {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("CI sigue pending tras %s — próximo intento va a re-chequear", CIPollTimeout)
 		}
-		progress(fmt.Sprintf("CI corriendo (%d checks)… próximo poll en %s", len(checks), CIPollInterval))
+		log.Step(fmt.Sprintf("CI corriendo (%d checks) — próximo poll en %s", len(checks), CIPollInterval))
 		time.Sleep(CIPollInterval)
 	}
 }
