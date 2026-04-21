@@ -1,6 +1,7 @@
 package e2e_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,6 +45,7 @@ func TestIterate_InvalidPRRef_Exit3(t *testing.T) {
 func TestIterate_NoFindings_Exit3(t *testing.T) {
 	env := setupIterateEnv(t)
 	scriptIteratePrechecks(env)
+	scriptIterateDetectTargetPR(env, 7)
 
 	env.ExpectGh(`^pr view 7 --json number,title`).
 		RespondStdoutFromFixture("iterate/gh_pr_view_changes_requested.json", 0)
@@ -64,6 +66,7 @@ func TestIterate_NoFindings_Exit3(t *testing.T) {
 func TestIterate_AgentNoChanges_Exit2(t *testing.T) {
 	env := setupIterateEnv(t)
 	scriptIteratePrechecks(env)
+	scriptIterateDetectTargetPR(env, 7)
 	env.SetEnv("CHE_ITERATE_SKIP_FETCH", "1")
 	runIn(t, env.RepoDir, "git", "branch", "feat/x")
 
@@ -119,4 +122,21 @@ func setupIterateEnv(t *testing.T) *harness.Env {
 func scriptIteratePrechecks(env *harness.Env) {
 	env.ExpectGh(`^auth status$`).Consumable().
 		RespondStdout("Logged in as acme\n", 0)
+}
+
+// scriptIterateDetectTargetPR scriptea la respuesta del `gh api
+// repos/{owner}/{repo}/issues/<n>` que iterate consulta vía DetectTarget:
+// pull_request:{} indica PR → modo PR.
+func scriptIterateDetectTargetPR(env *harness.Env, number int) {
+	env.ExpectGh(fmt.Sprintf(`^api repos/\{owner\}/\{repo\}/issues/%d$`, number)).
+		Consumable().
+		RespondStdout(fmt.Sprintf(`{"number":%d,"pull_request":{"url":"https://api.github.com/repos/acme/demo/pulls/%d"}}`, number, number), 0)
+}
+
+// scriptIterateDetectTargetPlan scriptea la respuesta para modo plan:
+// pull_request:null indica issue.
+func scriptIterateDetectTargetPlan(env *harness.Env, number int) {
+	env.ExpectGh(fmt.Sprintf(`^api repos/\{owner\}/\{repo\}/issues/%d$`, number)).
+		Consumable().
+		RespondStdout(fmt.Sprintf(`{"number":%d,"pull_request":null}`, number), 0)
 }

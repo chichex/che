@@ -105,8 +105,17 @@ func hasChangesRequested(p validate.PullRequest) bool {
 
 // ---- Run ----
 
-// Run ejecuta el flow completo sobre un PR.
-func Run(prRef string, opts Opts) ExitCode {
+// Run ejecuta el flow iterate despachando por tipo de ref:
+//   - ref → issue con plan-validated:changes-requested: modo plan. El agente
+//     edita el plan consolidado del body, se postea un comment flow=iterate,
+//     se remueve el label. NO usa worktree ni git.
+//   - ref → PR con validated:changes-requested: modo PR (histórico). Worktree
+//     + commits + push + comment + remove label.
+//
+// El preflight de GitHub (auth + remote github) corre antes de detectTarget
+// para que errores de entorno den el mensaje accionable correcto. El preflight
+// de git repo solo hace falta en modo PR (worktree) — runPlan no lo necesita.
+func Run(ref string, opts Opts) ExitCode {
 	stdout := opts.Stdout
 	if stdout == nil {
 		stdout = io.Discard
@@ -116,28 +125,59 @@ func Run(prRef string, opts Opts) ExitCode {
 		log = output.New(nil)
 	}
 
-	prRef = strings.TrimSpace(prRef)
-	if prRef == "" {
-		log.Error("pr ref is empty")
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		log.Error("ref is empty")
 		return ExitSemantic
 	}
-	if _, err := validate.ParseRef(prRef); err != nil {
-		log.Error("pr ref invalido", output.F{Cause: err})
+	if _, err := validate.ParseRef(ref); err != nil {
+		log.Error("ref invalido", output.F{Cause: err})
 		return ExitSemantic
 	}
 
-	log.Info("chequeando repo git y auth de GitHub")
-	repoRoot, err := repoToplevel()
-	if err != nil {
-		log.Error("git repo invalido", output.F{Cause: err})
-		return ExitRetry
-	}
+	log.Info("chequeando auth de GitHub")
 	if err := precheckGitHubRemote(); err != nil {
 		log.Error("github remote invalido", output.F{Cause: err})
 		return ExitRetry
 	}
 	if err := precheckGhAuth(); err != nil {
 		log.Error("gh auth fallo", output.F{Cause: err})
+		return ExitRetry
+	}
+
+	log.Step("detectando si el ref es un issue o un PR")
+	target, err := validate.DetectTarget(ref)
+	if err != nil {
+		// resolveRefNumber falla solo si el formato del ref es irreparable.
+		// El resto de los fallos vienen de `gh api` (red o 404) y son
+		// potencialmente remediables.
+		if errors.Is(err, validate.ErrInvalidRef) {
+			log.Error("ref invalido", output.F{Cause: err})
+			return ExitSemantic
+		}
+		log.Error("no se pudo determinar si es issue o PR", output.F{Cause: err})
+		return ExitRetry
+	}
+	switch target {
+	case validate.TargetPR:
+		return runPR(ref, opts, stdout, log)
+	case validate.TargetPlan:
+		return runPlan(ref, opts, stdout, log)
+	default:
+		log.Error(fmt.Sprintf("tipo de ref desconocido: %v", target))
+		return ExitRetry
+	}
+}
+
+// runPR es el flow histórico: worktree + agente + commits + push + comment +
+// remove label sobre un PR con validated:changes-requested. El preflight de
+// GitHub (auth + remote) ya corrió en Run — acá hacemos solo el preflight de
+// git repo (repoToplevel).
+func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCode {
+	log.Info("chequeando repo git")
+	repoRoot, err := repoToplevel()
+	if err != nil {
+		log.Error("git repo invalido", output.F{Cause: err})
 		return ExitRetry
 	}
 
@@ -238,6 +278,27 @@ func Run(prRef string, opts Opts) ExitCode {
 	fmt.Fprintf(stdout, "Nuevos commits: %d\n", len(newCommits))
 	fmt.Fprintln(stdout, "Done. Re-corré `che validate` para obtener un verdict nuevo.")
 	return ExitOK
+}
+
+// runPlan es el flow nuevo: edita el plan consolidado del body de un issue
+// con plan-validated:changes-requested aplicando los findings de validate.
+// NO usa worktree ni git — todo el trabajo es sobre el body del issue +
+// comments via gh.
+//
+// Gates (exit semantic si alguno falla):
+//   - issue abierto.
+//   - issue tiene plan-validated:changes-requested.
+//   - issue NO tiene status:executing ni status:executed: si el execute ya
+//     corrió, iterar el plan no tiene efecto sobre el PR asociado.
+//   - hay findings de validate en comments del issue.
+//   - el body del issue tiene un plan consolidado parseable.
+func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCode {
+	// stub — implementado en el siguiente commit.
+	_ = issueRef
+	_ = opts
+	_ = stdout
+	log.Error("iterate modo plan no está implementado todavía")
+	return ExitSemantic
 }
 
 // firstClosingIssue devuelve el primer issue referenciado por "Closes #N",
