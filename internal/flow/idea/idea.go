@@ -77,7 +77,7 @@ var (
 func Classify(text string, log *output.Logger) (*Response, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
-		return nil, fmt.Errorf("text is empty")
+		return nil, fmt.Errorf("%w: text is empty", ErrInvalidResponse)
 	}
 	if log == nil {
 		log = output.New(nil)
