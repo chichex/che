@@ -1,7 +1,12 @@
 package explore
 
 import (
+	"bytes"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/chichex/che/internal/comments"
 )
 
 // TestCoversSamePlanQuestion_QuotedMatch: validators que citan textualmente
@@ -306,5 +311,158 @@ func TestNormalizeKind_UnknownKindTreatedAsEmpty(t *testing.T) {
 	// como product (el default conservador).
 	if got := kindOrDefault("prod"); got != KindProduct {
 		t.Errorf("kindOrDefault(\"prod\") = %q, want %q", got, KindProduct)
+	}
+}
+
+// TestValidateAndNormalize_UpgradesApproveWithProductFinding: un validator que
+// emite verdict=approve junto con un finding kind=product needs_human=true es
+// un output inconsistente — el flow SÍ va a escalar por hasHumanGaps, así que
+// tenemos que reflejarlo en el verdict mutado para que todos los consumers
+// (renderers, embedded JSON, resume prompt) lo vean igual.
+func TestValidateAndNormalize_UpgradesApproveWithProductFinding(t *testing.T) {
+	results := []validatorResult{
+		{
+			Validator: Validator{Agent: AgentCodex, Instance: 1},
+			Response: &ValidatorResponse{
+				Verdict: "approve",
+				Summary: "Plan ok pero hay una decisión de producto pendiente.",
+				Findings: []Finding{
+					{Severity: "blocker", Area: "questions", NeedsHuman: true, Kind: KindProduct,
+						Issue: "¿Política de timeout del escape humano? Producto."},
+				},
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	if err := validateAndNormalizeValidatorResults(results, &stderr); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+	if got := results[0].Response.Verdict; got != "needs_human" {
+		t.Fatalf("expected verdict to be upgraded to needs_human, got %q", got)
+	}
+	if !strings.Contains(stderr.String(), "upgrading to needs_human") {
+		t.Fatalf("expected warning in stderr about upgrade, got: %q", stderr.String())
+	}
+}
+
+// TestValidateAndNormalize_UpgradesChangesRequestedWithProductFinding:
+// mismo caso que el anterior pero arrancando desde changes_requested. La
+// canonicalización dura debe cubrir cualquier verdict != needs_human.
+func TestValidateAndNormalize_UpgradesChangesRequestedWithProductFinding(t *testing.T) {
+	results := []validatorResult{
+		{
+			Validator: Validator{Agent: AgentGemini, Instance: 1},
+			Response: &ValidatorResponse{
+				Verdict: "changes_requested",
+				Summary: "Hay gaps técnicos y una decisión de producto.",
+				Findings: []Finding{
+					{Severity: "major", Area: "risks", Kind: KindTechnical, Issue: "Falta handling de error."},
+					{Severity: "blocker", Area: "questions", NeedsHuman: true, Kind: KindProduct,
+						Issue: "¿Retry indefinido o timeout?"},
+				},
+			},
+		},
+	}
+
+	var stderr bytes.Buffer
+	if err := validateAndNormalizeValidatorResults(results, &stderr); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+	if got := results[0].Response.Verdict; got != "needs_human" {
+		t.Fatalf("expected verdict to be upgraded to needs_human, got %q", got)
+	}
+}
+
+// TestValidateAndNormalize_ResumeRoundTrip_ApproveWithProductFinding es el
+// test estructural del fix 2c: un validator iter=1 emite approve+product
+// finding; la canonicalización dura muta el struct a needs_human ANTES de
+// que postValidatorComments renderice el embedded JSON. En iter=2 (resume),
+// parseConversation relee ese JSON y buildValidatorResumePrompt debe
+// mostrar verdict=needs_human en la sección de "findings previos", no el
+// crudo approve. Sin la canonicalización dura, el resume prompt contaminaba
+// al validador iter=2 con el verdict crudo.
+func TestValidateAndNormalize_ResumeRoundTrip_ApproveWithProductFinding(t *testing.T) {
+	// iter=1: el validator emite approve + product finding (crudo).
+	results := []validatorResult{
+		{
+			Validator: Validator{Agent: AgentCodex, Instance: 1},
+			Response: &ValidatorResponse{
+				Verdict: "approve",
+				Summary: "Todo ok salvo una decisión de producto pendiente.",
+				Findings: []Finding{
+					{Severity: "blocker", Area: "questions", NeedsHuman: true, Kind: KindProduct,
+						Issue: "¿Política de timeout del escape humano?"},
+				},
+			},
+		},
+	}
+
+	// Canonicalización dura: muta el struct in-place.
+	var stderr bytes.Buffer
+	if err := validateAndNormalizeValidatorResults(results, &stderr); err != nil {
+		t.Fatalf("unexpected validation error: %v", err)
+	}
+
+	// Simulo el rendering del comment (lo que posteVaría postValidatorComments).
+	validatorCommentBody := renderValidatorComment(results[0], 1)
+
+	// Construyo el issue con el comment del validador + un human-request +
+	// una respuesta humana. Es la condición mínima para que parseConversation
+	// marque state.PreviousFindings correctamente.
+	humanRequestBody := comments.Header{Flow: "explore", Iter: 1, Role: "human-request"}.Format() +
+		"\n## 🧑 Necesito tu input\n\n1. ¿Política de timeout?\n"
+
+	// Executor plan embebido (parseConversation lo necesita para que state
+	// tenga ExecutorPlan no-nil; si es nil el prompt explota con "<nil>").
+	executorPlan := &Response{
+		Summary:   "Plan resumen",
+		Questions: []Question{{Q: "¿Timeout?", Blocker: true, Kind: KindProduct}},
+		Risks:     []Risk{{Risk: "x", Likelihood: "low", Impact: "low", Mitigation: "y"}},
+		Paths: []Path{
+			{Title: "A", Sketch: "x", Pros: []string{"p"}, Cons: []string{"c"}, Effort: "S", Recommended: true},
+			{Title: "B", Sketch: "x", Pros: []string{"p"}, Cons: []string{"c"}, Effort: "S", Recommended: false},
+		},
+		NextStep: "paso",
+	}
+	var executorSB strings.Builder
+	executorSB.WriteString(comments.Header{Flow: "explore", Iter: 1, Agent: "claude", Role: "executor"}.Format() + "\n")
+	executorSB.WriteString("## Plan\n\n")
+	appendEmbeddedJSON(&executorSB, executorPlan, "Plan en JSON")
+
+	now := time.Now()
+	issue := &Issue{
+		Number: 42,
+		Title:  "Test issue",
+		Body:   "Body",
+		Comments: []IssueComment{
+			{Body: executorSB.String(), CreatedAt: now.Add(-3 * time.Hour)},
+			{Body: validatorCommentBody, CreatedAt: now.Add(-2 * time.Hour)},
+			{Body: humanRequestBody, CreatedAt: now.Add(-1 * time.Hour)},
+			{Body: "Timeout de 10 minutos.", CreatedAt: now},
+		},
+	}
+
+	// parseConversation debería recuperar PreviousFindings con el verdict
+	// canonicalizado (porque el embedded JSON fue renderizado DESPUÉS de la
+	// mutación dura).
+	state := parseConversation(issue)
+	if len(state.PreviousFindings) != 1 {
+		t.Fatalf("expected 1 previous finding, got %d", len(state.PreviousFindings))
+	}
+	if got := state.PreviousFindings[0].Response.Verdict; got != "needs_human" {
+		t.Fatalf("expected parsed verdict needs_human (canonicalized), got %q — el embedded JSON preservó el crudo", got)
+	}
+
+	// buildValidatorResumePrompt debe formatear el verdict correcto. El
+	// prompt contiene las reglas ("devolvé verdict=approve") como texto
+	// instruccional; lo que me interesa es la sección de previousFindings,
+	// que lleva el string "codex#1 (verdict=<canonicalizado>, N findings)".
+	prompt := buildValidatorResumePrompt(issue, state)
+	if !strings.Contains(prompt, "codex#1 (verdict=needs_human") {
+		t.Fatalf("expected resume prompt to render codex#1 with verdict=needs_human (canonicalized); got:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "codex#1 (verdict=approve") {
+		t.Fatalf("expected resume prompt to NOT render codex#1 with verdict=approve (crudo pre-canonicalización); got:\n%s", prompt)
 	}
 }

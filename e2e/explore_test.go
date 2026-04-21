@@ -495,11 +495,22 @@ func TestExplore_Validators_TechnicalNeedsHuman_DoesNotPause(t *testing.T) {
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
-	out := env.MustRun("explore", "--validators", "codex,gemini", "42")
+	r := env.Run("explore", "--validators", "codex,gemini", "42")
+	if r.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
 	// Cierra en status:plan, no awaiting.
-	harness.AssertContains(t, out, "Explored")
-	if strings.Contains(out, "awaiting-human") {
-		t.Fatalf("flow should NOT pause when findings are technical/documented only; got: %s", out)
+	harness.AssertContains(t, r.Stdout, "Explored")
+	if strings.Contains(r.Stdout+r.Stderr, "awaiting-human") {
+		t.Fatalf("flow should NOT pause when findings are technical/documented only; got stdout: %s\nstderr: %s", r.Stdout, r.Stderr)
+	}
+	// Canonicalización: el crudo del fixture era needs_human pero sin
+	// findings product → degrada a changes_requested. La línea de
+	// Validation report en stdout debe reflejarlo.
+	harness.AssertContains(t, r.Stdout, "Validation report")
+	harness.AssertContains(t, r.Stdout, "codex#1: changes_requested")
+	if strings.Contains(r.Stdout, "codex#1: needs_human") {
+		t.Fatalf("stdout should NOT render raw verdict=needs_human after canonicalization; got: %s", r.Stdout)
 	}
 
 	inv := env.Invocations()
@@ -829,9 +840,16 @@ func TestExplore_Validators_ApproveButProductFinding_PausesAndRendersAsNeedsHuma
 	if r.ExitCode != 0 {
 		t.Fatalf("expected exit 0, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
+	// Verdict canonicalizado: la línea de Validation report en stdout debe
+	// mostrar needs_human para codex#1 aunque el crudo del fixture era approve.
+	// Asserto contra r.Stdout específicamente (no combined) para no pasar
+	// falso-positivo por el JSON embebido del fixture echoeado vía streamPipe.
+	harness.AssertContains(t, r.Stdout, "Validation report")
+	harness.AssertContains(t, r.Stdout, "codex#1: needs_human")
+	if strings.Contains(r.Stdout, "codex#1: approve") {
+		t.Fatalf("stdout should NOT render raw verdict=approve after canonicalization; got: %s", r.Stdout)
+	}
 	combined := r.Stdout + r.Stderr
-	// Verdict efectivo (via effectiveVerdict): needs_human aunque el crudo era approve.
-	harness.AssertContains(t, combined, "needs_human")
 	harness.AssertContains(t, combined, "awaiting-human")
 
 	inv := env.Invocations()

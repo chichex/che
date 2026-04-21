@@ -498,9 +498,19 @@ func hasHumanGaps(results []validatorResult) bool {
 }
 
 // effectiveVerdict devuelve el verdict que el flow realmente usa para decidir
-// escalamiento y labels, no el verdict crudo del validator. Mantiene coherencia
-// entre (a) hasHumanGaps, (b) header del comment posteado a GitHub, (c) resumen
-// en stdout. Ver project_explore_verdict_consolidation.md.
+// escalamiento y labels, derivándolo de los findings. En flow normal este
+// resultado es redundante con resp.Verdict porque
+// validateAndNormalizeValidatorResults ya canonicaliza el struct in-place
+// antes de llegar acá — es defensa en profundidad para dos casos:
+//
+//   - Tests que construyen ValidatorResponse a mano sin pasar por la función
+//     de validación (varios tests internos lo hacen).
+//   - Consumers futuros que lean resp.Verdict en paths que no pasen por el
+//     pipeline de validación y quieran el verdict efectivo sin mutar.
+//
+// La canonicalización dura vive en validateAndNormalizeValidatorResults;
+// cualquier divergencia visible al usuario debería arreglarse allí, no acá.
+// Ver project_explore_verdict_consolidation.md.
 func effectiveVerdict(resp *ValidatorResponse) string {
 	if resp == nil {
 		return ""
@@ -1327,12 +1337,22 @@ func parseValidatorResponse(raw string) (*ValidatorResponse, error) {
 // se reportan con contexto pero no cortan el flow acá — los posteamos como
 // "error: ..." en el comment y el usuario decide.
 //
-// Después del pase de schema hace un segundo pase de normalización: si un
-// validator emitió verdict=needs_human sin ningún finding que escale a
-// humano (kind=product needs_human=true), degrada el verdict a
-// changes_requested in-place. Esto evita que stdout/comments posteados a
-// GitHub contradigan la decisión real del flow (que igual no escalaría por
-// hasHumanGaps). La degradación queda anotada en stderr.
+// Después del pase de schema hace un segundo pase de normalización dura que
+// canonicaliza el verdict in-place según los findings del validator. La
+// mutación es upstream de renderers, embedded JSON y prompts de resume —
+// todos consumen el mismo verdict y el state persistido en comments queda
+// coherente para el round-trip. Casos:
+//
+//   - verdict=needs_human sin finding que escale (kind=product
+//     needs_human=true): degrada a changes_requested. Evita el ruido de
+//     "needs_human con findings technical" en outputs/comments.
+//   - verdict != needs_human CON algún finding que escale: eleva a
+//     needs_human. Un validator que se olvidó de subir el verdict pero
+//     marcó needs_human en un finding igual dispara hasHumanGaps, así que
+//     el verdict tiene que reflejarlo para no desincronizar header del
+//     comment, stdout y JSON embebido en el resume.
+//
+// Cada mutación se anota en stderr como warning.
 func validateAndNormalizeValidatorResults(results []validatorResult, stderr io.Writer) error {
 	for _, r := range results {
 		if r.Err != nil || r.Response == nil {
@@ -1356,12 +1376,12 @@ func validateAndNormalizeValidatorResults(results []validatorResult, stderr io.W
 			}
 		}
 	}
-	// Segundo pase: normalización de needs_human sin finding product.
+	// Segundo pase: canonicalización simétrica del verdict. Mutación
+	// in-place para que todos los consumers downstream vean el mismo
+	// verdict (renderers, embedded JSON del <details>, resume prompt,
+	// consolidation prompt).
 	for _, r := range results {
 		if r.Response == nil {
-			continue
-		}
-		if r.Response.Verdict != "needs_human" {
 			continue
 		}
 		hasHuman := false
@@ -1371,11 +1391,21 @@ func validateAndNormalizeValidatorResults(results []validatorResult, stderr io.W
 				break
 			}
 		}
-		if !hasHuman {
+		switch {
+		case r.Response.Verdict == "needs_human" && !hasHuman:
+			// Degrada: needs_human sin finding que escale.
 			r.Response.Verdict = "changes_requested"
 			if stderr != nil {
 				fmt.Fprintf(stderr, "warning: %s#%d reported verdict=needs_human without product finding; degrading to changes_requested\n",
 					r.Validator.Agent, r.Validator.Instance)
+			}
+		case r.Response.Verdict != "needs_human" && hasHuman:
+			// Eleva: verdict != needs_human pero hay finding product needs_human.
+			prev := r.Response.Verdict
+			r.Response.Verdict = "needs_human"
+			if stderr != nil {
+				fmt.Fprintf(stderr, "warning: %s#%d reported verdict=%s but has product finding needs_human=true; upgrading to needs_human\n",
+					r.Validator.Agent, r.Validator.Instance, prev)
 			}
 		}
 	}
