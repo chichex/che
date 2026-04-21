@@ -184,7 +184,7 @@ func preparePlan(body string) (*ConsolidatedPlan, error) {
 //   - Invocar agente, commit en el worktree, push.
 //   - Crear o actualizar PR draft contra main con Closes #<n>.
 //   - Fire-and-forget validadores sobre el diff del PR.
-//   - Transition status:executing → status:executed + awaiting-human.
+//   - Transition status:executing → status:executed.
 //   - Comentario al issue con link al PR.
 //   - Rollback: si algo falla después del lock, revertir a status:plan y
 //     limpiar worktree.
@@ -314,7 +314,7 @@ func Run(issueRef string, opts Opts) ExitCode {
 	//   - !executedApplied && prCreated → transicionamos a executed: el PR
 	//     remoto ya existe, así que ese es el estado consistente. Volver a
 	//     plan dejaría el issue "libre" con un PR vivo apuntando a él, que
-	//     es peor que dejarlo en executed + awaiting-human para retry manual.
+	//     es peor que dejarlo en executed para retry manual.
 	//   - !executedApplied && !prCreated → rollback normal a plan (ownership-
 	//     aware: re-fetch y chequeamos que seguimos teniendo el lock).
 	//
@@ -442,7 +442,7 @@ func Run(issueRef string, opts Opts) ExitCode {
 	if !hasChanges {
 		// Sin cambios, no importa si hay PR existente o no: no tenemos
 		// nada que commitear ni que refrescar. NO transicionamos a
-		// executed + awaiting-human (eso engañaría al operador). Dejamos
+		// executed (eso engañaría al operador). Dejamos
 		// que el defer revierta executing → plan así el issue queda
 		// disponible para otro intento. Mensaje diferenciado según haya
 		// PR previo o no.

@@ -20,7 +20,7 @@ func TestExecute_SIGINT_DuringAgent_Cleanup(t *testing.T) {
 	env := setupExecuteEnv(t)
 	scriptExecuteSignalFlow(env, ".che-agent-ready")
 
-	async := env.RunAsync("execute", "--validators", "none", "42")
+	async := env.RunAsync("execute", "42")
 	defer func() {
 		// Best-effort: si el proceso sigue vivo al final (no debería),
 		// lo matamos para no dejar un huérfano colgado.
@@ -57,7 +57,7 @@ func TestExecute_SIGTERM_DuringAgent_Cleanup(t *testing.T) {
 	env := setupExecuteEnv(t)
 	scriptExecuteSignalFlow(env, ".che-agent-ready")
 
-	async := env.RunAsync("execute", "--validators", "none", "42")
+	async := env.RunAsync("execute", "42")
 	defer func() { _ = async.SendSignal(syscall.SIGKILL) }()
 
 	sentinelPath := filepath.Join(env.RepoDir, ".worktrees", "issue-42", ".che-agent-ready")
@@ -106,22 +106,6 @@ func scriptExecuteSignalFlow(env *harness.Env, sentinelFile string) {
 		TouchFile(sentinelFile, "ready\n").
 		BlockSeconds(60).
 		RespondStdout("starting\n", 0)
-}
-
-// waitForInvocation polls the harness invocation log for the given bin
-// until one invocation appears or timeout expires. Used as a synchronization
-// primitive for tests that need to wait until che has already shelled out
-// to a fake (e.g., validators) before sending a signal.
-func waitForInvocation(t *testing.T, env *harness.Env, bin string, timeout time.Duration) bool {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if len(env.Invocations().For(bin)) > 0 {
-			return true
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return false
 }
 
 // assertCleanupApplied verifica el estado final después de un cleanup por
@@ -192,76 +176,3 @@ func findLeakedFakes(env *harness.Env, bin string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// TestExecute_SIGINT_DuringValidatorsWait: arrancamos el flow completo
-// hasta post-PR con un validador fake que bloquea; mandamos SIGINT
-// durante el wait del validador y verificamos que el exit sea 130, que el
-// label siga en status:executed (ya transicionamos — no revertimos) y que
-// no haya procesos huérfanos. El rollback remoto NO corre: el PR draft y
-// la branch remota quedan intactos para retry manual.
-func TestExecute_SIGINT_DuringValidatorsWait(t *testing.T) {
-	env := setupExecuteEnv(t)
-	scriptExecutePrechecks(env)
-	env.ExpectGh(`^issue view 42`).Consumable().RespondStdoutFromFixture("execute/gh_issue_view_ready.json", 0)
-	env.ExpectGh(`^pr list --head exec/42-`).RespondStdout("[]\n", 0)
-	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
-	// Lock (plan→executing) + transition post-PR (executing→executed).
-	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0)
-	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0)
-
-	// El executor produce un cambio y termina rápido.
-	env.ExpectAgent("claude").
-		WhenArgsMatch(`ingeniero senior ejecutando`).
-		TouchFile("IMPLEMENTATION.md", "did it\n").
-		RespondStdout("ok\n", 0)
-
-	env.ExpectGh(`^pr create --draft`).RespondStdout("https://github.com/acme/demo/pull/7\n", 0)
-	env.ExpectGh(`^issue comment 42 --body-file`).RespondStdout("ok\n", 0)
-
-	// Validator codex: emite progreso a stdout del che (el flow escribe
-	// "esperando validadores (k/total)…" recién cuando uno termina; acá
-	// usamos "disparando N validador(es) sobre el PR…" como sentinel).
-	// El validator bloquea hasta que le llegue la señal del process group.
-	env.ExpectAgent("codex").
-		WhenArgsMatch(`validador técnico`).
-		BlockSeconds(60).
-		RespondStdout("starting validator\n", 0)
-
-	async := env.RunAsync("execute", "--validators", "codex", "42")
-	defer func() { _ = async.SendSignal(syscall.SIGKILL) }()
-
-	// Sentinel: "Executed" aparece en stdout en el orden actual del flow
-	// SOLO después del wait — no nos sirve. Mejor: esperamos hasta que
-	// haya un archivo de invocación del codex en el script dir (el fake
-	// logea antes del block). Eso nos dice que el wait ya arrancó.
-	if !waitForInvocation(t, env, "codex", 20*time.Second) {
-		t.Fatalf("timed out waiting for codex invocation\nstdout:\n%s\nstderr:\n%s",
-			async.SnapshotStdout(), async.SnapshotStderr())
-	}
-	time.Sleep(200 * time.Millisecond)
-
-	if err := async.SendSignal(os.Interrupt); err != nil {
-		t.Fatalf("send SIGINT: %v", err)
-	}
-
-	r := async.Wait(t, 20*time.Second)
-	if r.ExitCode != 130 {
-		t.Fatalf("expected exit 130, got %d\nstdout:\n%s\nstderr:\n%s", r.ExitCode, r.Stdout, r.Stderr)
-	}
-
-	// El PR ya se había creado antes de la señal: NO debe haber otro edit
-	// que revierta a status:plan (ya transicionamos a executed y eso no
-	// se deshace).
-	edits := env.Invocations().FindCalls("gh", "issue", "edit", "42")
-	for _, e := range edits {
-		for i := 0; i+1 < len(e.Args); i++ {
-			if e.Args[i] == "--add-label" && e.Args[i+1] == "status:plan" {
-				t.Fatalf("unexpected rollback to status:plan post-PR\nedits: %v", edits)
-			}
-		}
-	}
-
-	// El mensaje al usuario debería mencionar que el wait fue cancelado.
-	if !strings.Contains(r.Stdout, "cancelado durante wait") && !strings.Contains(r.Stdout, "cancelado") {
-		t.Fatalf("expected cancel notice in stdout, got:\n%s", r.Stdout)
-	}
-}

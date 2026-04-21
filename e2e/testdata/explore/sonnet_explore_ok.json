@@ -1,15 +1,10 @@
 {
   "summary": "Agregar comando `che explore <issue>` que lea un issue con ct:plan, profundice con claude, y postee un análisis estructurado como comentario.",
-  "questions": [
+  "questions": [],
+  "assumptions": [
     {
-      "q": "¿El análisis se postea como comentario único o como múltiples comentarios (uno por sección)?",
-      "why": "Afecta la UX en GitHub y la capacidad de editarlo después.",
-      "blocker": true
-    },
-    {
-      "q": "¿Qué pasa si el usuario re-corre explore sobre un issue ya explorado?",
-      "why": "Define idempotencia y si hay que validar estado antes de postear.",
-      "blocker": false
+      "what": "El análisis se postea como comentario único con secciones Markdown.",
+      "why": "Best practice: un comment legible, referenciable y editable en un solo lugar."
     }
   ],
   "risks": [
@@ -38,5 +33,31 @@
       "recommended": false
     }
   ],
-  "next_step": "Resolver las open questions sobre formato del comentario e idempotencia antes de implementar."
+  "next_step": "Implementar el comando che explore siguiendo el plan consolidado y abrir un PR.",
+  "consolidated_plan": {
+    "summary": "Agregar comando che explore que analiza un issue y escribe un plan consolidado.",
+    "goal": "Que el usuario pueda correr `che explore <issue>` y obtener un plan listo para ejecutar.",
+    "acceptance_criteria": [
+      "`che explore 42` postea un comment con el análisis",
+      "El body del issue se actualiza con el plan consolidado",
+      "El label transiciona de status:idea a status:plan"
+    ],
+    "approach": "Crear cmd/explore.go + internal/flow/explore/ espejando el patrón de idea.",
+    "steps": [
+      "Crear internal/flow/explore/explore.go con la lógica del flow",
+      "Wirear cmd/explore.go al root",
+      "Agregar tests e2e con harness"
+    ],
+    "risks_to_mitigate": [
+      {
+        "risk": "El modelo alucina paths no factibles dado el codebase real.",
+        "likelihood": "medium",
+        "impact": "medium",
+        "mitigation": "Pasarle al prompt extractos de archivos relevantes."
+      }
+    ],
+    "out_of_scope": [
+      "Validación automática — vive en che validate"
+    ]
+  }
 }

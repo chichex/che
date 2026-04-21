@@ -1,0 +1,12 @@
+{
+  "number": 42,
+  "title": "Implementar comando che execute",
+  "body": "## Plan consolidado\n\n**Resumen:** foo\n\n### Pasos\n1. bar\n",
+  "url": "https://github.com/acme/demo/issues/42",
+  "state": "OPEN",
+  "labels": [
+    {"name": "ct:plan"},
+    {"name": "status:plan"},
+    {"name": "plan-validated:changes-requested"}
+  ]
+}

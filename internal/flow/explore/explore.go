@@ -54,13 +54,6 @@ var ValidAgents = agent.ValidAgents
 // ParseAgent delega en internal/agent.
 func ParseAgent(s string) (Agent, error) { return agent.ParseAgent(s) }
 
-// Validator es un alias del struct centralizado. Queda solo porque la TUI
-// lo sigue referenciando para el selector de validate — explore ya no lo
-// usa internamente (no dispara validadores). Lo mantenemos como type alias
-// para no ensuciar otros paquetes en este PR; la limpieza del alias queda
-// para cuando la TUI consuma validate.Validator directo.
-type Validator = agent.Validator
-
 // AgentTimeout es el tiempo máximo que esperamos a que un agente responda
 // antes de cancelarlo. Configurable vía env CHE_AGENT_TIMEOUT_SECS. Default
 // 5 minutos: holgado para un call a claude/codex/gemini sin dejar flows
