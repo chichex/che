@@ -62,6 +62,6 @@ No hay flag --agent: close usa opus (claude) por diseño.`,
 
 func init() {
 	closeCmd.Flags().BoolVar(&closeKeepBranch, "keep-branch", false,
-		"no eliminar la branch remota/local ni el worktree tras el merge")
+		"preservar la branch remota/local y el worktree tras el merge (default: eliminar)")
 	rootCmd.AddCommand(closeCmd)
 }

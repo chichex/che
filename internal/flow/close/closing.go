@@ -362,16 +362,16 @@ func Run(prRef string, opts Opts) ExitCode {
 		lastProblems []string
 	)
 
-	// Cleanup del worktree. Corre en dos casos:
-	//   - (mergedOK && !keepBranch): happy path, tras mergear queremos dejar
-	//     el repo limpio borrando el worktree asociado a la head branch.
-	//   - wtOwned: lo creamos en este run (ej. fix loop); aunque falle el
-	//     flow, no dejamos residuo.
+	// Cleanup del worktree. shouldCleanupWorktree decide si corresponde:
+	//   - --keep-branch SIEMPRE inhibe el cleanup (aunque hayamos creado el
+	//     worktree en este run). El usuario pidió explícitamente preservar.
+	//   - happy path sin --keep-branch: limpia el worktree asociado.
+	//   - failure path: limpia solo si lo creamos (no dejar residuo propio).
 	defer func() {
-		if wt == nil {
+		if !shouldCleanupWorktree(mergedOK, keepBranch, wtOwned) {
 			return
 		}
-		if !((mergedOK && !keepBranch) || wtOwned) {
+		if wt == nil {
 			return
 		}
 		wtCtx, wtCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -443,8 +443,13 @@ func Run(prRef string, opts Opts) ExitCode {
 	// Si vamos a borrar la branch tras mergear, ubicar el worktree asociado
 	// ahora (si el fix loop no lo hizo ya). Necesitamos conocerlo para que
 	// el defer limpie tras el retorno exitoso.
+	//
+	// Restringimos el auto-lookup a worktrees bajo `.worktrees/` del repo:
+	// nunca tocamos el worktree principal (repoRoot) ni worktrees que el
+	// usuario haya creado en otros paths — esos son suyos aunque tengan la
+	// head branch del PR checkouteada.
 	if wt == nil && !keepBranch {
-		if p, _ := findWorktreePathByBranch(repoRoot, pr.HeadBranch); p != "" {
+		if p, _ := findWorktreePathByBranch(repoRoot, pr.HeadBranch); p != "" && isCheManagedWorktree(repoRoot, p) {
 			wt = &execute.Worktree{Path: p, Branch: pr.HeadBranch}
 			wtOwned = false
 		}
@@ -1164,28 +1169,62 @@ func runGitCtx(ctx context.Context, repoRoot string, args ...string) error {
 // branch local residual. Todo error acá es post-merge: emitimos warning a
 // stderr y seguimos — el merge ya ocurrió.
 //
-// Caso especial: si el worktree coincide con el cwd del flujo (repoRoot)
-// no podemos hacer `git worktree remove` sin invalidar nuestra propia cwd.
-// En ese caso hacemos detach HEAD + branch -D para liberar la branch, y
-// dejamos el directorio al usuario con un aviso.
+// Contrato: solo toca worktrees administrados por che (bajo
+// `<repoRoot>/.worktrees/`). Si el path es el worktree principal o un
+// worktree creado por el usuario fuera de ese prefijo, NO lo tocamos —
+// avisamos por stderr para que el humano decida. Hacerlo gratis sería un
+// side effect no anunciado del `che close`.
 func cleanupWorktree(ctx context.Context, stderr io.Writer, repoRoot string, wt *execute.Worktree) {
 	if wt == nil {
 		return
 	}
 	if samePath(repoRoot, wt.Path) {
-		fmt.Fprintf(stderr, "warning: estás parado en el worktree del PR (%s) — detacho HEAD y borro la branch local, pero el worktree queda intacto. Movete a otro directorio y corré `git worktree remove %s` para removerlo.\n", wt.Path, wt.Path)
-		if err := runGitCtx(ctx, wt.Path, "checkout", "--detach", "HEAD"); err != nil {
-			fmt.Fprintf(stderr, "warning: detach HEAD falló: %v\n", err)
-			return
-		}
-		if err := runGitCtx(ctx, repoRoot, "branch", "-D", wt.Branch); err != nil && !looksLikeMissingBranch(err) {
-			fmt.Fprintf(stderr, "warning: branch -D %s: %v\n", wt.Branch, err)
-		}
+		fmt.Fprintf(stderr, "warning: la branch del PR estaba checkouteada en el worktree principal (%s) — che close no modifica el cwd del usuario. La branch remota fue borrada por `gh pr merge --delete-branch`; la local queda hasta que la elimines con `git branch -D %s`.\n", wt.Path, wt.Branch)
+		return
+	}
+	if !isCheManagedWorktree(repoRoot, wt.Path) {
+		fmt.Fprintf(stderr, "warning: la branch del PR estaba checkouteada en un worktree fuera de `.worktrees/` (%s) — che close no toca worktrees que no creó. Limpialo a mano si querés con `git worktree remove %s`.\n", wt.Path, wt.Path)
 		return
 	}
 	if err := wt.Cleanup(ctx, repoRoot, false); err != nil {
 		fmt.Fprintf(stderr, "warning: cleanup local parcial: %v — revisá `git worktree list` y `git branch` para limpiar a mano\n", err)
 	}
+}
+
+// isCheManagedWorktree devuelve true si path está bajo
+// `<repoRoot>/.worktrees/` (el directorio que usamos para los worktrees que
+// che crea). Comparamos canonicalizando symlinks (macOS /var vs /private/var).
+func isCheManagedWorktree(repoRoot, path string) bool {
+	root, err := canonPath(filepath.Join(repoRoot, ".worktrees"))
+	if err != nil {
+		return false
+	}
+	target, err := canonPath(path)
+	if err != nil {
+		return false
+	}
+	if target == root {
+		return false
+	}
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return false
+	}
+	return rel != "" && !strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)
+}
+
+// shouldCleanupWorktree decide si el defer del Run debe invocar el cleanup.
+// Contratos (en orden de precedencia):
+//   - --keep-branch: nunca limpia, aunque el worktree lo hayamos creado.
+//     El usuario pidió explícitamente preservar.
+//   - happy path (mergedOK=true) sin --keep-branch: limpia.
+//   - failure path (mergedOK=false): limpia solo si wtOwned, para no dejar
+//     residuo propio. Los worktrees reusados no se tocan.
+func shouldCleanupWorktree(mergedOK, keepBranch, wtOwned bool) bool {
+	if keepBranch {
+		return false
+	}
+	return mergedOK || wtOwned
 }
 
 // samePath compara dos paths canonicalizándolos (resuelve symlinks para
