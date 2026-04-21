@@ -156,14 +156,19 @@ func TestIsPlanEmpty(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "summary-only fallback (header sin sub-secciones)",
-			p:    &ConsolidatedPlan{Summary: "## Plan consolidado\n\n(lorem sin sub-secciones)"},
-			want: true,
+			name: "legacy issue: summary=body (sin header consolidado) → procesable",
+			p:    &ConsolidatedPlan{Summary: "Body legacy sin estructura consolidada"},
+			want: false,
 		},
 		{
-			name: "only approach (no goal/steps/AC)",
+			name: "summary-only fallback (header sin sub-secciones)",
+			p:    &ConsolidatedPlan{Summary: "## Plan consolidado\n\n(lorem sin sub-secciones)"},
+			want: false,
+		},
+		{
+			name: "only approach (no goal/steps/AC pero con summary)",
 			p:    &ConsolidatedPlan{Summary: "s", Approach: "a"},
-			want: true,
+			want: false,
 		},
 		{
 			name: "has goal",

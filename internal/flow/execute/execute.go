@@ -217,16 +217,18 @@ type Candidate struct {
 // shape es el mismo para evitar duplicación y drift con explore.
 type ConsolidatedPlan = planpkg.ConsolidatedPlan
 
-// isPlanEmpty devuelve true si el plan parseado carece de estructura
-// ejecutable. Summary solo (que en el fallback de planpkg.Parse puede ser
-// el body entero sin sub-secciones) no alcanza — necesitamos al menos Goal,
-// Steps o AcceptanceCriteria para que el prompt al agente tenga contenido
-// accionable.
+// isPlanEmpty devuelve true si el plan no tiene NINGÚN contenido procesable.
+// Honra el contrato de planpkg.Parse: el fallback con Summary=body (issue
+// legacy sin header consolidado) sigue siendo procesable, así que no lo
+// bloqueamos. Solo abortamos cuando el body está totalmente vacío y el
+// fallback dejó todos los campos en cero — ahí sí no hay nada que mandar al
+// agente. La estrictez previa (exigir Goal/Steps/AC) era scope creep
+// respecto al contrato y rompía issues legacy.
 func isPlanEmpty(p *ConsolidatedPlan) bool {
 	if p == nil {
 		return true
 	}
-	return p.Goal == "" && len(p.Steps) == 0 && len(p.AcceptanceCriteria) == 0
+	return p.Summary == "" && p.Goal == "" && len(p.Steps) == 0 && len(p.AcceptanceCriteria) == 0
 }
 
 // Run ejecuta el flow completo sobre un issue. Decisiones claves:
@@ -327,14 +329,14 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitSemantic
 	}
 
-	// planpkg.Parse es deliberadamente permisivo: para body vacío o header
-	// sin sub-secciones devuelve un fallback con Summary=body y warning a
-	// log. Pero execute necesita estructura real para armar un prompt útil;
-	// si el plan quedó sin Goal/Steps/AC significa que el issue está
-	// malformado y dispararlo al agente gastaría tokens en basura. Abortamos
-	// con exit semántico para que el operador arregle el body manualmente.
+	// planpkg.Parse es permisivo: para body vacío devuelve fallback con
+	// Summary="" y para issues legacy sin header consolidado devuelve
+	// Summary=body. Solo cortamos cuando el plan quedó completamente vacío
+	// (body trimmed == ""), porque ahí no hay nada que mandar al agente.
+	// Cualquier otro fallback con Summary poblado sigue siendo procesable
+	// per el contrato de planpkg.Parse.
 	if isPlanEmpty(plan) {
-		fmt.Fprintf(stderr, "error: issue #%d no tiene un plan consolidado con estructura parseable (sin goal/steps/acceptance criteria) — corré `che explore %d` o editá el body para que tenga un `## Plan consolidado` con sub-secciones\n", issue.Number, issue.Number)
+		fmt.Fprintf(stderr, "error: issue #%d tiene el body vacío — agregá descripción o corré `che explore %d`\n", issue.Number, issue.Number)
 		return ExitSemantic
 	}
 
