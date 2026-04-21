@@ -55,15 +55,9 @@ const (
 	screenResult
 )
 
-// maxValidatorsPerAgent define cuántas instancias del mismo agente se
-// pueden seleccionar. El design permite repetir tipo (ej: codex×2); le
-// ponemos tope 2 para mantener la suma razonable (1-3 validadores en total).
-const maxValidatorsPerAgent = 2
-
 // maxValidatorsTotal es el tope absoluto de validadores disparables en una
-// tanda, compartido por los 3 flows (explore, execute, validate). Está por
-// encima de maxValidatorsPerAgent porque el usuario puede combinar agentes
-// distintos, pero acota el costo total por run.
+// tanda por validate. El stepper 0..N por agente respeta este cap global —
+// si la suma ya es 3, intentar incrementar es no-op.
 const maxValidatorsTotal = 3
 
 // buildValidatorList traduce un mapa de counts a una lista ordenada de
@@ -162,9 +156,18 @@ type Model struct {
 	executeAgentIdx    int
 	executeChosenAgent execute.Agent
 
-	// selector de validate: lista de PRs abiertos + panel de validadores.
-	validateCandidates      []validate.Candidate
-	validateCursor          int
+	// selector de validate: dos listas (planes pendientes + PRs abiertos)
+	// con cursor unificado (0..len(plans)-1 → planes, resto → PRs), seguido
+	// del panel de validadores (stepper 0..N por agente).
+	validatePlans []validate.PlanCandidate
+	validatePRs   []validate.Candidate
+	validateCursor int
+	// validateLoad* tracking: el loader dispara dos comandos paralelos
+	// (plans + PRs). Transicionamos a Select solo cuando los dos recibidos.
+	validatePlansLoaded bool
+	validatePRsLoaded   bool
+	validatePlansErr    error
+	validatePRsErr      error
 	validateChosenRef       string
 	validateChosenURL       string
 	validateValidatorCursor int
@@ -180,12 +183,17 @@ type Model struct {
 	closeChosenRef string
 	closeChosenURL string
 
-	// selector de iterate: lista de PRs con validated:changes-requested
-	// (los que piden que opus aplique cambios).
-	iterateCandidates []validate.Candidate
-	iterateCursor     int
-	iterateChosenRef  string
-	iterateChosenURL  string
+	// selector de iterate: dos listas (planes con plan-validated:changes-
+	// requested + PRs con validated:changes-requested) con cursor unificado.
+	iteratePlans []validate.PlanCandidate
+	iteratePRs   []validate.Candidate
+	iterateCursor int
+	iteratePlansLoaded bool
+	iteratePRsLoaded   bool
+	iteratePlansErr    error
+	iteratePRsErr      error
+	iterateChosenRef   string
+	iterateChosenURL   string
 
 	// resultado final
 	resultLines []string
@@ -282,9 +290,16 @@ type executeDoneMsg struct {
 	stdout string
 	stderr string
 }
-type validateCandidatesLoadedMsg struct {
-	items []validate.Candidate
+// validate ahora tiene dos listas paralelas (planes pendientes + PRs
+// abiertos). El loader dispara dos comandos async y la transición a Select
+// espera a que ambas respuestas lleguen (o falló una y la otra cargó ok).
+type validatePlansLoadedMsg struct {
+	plans []validate.PlanCandidate
 	err   error
+}
+type validatePRsLoadedMsg struct {
+	prs []validate.Candidate
+	err error
 }
 type validateDoneMsg struct {
 	code   validate.ExitCode
@@ -301,9 +316,15 @@ type closeDoneMsg struct {
 	stdout string
 	stderr string
 }
-type iterateCandidatesLoadedMsg struct {
-	items []validate.Candidate
+// iterate sigue la misma idea: dos listas (planes con plan-validated:
+// changes-requested + PRs con validated:changes-requested).
+type iteratePlansLoadedMsg struct {
+	plans []validate.PlanCandidate
 	err   error
+}
+type iteratePRsLoadedMsg struct {
+	prs []validate.Candidate
+	err error
 }
 type iterateDoneMsg struct {
 	code   iterate.ExitCode
@@ -366,26 +387,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case iterateDoneMsg:
 		return m.finishRun(int(msg.code), msg.code == iterate.ExitOK, msg.stdout, msg.stderr), nil
 
-	case iterateCandidatesLoadedMsg:
-		if msg.err != nil {
-			m.screen = screenResult
-			m.resultKind = resultError
-			m.resultLines = []string{"error: " + msg.err.Error()}
-			return m, nil
-		}
-		if len(msg.items) == 0 {
-			m.screen = screenResult
-			m.resultKind = resultInfo
-			m.resultLines = []string{
-				"No hay PRs con validated:changes-requested en este repo.",
-				"Corré `che validate <pr>` y si pide cambios, volvé acá.",
-			}
-			return m, nil
-		}
-		m.iterateCandidates = msg.items
-		m.iterateCursor = 0
-		m.screen = screenIterateSelect
-		return m, nil
+	case iteratePlansLoadedMsg:
+		m.iteratePlans = msg.plans
+		m.iteratePlansErr = msg.err
+		m.iteratePlansLoaded = true
+		return m.maybeAdvanceIterate()
+	case iteratePRsLoadedMsg:
+		m.iteratePRs = msg.prs
+		m.iteratePRsErr = msg.err
+		m.iteratePRsLoaded = true
+		return m.maybeAdvanceIterate()
 
 	case closeCandidatesLoadedMsg:
 		if msg.err != nil {
@@ -409,26 +420,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = screenCloseSelect
 		return m, nil
 
-	case validateCandidatesLoadedMsg:
-		if msg.err != nil {
-			m.screen = screenResult
-			m.resultKind = resultError
-			m.resultLines = []string{"error: " + msg.err.Error()}
-			return m, nil
-		}
-		if len(msg.items) == 0 {
-			m.screen = screenResult
-			m.resultKind = resultInfo
-			m.resultLines = []string{
-				"No hay PRs abiertos en este repo.",
-				"Abrí un PR antes (por ej. con `che execute`) y volvé a intentar.",
-			}
-			return m, nil
-		}
-		m.validateCandidates = msg.items
-		m.validateCursor = 0
-		m.screen = screenValidateSelect
-		return m, nil
+	case validatePlansLoadedMsg:
+		m.validatePlans = msg.plans
+		m.validatePlansErr = msg.err
+		m.validatePlansLoaded = true
+		return m.maybeAdvanceValidate()
+	case validatePRsLoadedMsg:
+		m.validatePRs = msg.prs
+		m.validatePRsErr = msg.err
+		m.validatePRsLoaded = true
+		return m.maybeAdvanceValidate()
 
 	case executeCandidatesLoadedMsg:
 		if msg.err != nil {
@@ -606,9 +607,14 @@ func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 		return m, loadExecuteCandidatesCmd()
 	case screenValidateLoading:
 		m.screen = screenValidateLoading
-		m.validateCandidates = nil
+		m.validatePlans = nil
+		m.validatePRs = nil
 		m.validateCursor = 0
-		return m, loadValidateCandidatesCmd()
+		m.validatePlansLoaded = false
+		m.validatePRsLoaded = false
+		m.validatePlansErr = nil
+		m.validatePRsErr = nil
+		return m, tea.Batch(loadValidatePlansCmd(), loadValidatePRsCmd())
 	case screenCloseLoading:
 		m.screen = screenCloseLoading
 		m.closeReady = nil
@@ -617,9 +623,14 @@ func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 		return m, loadCloseCandidatesCmd()
 	case screenIterateLoading:
 		m.screen = screenIterateLoading
-		m.iterateCandidates = nil
+		m.iteratePlans = nil
+		m.iteratePRs = nil
 		m.iterateCursor = 0
-		return m, loadIterateCandidatesCmd()
+		m.iteratePlansLoaded = false
+		m.iteratePRsLoaded = false
+		m.iteratePlansErr = nil
+		m.iteratePRsErr = nil
+		return m, tea.Batch(loadIteratePlansCmd(), loadIteratePRsCmd())
 	}
 	return m, nil
 }
@@ -693,21 +704,91 @@ func (m Model) handleExecuteAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// loadValidateCandidatesCmd lista PRs abiertos del repo vía gh.
-func loadValidateCandidatesCmd() tea.Cmd {
+// loadValidatePlansCmd lista issues en status:plan sin plan-validated:approve.
+func loadValidatePlansCmd() tea.Cmd {
 	return func() tea.Msg {
-		items, err := validate.ListOpenPRs()
-		return validateCandidatesLoadedMsg{items: items, err: err}
+		plans, err := validate.ListPlanCandidates()
+		return validatePlansLoadedMsg{plans: plans, err: err}
 	}
+}
+
+// loadValidatePRsCmd lista PRs abiertos del repo vía gh.
+func loadValidatePRsCmd() tea.Cmd {
+	return func() tea.Msg {
+		prs, err := validate.ListOpenPRs()
+		return validatePRsLoadedMsg{prs: prs, err: err}
+	}
+}
+
+// maybeAdvanceValidate transiciona a screenValidateSelect cuando los dos
+// loaders respondieron. Política de errores: si ambas listas fallaron, vamos
+// a resultError con los dos mensajes; si una falló y la otra devolvió items,
+// seguimos con la que funcionó (el error de la otra se drop); si las dos
+// cargaron OK pero ambas vacías, empty state informativo.
+func (m Model) maybeAdvanceValidate() (tea.Model, tea.Cmd) {
+	if !m.validatePlansLoaded || !m.validatePRsLoaded {
+		return m, nil
+	}
+	// Ambas fallaron → error.
+	if m.validatePlansErr != nil && m.validatePRsErr != nil {
+		m.screen = screenResult
+		m.resultKind = resultError
+		m.resultLines = []string{
+			"error cargando planes: " + m.validatePlansErr.Error(),
+			"error cargando PRs: " + m.validatePRsErr.Error(),
+		}
+		return m, nil
+	}
+	// Si una falló pero la otra devolvió items, igual seguimos (la que falló
+	// aparece como "(sin ítems)"). Si una falló y la otra no tiene items,
+	// reportamos el error.
+	if len(m.validatePlans)+len(m.validatePRs) == 0 {
+		if m.validatePlansErr != nil || m.validatePRsErr != nil {
+			m.screen = screenResult
+			m.resultKind = resultError
+			var lines []string
+			if m.validatePlansErr != nil {
+				lines = append(lines, "error cargando planes: "+m.validatePlansErr.Error())
+			}
+			if m.validatePRsErr != nil {
+				lines = append(lines, "error cargando PRs: "+m.validatePRsErr.Error())
+			}
+			m.resultLines = lines
+			return m, nil
+		}
+		m.screen = screenResult
+		m.resultKind = resultInfo
+		m.resultLines = []string{
+			"No hay planes ni PRs para validar en este repo.",
+			"Explorá un issue con `che explore` o abrí un PR con `che execute`.",
+		}
+		return m, nil
+	}
+	m.validateCursor = 0
+	m.screen = screenValidateSelect
+	return m, nil
+}
+
+// validateItemAt devuelve el item seleccionado según el cursor unificado.
+// Si idx < len(plans), es un plan (isPR=false); si >= len(plans), es un PR.
+// Devuelve (number, url, isPR).
+func (m Model) validateItemAt(idx int) (int, string, bool) {
+	if idx < len(m.validatePlans) {
+		p := m.validatePlans[idx]
+		return p.Number, p.URL, false
+	}
+	c := m.validatePRs[idx-len(m.validatePlans)]
+	return c.Number, c.URL, true
 }
 
 func (m Model) handleValidateSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
-	total := len(m.validateCandidates)
+	total := len(m.validatePlans) + len(m.validatePRs)
 	switch k {
 	case "esc":
 		m.screen = screenMenu
-		m.validateCandidates = nil
+		m.validatePlans = nil
+		m.validatePRs = nil
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
@@ -727,9 +808,9 @@ func (m Model) handleValidateSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if total == 0 {
 			return m, nil
 		}
-		chosen := m.validateCandidates[m.validateCursor]
-		m.validateChosenRef = fmt.Sprint(chosen.Number)
-		m.validateChosenURL = chosen.URL
+		num, url, _ := m.validateItemAt(m.validateCursor)
+		m.validateChosenRef = fmt.Sprint(num)
+		m.validateChosenURL = url
 		// Default: opus=1 (coherente con flag default).
 		m.validateValidatorCount = map[validate.Agent]int{validate.AgentOpus: 1}
 		m.validateValidatorCursor = 0
@@ -739,6 +820,14 @@ func (m Model) handleValidateSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleValidateValidatorsKey maneja el stepper 0..N por agente:
+//   - ↑/↓ (k/j): cambia el agente seleccionado (cursor vertical).
+//   - ←/- (decrement): resta 1 al count del agente actual, con piso 0.
+//   - →/+ (increment): suma 1 al count, con el cap global maxValidatorsTotal.
+//     Si la suma ya es 3, no-op (feedback visual vía total con indicador).
+//   - Enter: arranca el flow si total > 0; rechaza (no-op) si total == 0
+//     para dar feedback temprano — el flow lo rechazaría igual con
+//     ExitSemantic, pero mejor no dejar pasar.
 func (m Model) handleValidateValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
 	switch k {
@@ -753,9 +842,17 @@ func (m Model) handleValidateValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	case "down", "j":
 		m.validateValidatorCursor = (m.validateValidatorCursor + 1) % len(validate.ValidAgents)
 		return m, nil
-	case " ", "space", "x":
+	case "left", "h", "-":
 		a := validate.ValidAgents[m.validateValidatorCursor]
-		m.validateValidatorCount[a] = (m.validateValidatorCount[a] + 1) % (maxValidatorsPerAgent + 1)
+		if m.validateValidatorCount[a] > 0 {
+			m.validateValidatorCount[a]--
+		}
+		return m, nil
+	case "right", "l", "+", "=":
+		a := validate.ValidAgents[m.validateValidatorCursor]
+		if validatorTotal(m.validateValidatorCount) < maxValidatorsTotal {
+			m.validateValidatorCount[a]++
+		}
 		return m, nil
 	case "enter":
 		validators := validateValidatorsFromCounts(m.validateValidatorCount)
@@ -769,6 +866,16 @@ func (m Model) handleValidateValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	return m, nil
 }
 
+// validatorTotal suma los counts del mapa. Helper para el cap global del
+// stepper (maxValidatorsTotal) — evita recomputar en cada tecla.
+func validatorTotal(counts map[validate.Agent]int) int {
+	total := 0
+	for _, n := range counts {
+		total += n
+	}
+	return total
+}
+
 // validateValidatorsFromCounts traduce el mapa de counts del TUI a una lista
 // de validate.Validator con instance correcto en el orden canónico.
 func validateValidatorsFromCounts(counts map[validate.Agent]int) []validate.Validator {
@@ -777,22 +884,88 @@ func validateValidatorsFromCounts(counts map[validate.Agent]int) []validate.Vali
 	})
 }
 
-// loadIterateCandidatesCmd lista PRs con validated:changes-requested —
-// los que pidieron cambios y están esperando que iterate los aplique.
-func loadIterateCandidatesCmd() tea.Cmd {
+// loadIteratePlansCmd lista issues con plan-validated:changes-requested
+// — planes que pidieron cambios y esperan que iterate reescriba el plan.
+func loadIteratePlansCmd() tea.Cmd {
 	return func() tea.Msg {
-		items, err := iterate.ListIterable()
-		return iterateCandidatesLoadedMsg{items: items, err: err}
+		plans, err := iterate.ListIterablePlanCandidates()
+		return iteratePlansLoadedMsg{plans: plans, err: err}
 	}
+}
+
+// loadIteratePRsCmd lista PRs con validated:changes-requested — los que
+// pidieron cambios y esperan que iterate los aplique sobre el diff.
+func loadIteratePRsCmd() tea.Cmd {
+	return func() tea.Msg {
+		prs, err := iterate.ListIterable()
+		return iteratePRsLoadedMsg{prs: prs, err: err}
+	}
+}
+
+// maybeAdvanceIterate es el hermano de maybeAdvanceValidate: transiciona a
+// screenIterateSelect cuando ambos loaders respondieron, con la misma
+// política de errores (ambos fallaron = error; una falló pero la otra tiene
+// items = seguimos; ambos vacíos = empty state informativo).
+func (m Model) maybeAdvanceIterate() (tea.Model, tea.Cmd) {
+	if !m.iteratePlansLoaded || !m.iteratePRsLoaded {
+		return m, nil
+	}
+	if m.iteratePlansErr != nil && m.iteratePRsErr != nil {
+		m.screen = screenResult
+		m.resultKind = resultError
+		m.resultLines = []string{
+			"error cargando planes: " + m.iteratePlansErr.Error(),
+			"error cargando PRs: " + m.iteratePRsErr.Error(),
+		}
+		return m, nil
+	}
+	if len(m.iteratePlans)+len(m.iteratePRs) == 0 {
+		if m.iteratePlansErr != nil || m.iteratePRsErr != nil {
+			m.screen = screenResult
+			m.resultKind = resultError
+			var lines []string
+			if m.iteratePlansErr != nil {
+				lines = append(lines, "error cargando planes: "+m.iteratePlansErr.Error())
+			}
+			if m.iteratePRsErr != nil {
+				lines = append(lines, "error cargando PRs: "+m.iteratePRsErr.Error())
+			}
+			m.resultLines = lines
+			return m, nil
+		}
+		m.screen = screenResult
+		m.resultKind = resultInfo
+		m.resultLines = []string{
+			"No hay planes ni PRs pidiendo cambios.",
+			"Corré `che validate` sobre un plan o PR y si pide cambios, volvé acá.",
+		}
+		return m, nil
+	}
+	m.iterateCursor = 0
+	m.screen = screenIterateSelect
+	return m, nil
+}
+
+// iterateItemAt devuelve el item seleccionado según el cursor unificado.
+// Si idx < len(plans), es un plan; si >= len(plans), es un PR. Devuelve
+// (number, url, isPR).
+func (m Model) iterateItemAt(idx int) (int, string, bool) {
+	if idx < len(m.iteratePlans) {
+		p := m.iteratePlans[idx]
+		return p.Number, p.URL, false
+	}
+	c := m.iteratePRs[idx-len(m.iteratePlans)]
+	return c.Number, c.URL, true
 }
 
 func (m Model) handleIterateSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
-	total := len(m.iterateCandidates)
+	total := len(m.iteratePlans) + len(m.iteratePRs)
 	switch k {
 	case "esc":
 		m.screen = screenMenu
-		m.iterateCandidates = nil
+		m.iteratePlans = nil
+		m.iteratePRs = nil
 		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
@@ -812,9 +985,9 @@ func (m Model) handleIterateSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if total == 0 {
 			return m, nil
 		}
-		chosen := m.iterateCandidates[m.iterateCursor]
-		m.iterateChosenRef = fmt.Sprint(chosen.Number)
-		m.iterateChosenURL = chosen.URL
+		num, url, _ := m.iterateItemAt(m.iterateCursor)
+		m.iterateChosenRef = fmt.Sprint(num)
+		m.iterateChosenURL = url
 		return m.startIterateFlow(m.iterateChosenRef)
 	}
 	return m, nil
@@ -1066,10 +1239,12 @@ func (m Model) handleResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.runLog = nil
 	m.exploreNew = nil
 	m.executeCandidates = nil
-	m.validateCandidates = nil
+	m.validatePlans = nil
+	m.validatePRs = nil
 	m.closeReady = nil
 	m.closeBlocked = nil
-	m.iterateCandidates = nil
+	m.iteratePlans = nil
+	m.iteratePRs = nil
 	return m, nil
 }
 
@@ -1209,79 +1384,135 @@ func (m Model) View() string {
 
 func renderValidateLoading(m Model) string {
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Validar un PR"))
+	sb.WriteString(titleStyle.Render("Validar"))
 	sb.WriteString("\n")
-	sb.WriteString(subtitleStyle.Render("Buscando PRs abiertos…"))
+	sb.WriteString(subtitleStyle.Render("Buscando planes pendientes y PRs abiertos…"))
 	sb.WriteString("\n")
 	sb.WriteString(hintStyle.Render("Ctrl+C cancela"))
 	sb.WriteString("\n")
 	return sb.String()
 }
 
+// renderValidateSelect muestra dos listas separadas (planes pendientes +
+// PRs abiertos) con cursor unificado. Índices 0..len(plans)-1 son planes;
+// el resto son PRs. El render mantiene el orden visual (planes arriba, PRs
+// abajo) y ubica el marcador ▸ en el item correspondiente al cursor global.
 func renderValidateSelect(m Model) string {
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Validar"))
+	sb.WriteString(titleStyle.Render("Validar — elegí qué validar"))
 	sb.WriteString("\n")
-	total := len(m.validateCandidates)
-	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("%d PR(s) abiertos", total)))
+	totalPlans := len(m.validatePlans)
+	totalPRs := len(m.validatePRs)
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf(
+		"%d plan(es) pendiente(s) · %d PR(s) abierto(s)", totalPlans, totalPRs)))
 	sb.WriteString("\n\n")
-	if total == 0 {
-		sb.WriteString("  " + mutedBadge("(ninguno)") + "\n")
+
+	// Planes pendientes (primer grupo; cursor 0..len(plans)-1).
+	sb.WriteString("  " + mutedBadge("— Planes pendientes —") + "\n")
+	if totalPlans == 0 {
+		sb.WriteString("  " + comingSoonStyle.Render("(sin ítems)") + "\n")
 	} else {
-		for i, c := range m.validateCandidates {
-			prefix := "  "
-			style := menuItemStyle
-			if i == m.validateCursor {
-				prefix = "▸ "
-				style = menuSelectedStyle
-			}
-			num := menuNumberStyle.Render(fmt.Sprintf("#%d", c.Number))
-			draft := ""
-			if c.IsDraft {
-				draft = " " + mutedBadge("draft")
-			}
-			rel := ""
-			if len(c.RelatedIssues) > 0 {
-				parts := make([]string, 0, len(c.RelatedIssues))
-				for _, n := range c.RelatedIssues {
-					parts = append(parts, fmt.Sprintf("#%d", n))
-				}
-				rel = " " + mutedBadge("closes "+strings.Join(parts, ", "))
-			}
-			line := prefix + num + "  " + c.Title + draft + rel
-			if c.Author != "" {
-				line += " " + comingSoonStyle.Render("— by @"+c.Author)
-			}
-			sb.WriteString(style.Render(line) + "\n")
+		for i, p := range m.validatePlans {
+			selected := i == m.validateCursor
+			sb.WriteString(planCandidateLine(p, selected))
 		}
 	}
+
 	sb.WriteString("\n")
-	sb.WriteString(hintStyle.Render("↑/↓ navega · Enter elige · Esc vuelve · Ctrl+C sale"))
+
+	// PRs abiertos (segundo grupo; cursor len(plans)..total-1).
+	sb.WriteString("  " + mutedBadge("— PRs abiertos —") + "\n")
+	if totalPRs == 0 {
+		sb.WriteString("  " + comingSoonStyle.Render("(sin ítems)") + "\n")
+	} else {
+		for i, c := range m.validatePRs {
+			selected := (i + totalPlans) == m.validateCursor
+			sb.WriteString(prValidateCandidateLine(c, selected))
+		}
+	}
+
+	sb.WriteString("\n")
+	if totalPlans+totalPRs == 0 {
+		sb.WriteString(hintStyle.Render(
+			"no hay planes ni PRs para validar — explorá algo primero con `che explore` · Esc vuelve"))
+	} else {
+		sb.WriteString(hintStyle.Render("↑/↓ navega · Enter elige · Esc vuelve · Ctrl+C sale"))
+	}
 	sb.WriteString("\n")
 	return sb.String()
 }
 
+// planCandidateLine renderea un item de la lista de planes pendientes.
+// Mantenemos el formato minimal (número + título) porque PlanCandidate no
+// trae autor/draft/closes como los PRs.
+func planCandidateLine(p validate.PlanCandidate, selected bool) string {
+	prefix := "  "
+	style := menuItemStyle
+	if selected {
+		prefix = "▸ "
+		style = menuSelectedStyle
+	}
+	num := menuNumberStyle.Render(fmt.Sprintf("#%d", p.Number))
+	return style.Render(prefix+num+"  "+p.Title) + "\n"
+}
+
+// prValidateCandidateLine renderea un PR en el selector de validate. Mismo
+// formato que el render anterior (draft badge, closes, author), pero como
+// helper separado para que la lista combinada de planes+PRs sea legible.
+func prValidateCandidateLine(c validate.Candidate, selected bool) string {
+	prefix := "  "
+	style := menuItemStyle
+	if selected {
+		prefix = "▸ "
+		style = menuSelectedStyle
+	}
+	num := menuNumberStyle.Render(fmt.Sprintf("#%d", c.Number))
+	draft := ""
+	if c.IsDraft {
+		draft = " " + mutedBadge("draft")
+	}
+	rel := ""
+	if len(c.RelatedIssues) > 0 {
+		parts := make([]string, 0, len(c.RelatedIssues))
+		for _, n := range c.RelatedIssues {
+			parts = append(parts, fmt.Sprintf("#%d", n))
+		}
+		rel = " " + mutedBadge("closes "+strings.Join(parts, ", "))
+	}
+	line := prefix + num + "  " + c.Title + draft + rel
+	if c.Author != "" {
+		line += " " + comingSoonStyle.Render("— by @"+c.Author)
+	}
+	return style.Render(line) + "\n"
+}
+
+// renderValidateValidators rendea el panel de validadores como un stepper
+// 0..N por agente. El indicador de total aparece arriba (Total: X / 3) para
+// que el cap global sea obvio; el selector lleva ▸ al agente actual y ←→
+// ajustan su count.
 func renderValidateValidators(m Model) string {
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Elegí validadores"))
+	sb.WriteString(titleStyle.Render("Panel de validadores"))
 	sb.WriteString("\n")
-	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("PR #%s — marcá con space (al menos 1, máximo 3)",
-		m.validateChosenRef)))
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf(
+		"Ref #%s — al menos 1, máximo %d en total",
+		m.validateChosenRef, maxValidatorsTotal)))
 	sb.WriteString("\n\n")
 
-	total := 0
+	total := validatorTotal(m.validateValidatorCount)
+	sb.WriteString("  " + renderValidateStepperTotal(total) + "\n\n")
+
 	for i, a := range validate.ValidAgents {
 		count := m.validateValidatorCount[a]
-		total += count
-		box := renderCheckbox(count)
+		box := renderStepper(count)
 		prefix := "  "
 		style := menuItemStyle
 		if i == m.validateValidatorCursor {
 			prefix = "▸ "
 			style = menuSelectedStyle
 		}
-		name := strings.ToUpper(string(a)[:1]) + string(a)[1:]
-		line := prefix + box + "  " + name
+		name := padRight(strings.ToUpper(string(a)[:1])+string(a)[1:], 8)
+		line := prefix + name + " " + box
 		// Reusamos las descripciones de explore.validatorAgentDescriptions,
 		// que están indexadas por explore.Agent — los strings subyacentes son
 		// iguales así que mapeamos manualmente.
@@ -1293,33 +1524,45 @@ func renderValidateValidators(m Model) string {
 	}
 
 	sb.WriteString("\n")
-	sb.WriteString("  " + renderValidateValidatorTotal(total) + "\n")
-
-	sb.WriteString("\n")
-	sb.WriteString(hintStyle.Render("↑/↓ navega · Space cycle 0/1/2 · Enter manda · Esc vuelve · Ctrl+C sale"))
+	sb.WriteString(hintStyle.Render(
+		"↑/↓ elegí agente · ←/→ (o -/+) ajustá · Enter empezar · Esc volver · Ctrl+C sale"))
 	sb.WriteString("\n")
 	return sb.String()
 }
 
-// renderValidateValidatorTotal arma el indicador del total con la regla de
-// validate: total=0 es inválido (validate sin validadores no corre),
-// total>3 tampoco, 1-3 es ok.
-func renderValidateValidatorTotal(total int) string {
-	mark := "✓"
+// renderStepper rendea el box [ N ] del stepper. Mantenemos padding fijo
+// (tres chars entre los brackets) para que el layout no se desalinee.
+func renderStepper(count int) string {
+	return fmt.Sprintf("[ %d ]", count)
+}
+
+// padRight alinea el nombre del agente para que los steppers queden
+// alineados verticalmente en el render. Los nombres son cortos (opus=4,
+// codex=5, gemini=6) así que padding fijo a 8 cubre el peor caso con margen.
+func padRight(s string, n int) string {
+	if len(s) >= n {
+		return s
+	}
+	return s + strings.Repeat(" ", n-len(s))
+}
+
+// renderValidateStepperTotal arma el header "Total: X / 3" con color según
+// validez (rojo si 0 o > 3, verde si 1..3). Mismo criterio que el renderer
+// anterior, pero reflejando el cap total explícito del stepper.
+func renderValidateStepperTotal(total int) string {
 	note := ""
-	valid := total >= 1 && total <= 3
+	valid := total >= 1 && total <= maxValidatorsTotal
 	if total == 0 {
-		mark = "✗"
 		note = "  (elegí al menos 1)"
-	} else if total > 3 {
-		mark = "✗"
-		note = "  (máximo 3 validadores)"
+	} else if total >= maxValidatorsTotal {
+		note = "  (cap alcanzado)"
 	}
 	style := successStyle
 	if !valid {
 		style = errorStyle
 	}
-	return style.Render(fmt.Sprintf("Total: %d %s", total, mark)) + comingSoonStyle.Render(note)
+	return style.Render(fmt.Sprintf("Total: %d / %d", total, maxValidatorsTotal)) +
+		comingSoonStyle.Render(note)
 }
 
 func renderExecuteLoading(m Model) string {
@@ -1517,19 +1760,6 @@ func renderExploreAgent(m Model) string {
 	return sb.String()
 }
 
-// renderCheckbox genera la caja visible según el count: 0=vacía, 1=×, 2=××.
-func renderCheckbox(count int) string {
-	switch count {
-	case 0:
-		return "[  ]"
-	case 1:
-		return "[x ]"
-	case 2:
-		return "[xx]"
-	}
-	return fmt.Sprintf("[%d]", count)
-}
-
 func renderExploreSelect(m Model) string {
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("Explorar"))
@@ -1703,33 +1933,57 @@ func closeCandidateLine(c validate.Candidate, selected bool) string {
 
 func renderIterateLoading(m Model) string {
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Iterar sobre un PR"))
+	sb.WriteString(titleStyle.Render("Iterar"))
 	sb.WriteString("\n")
-	sb.WriteString(subtitleStyle.Render("Buscando PRs con validated:changes-requested…"))
+	sb.WriteString(subtitleStyle.Render("Buscando planes y PRs con changes-requested…"))
 	sb.WriteString("\n")
 	sb.WriteString(hintStyle.Render("Ctrl+C cancela"))
 	sb.WriteString("\n")
 	return sb.String()
 }
 
+// renderIterateSelect muestra planes + PRs con changes-requested con cursor
+// unificado, mismo layout que renderValidateSelect.
 func renderIterateSelect(m Model) string {
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Iterar"))
+	sb.WriteString(titleStyle.Render("Iterar — elegí qué iterar"))
 	sb.WriteString("\n")
-	total := len(m.iterateCandidates)
+	totalPlans := len(m.iteratePlans)
+	totalPRs := len(m.iteratePRs)
 	sb.WriteString(subtitleStyle.Render(fmt.Sprintf(
-		"%d PR(s) con changes-requested — opus lee los findings y aplica los cambios",
-		total)))
+		"%d plan(es) con changes-requested · %d PR(s) con changes-requested — opus aplica los cambios",
+		totalPlans, totalPRs)))
 	sb.WriteString("\n\n")
-	if total == 0 {
-		sb.WriteString("  " + mutedBadge("(ninguno)") + "\n")
+
+	sb.WriteString("  " + mutedBadge("— Planes a iterar —") + "\n")
+	if totalPlans == 0 {
+		sb.WriteString("  " + comingSoonStyle.Render("(sin ítems)") + "\n")
 	} else {
-		for i, c := range m.iterateCandidates {
-			sb.WriteString(closeCandidateLine(c, i == m.iterateCursor))
+		for i, p := range m.iteratePlans {
+			selected := i == m.iterateCursor
+			sb.WriteString(planCandidateLine(p, selected))
 		}
 	}
+
 	sb.WriteString("\n")
-	sb.WriteString(hintStyle.Render("↑/↓ navega · Enter dispara · Esc vuelve · Ctrl+C sale"))
+
+	sb.WriteString("  " + mutedBadge("— PRs a iterar —") + "\n")
+	if totalPRs == 0 {
+		sb.WriteString("  " + comingSoonStyle.Render("(sin ítems)") + "\n")
+	} else {
+		for i, c := range m.iteratePRs {
+			selected := (i + totalPlans) == m.iterateCursor
+			sb.WriteString(closeCandidateLine(c, selected))
+		}
+	}
+
+	sb.WriteString("\n")
+	if totalPlans+totalPRs == 0 {
+		sb.WriteString(hintStyle.Render(
+			"no hay planes ni PRs pidiendo cambios — corré `che validate` primero · Esc vuelve"))
+	} else {
+		sb.WriteString(hintStyle.Render("↑/↓ navega · Enter dispara · Esc vuelve · Ctrl+C sale"))
+	}
 	sb.WriteString("\n")
 	return sb.String()
 }
