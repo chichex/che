@@ -55,15 +55,9 @@ const (
 	screenResult
 )
 
-// maxValidatorsPerAgent define cuántas instancias del mismo agente se
-// pueden seleccionar. El design permite repetir tipo (ej: codex×2); le
-// ponemos tope 2 para mantener la suma razonable (1-3 validadores en total).
-const maxValidatorsPerAgent = 2
-
 // maxValidatorsTotal es el tope absoluto de validadores disparables en una
-// tanda, compartido por los 3 flows (explore, execute, validate). Está por
-// encima de maxValidatorsPerAgent porque el usuario puede combinar agentes
-// distintos, pero acota el costo total por run.
+// tanda por validate. El stepper 0..N por agente respeta este cap global —
+// si la suma ya es 3, intentar incrementar es no-op.
 const maxValidatorsTotal = 3
 
 // buildValidatorList traduce un mapa de counts a una lista ordenada de
@@ -826,6 +820,14 @@ func (m Model) handleValidateSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// handleValidateValidatorsKey maneja el stepper 0..N por agente:
+//   - ↑/↓ (k/j): cambia el agente seleccionado (cursor vertical).
+//   - ←/- (decrement): resta 1 al count del agente actual, con piso 0.
+//   - →/+ (increment): suma 1 al count, con el cap global maxValidatorsTotal.
+//     Si la suma ya es 3, no-op (feedback visual vía total con indicador).
+//   - Enter: arranca el flow si total > 0; rechaza (no-op) si total == 0
+//     para dar feedback temprano — el flow lo rechazaría igual con
+//     ExitSemantic, pero mejor no dejar pasar.
 func (m Model) handleValidateValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
 	switch k {
@@ -840,9 +842,17 @@ func (m Model) handleValidateValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	case "down", "j":
 		m.validateValidatorCursor = (m.validateValidatorCursor + 1) % len(validate.ValidAgents)
 		return m, nil
-	case " ", "space", "x":
+	case "left", "h", "-":
 		a := validate.ValidAgents[m.validateValidatorCursor]
-		m.validateValidatorCount[a] = (m.validateValidatorCount[a] + 1) % (maxValidatorsPerAgent + 1)
+		if m.validateValidatorCount[a] > 0 {
+			m.validateValidatorCount[a]--
+		}
+		return m, nil
+	case "right", "l", "+", "=":
+		a := validate.ValidAgents[m.validateValidatorCursor]
+		if validatorTotal(m.validateValidatorCount) < maxValidatorsTotal {
+			m.validateValidatorCount[a]++
+		}
 		return m, nil
 	case "enter":
 		validators := validateValidatorsFromCounts(m.validateValidatorCount)
@@ -854,6 +864,16 @@ func (m Model) handleValidateValidatorsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		return m.startValidateFlow(m.validateChosenRef, validators)
 	}
 	return m, nil
+}
+
+// validatorTotal suma los counts del mapa. Helper para el cap global del
+// stepper (maxValidatorsTotal) — evita recomputar en cada tecla.
+func validatorTotal(counts map[validate.Agent]int) int {
+	total := 0
+	for _, n := range counts {
+		total += n
+	}
+	return total
 }
 
 // validateValidatorsFromCounts traduce el mapa de counts del TUI a una lista
@@ -1466,27 +1486,33 @@ func prValidateCandidateLine(c validate.Candidate, selected bool) string {
 	return style.Render(line) + "\n"
 }
 
+// renderValidateValidators rendea el panel de validadores como un stepper
+// 0..N por agente. El indicador de total aparece arriba (Total: X / 3) para
+// que el cap global sea obvio; el selector lleva ▸ al agente actual y ←→
+// ajustan su count.
 func renderValidateValidators(m Model) string {
 	var sb strings.Builder
-	sb.WriteString(titleStyle.Render("Elegí validadores"))
+	sb.WriteString(titleStyle.Render("Panel de validadores"))
 	sb.WriteString("\n")
-	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("PR #%s — marcá con space (al menos 1, máximo 3)",
-		m.validateChosenRef)))
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf(
+		"Ref #%s — al menos 1, máximo %d en total",
+		m.validateChosenRef, maxValidatorsTotal)))
 	sb.WriteString("\n\n")
 
-	total := 0
+	total := validatorTotal(m.validateValidatorCount)
+	sb.WriteString("  " + renderValidateStepperTotal(total) + "\n\n")
+
 	for i, a := range validate.ValidAgents {
 		count := m.validateValidatorCount[a]
-		total += count
-		box := renderCheckbox(count)
+		box := renderStepper(count)
 		prefix := "  "
 		style := menuItemStyle
 		if i == m.validateValidatorCursor {
 			prefix = "▸ "
 			style = menuSelectedStyle
 		}
-		name := strings.ToUpper(string(a)[:1]) + string(a)[1:]
-		line := prefix + box + "  " + name
+		name := padRight(strings.ToUpper(string(a)[:1])+string(a)[1:], 8)
+		line := prefix + name + " " + box
 		// Reusamos las descripciones de explore.validatorAgentDescriptions,
 		// que están indexadas por explore.Agent — los strings subyacentes son
 		// iguales así que mapeamos manualmente.
@@ -1498,33 +1524,45 @@ func renderValidateValidators(m Model) string {
 	}
 
 	sb.WriteString("\n")
-	sb.WriteString("  " + renderValidateValidatorTotal(total) + "\n")
-
-	sb.WriteString("\n")
-	sb.WriteString(hintStyle.Render("↑/↓ navega · Space cycle 0/1/2 · Enter manda · Esc vuelve · Ctrl+C sale"))
+	sb.WriteString(hintStyle.Render(
+		"↑/↓ elegí agente · ←/→ (o -/+) ajustá · Enter empezar · Esc volver · Ctrl+C sale"))
 	sb.WriteString("\n")
 	return sb.String()
 }
 
-// renderValidateValidatorTotal arma el indicador del total con la regla de
-// validate: total=0 es inválido (validate sin validadores no corre),
-// total>3 tampoco, 1-3 es ok.
-func renderValidateValidatorTotal(total int) string {
-	mark := "✓"
+// renderStepper rendea el box [ N ] del stepper. Mantenemos padding fijo
+// (tres chars entre los brackets) para que el layout no se desalinee.
+func renderStepper(count int) string {
+	return fmt.Sprintf("[ %d ]", count)
+}
+
+// padRight alinea el nombre del agente para que los steppers queden
+// alineados verticalmente en el render. Los nombres son cortos (opus=4,
+// codex=5, gemini=6) así que padding fijo a 8 cubre el peor caso con margen.
+func padRight(s string, n int) string {
+	if len(s) >= n {
+		return s
+	}
+	return s + strings.Repeat(" ", n-len(s))
+}
+
+// renderValidateStepperTotal arma el header "Total: X / 3" con color según
+// validez (rojo si 0 o > 3, verde si 1..3). Mismo criterio que el renderer
+// anterior, pero reflejando el cap total explícito del stepper.
+func renderValidateStepperTotal(total int) string {
 	note := ""
-	valid := total >= 1 && total <= 3
+	valid := total >= 1 && total <= maxValidatorsTotal
 	if total == 0 {
-		mark = "✗"
 		note = "  (elegí al menos 1)"
-	} else if total > 3 {
-		mark = "✗"
-		note = "  (máximo 3 validadores)"
+	} else if total >= maxValidatorsTotal {
+		note = "  (cap alcanzado)"
 	}
 	style := successStyle
 	if !valid {
 		style = errorStyle
 	}
-	return style.Render(fmt.Sprintf("Total: %d %s", total, mark)) + comingSoonStyle.Render(note)
+	return style.Render(fmt.Sprintf("Total: %d / %d", total, maxValidatorsTotal)) +
+		comingSoonStyle.Render(note)
 }
 
 func renderExecuteLoading(m Model) string {
@@ -1720,19 +1758,6 @@ func renderExploreAgent(m Model) string {
 	sb.WriteString(hintStyle.Render("↑/↓ navega · 1-3 atajo · Enter elige · Esc vuelve · Ctrl+C sale"))
 	sb.WriteString("\n")
 	return sb.String()
-}
-
-// renderCheckbox genera la caja visible según el count: 0=vacía, 1=×, 2=××.
-func renderCheckbox(count int) string {
-	switch count {
-	case 0:
-		return "[  ]"
-	case 1:
-		return "[x ]"
-	case 2:
-		return "[xx]"
-	}
-	return fmt.Sprintf("[%d]", count)
 }
 
 func renderExploreSelect(m Model) string {
