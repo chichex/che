@@ -7,6 +7,7 @@ import (
 	"syscall"
 
 	"github.com/chichex/che/internal/flow/execute"
+	"github.com/chichex/che/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -63,7 +64,7 @@ Este subcomando es la ruta no-interactiva (scripting/CI). La TUI de che
 
 		code := execute.Run(args[0], execute.Opts{
 			Stdout:     cmd.OutOrStdout(),
-			Stderr:     cmd.ErrOrStderr(),
+			Out:        output.New(output.NewWriterSink(cmd.ErrOrStderr())),
 			Agent:      agent,
 			Validators: validators,
 			Ctx:        ctx,

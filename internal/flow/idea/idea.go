@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/output"
 )
 
 // Response es lo que esperamos que devuelva el agente de clasificación.
@@ -44,12 +45,12 @@ const (
 	ExitSemantic ExitCode = 3 // entrada vacía, JSON inválido, enums fuera de rango
 )
 
-// Opts agrupa los writers y la callback de progreso. Si OnProgress es nil,
-// el flow corre silencioso (modo CI).
+// Opts agrupa el writer de stdout (payload estable: URLs creadas,
+// "Done.") y el logger estructurado (progress + errores). Si Out es nil,
+// el flow corre silencioso (NopSink).
 type Opts struct {
-	Stdout     io.Writer
-	Stderr     io.Writer
-	OnProgress func(string) // invocado por cada línea de output de los subprocesses
+	Stdout io.Writer
+	Out    *output.Logger
 }
 
 var (
@@ -57,64 +58,72 @@ var (
 	validSizes = map[string]bool{"XS": true, "S": true, "M": true, "L": true, "XL": true}
 )
 
-// Run ejecuta el flow completo. Los writers de opts son el stdout/stderr
-// "final" (URLs creadas, errores). OnProgress recibe las líneas que van
-// saliendo de claude mientras corre — el caller decide qué hacer con ellas
-// (mostrarlas en vivo en la TUI, escribirlas a log, o nada).
+// Run ejecuta el flow completo.
 func Run(text string, opts Opts) ExitCode {
-	stdout, stderr := opts.Stdout, opts.Stderr
-	progress := opts.OnProgress
-	if progress == nil {
-		progress = func(string) {}
+	stdout := opts.Stdout
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	log := opts.Out
+	if log == nil {
+		log = output.New(nil)
 	}
 
 	text = strings.TrimSpace(text)
 	if text == "" {
-		fmt.Fprintln(stderr, "error: idea text is empty")
+		log.Error("idea text is empty")
 		return ExitSemantic
 	}
 
-	progress("chequeando repo git y auth de GitHub…")
+	log.Info("chequeando repo git y auth de GitHub")
 	if err := precheckGitHubRemote(); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("github remote invalido", output.F{Cause: err})
 		return ExitRetry
 	}
 	if err := precheckGhAuth(); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("gh auth fallo", output.F{Cause: err})
 		return ExitRetry
 	}
 
-	progress("consultando a claude…")
-	resp, err := callClaude(text, progress)
+	log.Step("consultando a claude")
+	resp, err := callClaude(text, log)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: calling claude: %v\n", err)
+		log.Error("calling claude failed", output.F{Agent: "claude", Cause: err})
 		return ExitRetry
 	}
 
 	if err := validate(resp); err != nil {
-		fmt.Fprintf(stderr, "error: claude response: %v\n", err)
+		log.Error("claude response invalid", output.F{Cause: err})
 		return ExitSemantic
 	}
 
-	progress(fmt.Sprintf("claude clasificó %d idea(s); preparando labels…", len(resp.Items)))
-	if err := ensureLabels(resp.Items, progress); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+	log.Success("idea clasificada", output.F{Detail: fmt.Sprintf("%d item(s)", len(resp.Items))})
+	if err := ensureLabels(resp.Items, log); err != nil {
+		log.Error("no se pudieron asegurar labels", output.F{Cause: err})
 		return ExitRetry
 	}
 
-	progress("creando issues…")
 	fmt.Fprintf(stdout, "Creating %d issue(s)…\n", len(resp.Items))
 
 	created := []string{}
 	for i, item := range resp.Items {
-		progress(fmt.Sprintf("creando issue %d/%d: %s", i+1, len(resp.Items), item.Title))
+		log.Step(fmt.Sprintf("creating issue %d/%d", i+1, len(resp.Items)), output.F{Detail: item.Title})
 		url, err := createIssue(item)
 		if err != nil {
-			fmt.Fprintf(stderr, "error: creating issue %d/%d: %v\n", i+1, len(resp.Items), err)
-			rollback(created, stderr, progress)
+			log.Error(fmt.Sprintf("creating issue %d/%d failed", i+1, len(resp.Items)), output.F{Cause: err})
+			rollback(created, log)
 			return ExitRetry
 		}
 		created = append(created, url)
+		log.Success("issue creado", output.F{
+			URL: url,
+			Labels: []string{
+				"type:" + item.Type,
+				"size:" + strings.ToLower(item.Size),
+				labels.StatusIdea,
+				labels.CtPlan,
+			},
+		})
 		fmt.Fprintf(stdout, "Created %s\n", url)
 	}
 
@@ -142,7 +151,7 @@ func precheckGhAuth() error {
 	return nil
 }
 
-func callClaude(userText string, progress func(string)) (*Response, error) {
+func callClaude(userText string, log *output.Logger) (*Response, error) {
 	prompt := buildPrompt(userText)
 	cmd := exec.Command("claude", "-p", prompt, "--output-format", "text")
 	stdout, err := cmd.StdoutPipe()
@@ -163,7 +172,7 @@ func callClaude(userText string, progress func(string)) (*Response, error) {
 		line := scanner.Text()
 		fullOutput.WriteString(line + "\n")
 		if strings.TrimSpace(line) != "" {
-			progress("claude: " + line)
+			log.Step("claude: " + line)
 		}
 	}
 
@@ -281,7 +290,7 @@ func validate(r *Response) error {
 
 // ensureLabels garantiza que los labels type:*, size:* y status:idea que se
 // van a aplicar existan en el repo. Delega en labels.Ensure (idempotente).
-func ensureLabels(items []Item, progress func(string)) error {
+func ensureLabels(items []Item, log *output.Logger) error {
 	seen := map[string]bool{}
 	var names []string
 	for _, it := range items {
@@ -298,7 +307,7 @@ func ensureLabels(items []Item, progress func(string)) error {
 		}
 	}
 	for _, lbl := range names {
-		progress("asegurando label " + lbl)
+		log.Step("asegurando label", output.F{Labels: []string{lbl}})
 		if err := labels.Ensure(lbl); err != nil {
 			return err
 		}
@@ -378,20 +387,20 @@ func renderBody(it Item) string {
 	return sb.String()
 }
 
-func rollback(created []string, stderr io.Writer, progress func(string)) {
+func rollback(created []string, log *output.Logger) {
 	var orphans []string
 	for i := len(created) - 1; i >= 0; i-- {
 		url := created[i]
-		progress("rollback: cerrando " + url)
+		log.Step("rollback: cerrando", output.F{URL: url})
 		if err := exec.Command("gh", "issue", "close", url).Run(); err != nil {
 			orphans = append(orphans, url)
 		}
 	}
 	if len(orphans) > 0 {
-		fmt.Fprintf(stderr, "warning: could not close %d issue(s) created before failure:\n", len(orphans))
+		log.Warn(fmt.Sprintf("could not close %d issue(s) created before failure", len(orphans)))
 		for _, u := range orphans {
-			fmt.Fprintf(stderr, "  - %s\n", u)
+			log.Warn("orphan", output.F{URL: u})
 		}
-		fmt.Fprintln(stderr, "close them manually (`gh issue close <url>`) before re-running")
+		log.Info("close them manually (`gh issue close <url>`) before re-running")
 	}
 }

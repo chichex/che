@@ -1,6 +1,10 @@
 package output
 
-import "time"
+import (
+	"bytes"
+	"sync"
+	"time"
+)
 
 // Logger es la fachada que usan los flows. Wrapper fino sobre Sink.
 //
@@ -48,4 +52,43 @@ func (l *Logger) emit(lv Level, msg string, ff []F) {
 		Message: msg,
 		Fields:  fields,
 	})
+}
+
+// AsWriter devuelve un io.Writer que bufferiza hasta un newline y emite
+// cada linea completa como un evento del nivel indicado. Util como
+// adapter para helpers legacy que reciben io.Writer (ej. stderr) sin
+// reescribir su firma: pasar log.AsWriter(LevelError) y cada línea se
+// loguea como error estructurado.
+func (l *Logger) AsWriter(lv Level) *LineWriter {
+	return &LineWriter{logger: l, level: lv}
+}
+
+// LineWriter adapta un Logger a io.Writer. Concurrency-safe: mutex
+// interno serializa los flushes de líneas.
+type LineWriter struct {
+	logger *Logger
+	level  Level
+	mu     sync.Mutex
+	buf    bytes.Buffer
+}
+
+// Write bufferiza hasta newline y emite un evento por cada línea completa.
+func (w *LineWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.buf.Write(p)
+	for {
+		data := w.buf.Bytes()
+		nl := bytes.IndexByte(data, '\n')
+		if nl < 0 {
+			break
+		}
+		line := string(data[:nl])
+		w.buf.Next(nl + 1)
+		if line == "" {
+			continue
+		}
+		w.logger.emit(w.level, line, nil)
+	}
+	return len(p), nil
 }

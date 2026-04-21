@@ -5,6 +5,7 @@ import (
 
 	"github.com/chichex/che/internal/flow/iterate"
 	"github.com/chichex/che/internal/flow/validate"
+	"github.com/chichex/che/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -45,7 +46,7 @@ No hay flag --agent: iterate usa opus (claude) por diseño.`,
 		}
 		code := iterate.Run(args[0], iterate.Opts{
 			Stdout: cmd.OutOrStdout(),
-			Stderr: cmd.ErrOrStderr(),
+			Out:    output.New(output.NewWriterSink(cmd.ErrOrStderr())),
 		})
 		if code != iterate.ExitOK {
 			cmd.SilenceUsage = true

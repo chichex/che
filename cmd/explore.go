@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/chichex/che/internal/flow/explore"
+	"github.com/chichex/che/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -52,7 +53,7 @@ Este subcomando es la ruta no-interactiva (scripting/CI). La TUI de che
 		}
 		code := explore.Run(args[0], explore.Opts{
 			Stdout:     cmd.OutOrStdout(),
-			Stderr:     cmd.ErrOrStderr(),
+			Out:        output.New(output.NewWriterSink(cmd.ErrOrStderr())),
 			Agent:      agent,
 			Validators: validators,
 		})

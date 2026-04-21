@@ -38,6 +38,7 @@ import (
 	"github.com/chichex/che/internal/flow/execute"
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/output"
 )
 
 // ExitCode es el código de salida semántico.
@@ -63,11 +64,11 @@ var AgentTimeout = func() time.Duration {
 	return 30 * time.Minute
 }()
 
-// Opts agrupa writers y callback de progreso.
+// Opts agrupa el writer de stdout (payload: "Iterated PR ...", "Done.")
+// y el logger estructurado (progress + errors).
 type Opts struct {
-	Stdout     io.Writer
-	Stderr     io.Writer
-	OnProgress func(string)
+	Stdout io.Writer
+	Out    *output.Logger
 }
 
 // ListIterable devuelve los PRs abiertos del repo que piden iteración,
@@ -107,81 +108,84 @@ func hasChangesRequested(p validate.PullRequest) bool {
 
 // Run ejecuta el flow completo sobre un PR.
 func Run(prRef string, opts Opts) ExitCode {
-	stdout, stderr := opts.Stdout, opts.Stderr
-	progress := opts.OnProgress
-	if progress == nil {
-		progress = func(string) {}
+	stdout := opts.Stdout
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	log := opts.Out
+	if log == nil {
+		log = output.New(nil)
 	}
 
 	prRef = strings.TrimSpace(prRef)
 	if prRef == "" {
-		fmt.Fprintln(stderr, "error: pr ref is empty")
+		log.Error("pr ref is empty")
 		return ExitSemantic
 	}
 	if _, err := validate.ParsePRRef(prRef); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("pr ref invalido", output.F{Cause: err})
 		return ExitSemantic
 	}
 
-	progress("chequeando repo git y auth de GitHub…")
+	log.Info("chequeando repo git y auth de GitHub")
 	repoRoot, err := repoToplevel()
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("git repo invalido", output.F{Cause: err})
 		return ExitRetry
 	}
 	if err := precheckGitHubRemote(); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("github remote invalido", output.F{Cause: err})
 		return ExitRetry
 	}
 	if err := precheckGhAuth(); err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("gh auth fallo", output.F{Cause: err})
 		return ExitRetry
 	}
 
-	progress("obteniendo PR desde GitHub…")
+	log.Info("obteniendo PR desde GitHub")
 	pr, err := validate.FetchPR(prRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: fetching PR: %v\n", err)
+		log.Error("fetching PR failed", output.F{Cause: err})
 		return ExitRetry
 	}
 	if pr.State != "OPEN" {
-		fmt.Fprintf(stderr, "error: PR #%d is not OPEN (state=%s)\n", pr.Number, pr.State)
+		log.Error(fmt.Sprintf("PR #%d is not OPEN (state=%s)", pr.Number, pr.State))
 		return ExitSemantic
 	}
 	if strings.TrimSpace(pr.HeadBranch) == "" {
-		fmt.Fprintf(stderr, "error: PR #%d no tiene head branch (¿fork?) — iterate no soporta ese caso\n", pr.Number)
+		log.Error(fmt.Sprintf("PR #%d no tiene head branch (¿fork?) — iterate no soporta ese caso", pr.Number))
 		return ExitSemantic
 	}
 
-	progress("leyendo comments previos para buscar findings…")
+	log.Step("leyendo comments previos para buscar findings")
 	comments, err := validate.FetchPRComments(prRef)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: fetching comments: %v\n", err)
+		log.Error("fetching comments failed", output.F{Cause: err})
 		return ExitRetry
 	}
 
 	findingsBlocks := LatestValidateFindings(comments)
 	if len(findingsBlocks) == 0 {
-		fmt.Fprintf(stderr, "error: PR #%d no tiene findings de che validate — no hay nada que iterar. Corré `che validate %d` antes.\n",
-			pr.Number, pr.Number)
+		log.Error(fmt.Sprintf("PR #%d no tiene findings de che validate — no hay nada que iterar. Corré `che validate %d` antes.", pr.Number, pr.Number))
 		return ExitSemantic
 	}
 
 	iter := DetermineIterateIter(comments)
+	log.Success("encontré findings del último run de validate", output.F{PR: pr.Number, Iter: iter, Detail: fmt.Sprintf("%d validators", len(findingsBlocks))})
 
 	issueNum := firstClosingIssue(pr)
 
-	progress(fmt.Sprintf("resolviendo worktree (issue=%d, branch=%s)…", issueNum, pr.HeadBranch))
+	log.Step(fmt.Sprintf("resolviendo worktree (issue=%d, branch=%s)", issueNum, pr.HeadBranch))
 	wt, wtOwned, err := resolveWorktree(repoRoot, issueNum, pr.HeadBranch)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("resolver worktree fallo", output.F{Cause: err})
 		return ExitRetry
 	}
 	defer func() {
 		if wt != nil && wtOwned {
 			wtCtx, wtCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			if err := wt.Cleanup(wtCtx, repoRoot, false); err != nil {
-				fmt.Fprintf(stderr, "warning: cleanup local parcial: %v — revisá `git worktree list` y `git branch` para limpiar a mano\n", err)
+				log.Warn("cleanup local parcial — revisá git worktree list y git branch para limpiar a mano", output.F{Cause: err})
 			}
 			wtCancel()
 		}
@@ -189,55 +193,48 @@ func Run(prRef string, opts Opts) ExitCode {
 
 	prompt := BuildIteratePrompt(pr, iter, findingsBlocks)
 
-	// Snapshot del HEAD antes de invocar al agente. La detección de
-	// "¿opus produjo commits?" compara HEAD before/after en vez del
-	// tracking ref origin/<branch>: opus normalmente pushea por su
-	// cuenta (el prompt se lo pide), lo que avanza origin/<branch> y
-	// hace que HEAD..origin dé vacío, falseando el chequeo.
 	beforeHEAD, err := gitRevParse(wt.Path, "HEAD")
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("git rev-parse HEAD fallo", output.F{Cause: err})
 		return ExitRetry
 	}
 
-	progress("invocando a opus para que aplique los cambios…")
-	if err := runAgent(wt.Path, prompt, progress); err != nil {
-		fmt.Fprintf(stderr, "error: opus falló: %v\n", err)
+	log.Step("invocando a opus para aplicar los cambios", output.F{Agent: "opus", Detail: wt.Path})
+	if err := runAgent(wt.Path, prompt, log); err != nil {
+		log.Error("opus falló", output.F{Agent: "opus", Cause: err})
 		return ExitRetry
 	}
 
-	progress("chequeando si el worktree quedó con cambios…")
+	log.Step("chequeando si el worktree quedó con cambios")
 	hasChanges, err := worktreeHasChanges(wt.Path)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("git status fallo", output.F{Cause: err})
 		return ExitRetry
 	}
 
-	pushed, newCommits, err := commitAndPushIfChanged(wt.Path, pr.HeadBranch, beforeHEAD, hasChanges, progress)
+	pushed, newCommits, err := commitAndPushIfChanged(wt.Path, pr.HeadBranch, beforeHEAD, hasChanges, log)
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		log.Error("commit/push fallo", output.F{Cause: err})
 		return ExitRetry
 	}
 
 	if !pushed {
-		// No hubo cambios reales. Dejamos todo como estaba (incluyendo
-		// label validated:changes-requested) y salimos con retry para
-		// que el usuario sepa que hay que mirar por qué opus no arregló.
-		fmt.Fprintf(stderr, "error: opus no produjo cambios commiteables para el PR #%d — revisá los findings a mano o reintentá.\n", pr.Number)
+		log.Error(fmt.Sprintf("opus no produjo cambios commiteables para el PR #%d — revisá los findings a mano o reintentá", pr.Number))
 		return ExitRetry
 	}
 
-	progress("posteando comment de iterate en el PR…")
+	log.Step("posteando comment de iterate en el PR")
 	body := RenderIterateComment(iter, newCommits)
 	if err := postPRComment(prRef, body); err != nil {
-		fmt.Fprintf(stderr, "warning: no se pudo postear comment de iterate: %v — sigo igual\n", err)
+		log.Warn("warning: no se pudo postear comment de iterate — sigo igual", output.F{Cause: err})
 	}
 
-	progress("removiendo label validated:changes-requested del PR…")
+	log.Step("removiendo label validated:changes-requested del PR")
 	if err := removeLabel(prRef, labels.ValidatedChangesRequested); err != nil {
-		fmt.Fprintf(stderr, "warning: no se pudo remover label: %v — removelo a mano\n", err)
+		log.Warn("warning: no se pudo remover label — removelo a mano", output.F{Cause: err})
 	}
 
+	log.Success("iterated PR", output.F{PR: pr.Number, URL: pr.URL, Detail: fmt.Sprintf("%d nuevos commits", len(newCommits))})
 	fmt.Fprintf(stdout, "Iterated PR %s\n", pr.URL)
 	fmt.Fprintf(stdout, "Nuevos commits: %d\n", len(newCommits))
 	fmt.Fprintln(stdout, "Done. Re-corré `che validate` para obtener un verdict nuevo.")
@@ -376,7 +373,7 @@ func RenderIterateComment(iter int, commitSubjects []string) string {
 
 // ---- agent invocation (copy-adapted del patrón de close/execute) ----
 
-func runAgent(cwd, prompt string, progress func(string)) error {
+func runAgent(cwd, prompt string, log *output.Logger) error {
 	ctx, cancel := context.WithTimeout(context.Background(), AgentTimeout)
 	defer cancel()
 
@@ -399,8 +396,8 @@ func runAgent(cwd, prompt string, progress func(string)) error {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	var stderrBuf strings.Builder
-	go streamPipe(&wg, stdoutPipe, nil, progress, "opus: ", formatOpusLine)
-	go streamPipe(&wg, stderrPipe, &stderrBuf, progress, "opus stderr: ", nil)
+	go streamPipe(&wg, stdoutPipe, nil, log, "opus: ", formatOpusLine)
+	go streamPipe(&wg, stderrPipe, &stderrBuf, log, "opus stderr: ", nil)
 	wg.Wait()
 
 	waitErr := cmd.Wait()
@@ -419,7 +416,7 @@ func runAgent(cwd, prompt string, progress func(string)) error {
 	return nil
 }
 
-func streamPipe(wg *sync.WaitGroup, r io.Reader, acc *strings.Builder, progress func(string), prefix string, format func(string) (string, bool)) {
+func streamPipe(wg *sync.WaitGroup, r io.Reader, acc *strings.Builder, log *output.Logger, prefix string, format func(string) (string, bool)) {
 	defer wg.Done()
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 1024*1024), 16*1024*1024)
@@ -436,8 +433,8 @@ func streamPipe(wg *sync.WaitGroup, r io.Reader, acc *strings.Builder, progress 
 			}
 			out = msg
 		}
-		if strings.TrimSpace(out) != "" && progress != nil {
-			progress(prefix + out)
+		if strings.TrimSpace(out) != "" && log != nil {
+			log.Step(prefix + out)
 		}
 	}
 }
@@ -782,9 +779,9 @@ func worktreeHasChanges(wtPath string) (bool, error) {
 //
 // El push final es idempotente: si opus ya pusheó, `git push origin <branch>`
 // es no-op.
-func commitAndPushIfChanged(wtPath, branch, beforeHEAD string, hasDirty bool, progress func(string)) (bool, []string, error) {
+func commitAndPushIfChanged(wtPath, branch, beforeHEAD string, hasDirty bool, log *output.Logger) (bool, []string, error) {
 	if hasDirty {
-		progress("commiteando cambios no-commiteados que dejó opus…")
+		log.Step("commiteando cambios no-commiteados que dejó opus")
 		if err := runGitIn(wtPath, "add", "-A"); err != nil {
 			return false, nil, err
 		}
@@ -806,7 +803,7 @@ func commitAndPushIfChanged(wtPath, branch, beforeHEAD string, hasDirty bool, pr
 		return false, nil, err
 	}
 
-	progress(fmt.Sprintf("pusheando a origin/%s (idempotente si opus ya pusheó)…", branch))
+	log.Step(fmt.Sprintf("pusheando a origin/%s (idempotente si opus ya pusheó)", branch))
 	if err := runGitIn(wtPath, "push", "origin", branch); err != nil {
 		return false, nil, err
 	}

@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/chichex/che/internal/flow/validate"
+	"github.com/chichex/che/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -50,7 +51,7 @@ abrir el HTML.`,
 		}
 		code := validate.Run(args[0], validate.Opts{
 			Stdout:     cmd.OutOrStdout(),
-			Stderr:     cmd.ErrOrStderr(),
+			Out:        output.New(output.NewWriterSink(cmd.ErrOrStderr())),
 			Validators: validators,
 		})
 		if code != validate.ExitOK {
