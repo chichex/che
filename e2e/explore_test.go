@@ -205,6 +205,97 @@ func TestExplore_IssueMissingCtPlan_ClassifierFails_Exit2(t *testing.T) {
 	}
 }
 
+// TestExplore_IssueMissingCtPlan_ClassifierInvalidResponse_Exit3: el LLM
+// invoca OK pero devuelve JSON con type fuera del enum (o size inválido,
+// title vacío, items=[]) → explore aborta con exit 3 (ExitSemantic), no con
+// 2 (ExitRetry). Esto cubre la rama del sentinel idea.ErrInvalidResponse:
+// reintentar con la misma entrada va a alucinar de nuevo, así que el error
+// es irremediable y NO debe mapearse a ExitRetry. Como consecuencia: el
+// explorador no se invoca y no quedan labels parciales en el issue.
+func TestExplore_IssueMissingCtPlan_ClassifierInvalidResponse_Exit3(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 99`).RespondStdoutFromFixture("explore/gh_issue_view_without_ctplan.json", 0)
+	// Classifier invoca OK pero el JSON tiene type="bug" (fuera del enum
+	// feature/fix/mejora/ux) → idea.validate devuelve ErrInvalidResponse.
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`clasificador de ideas`).
+		RespondStdoutFromFixture("idea/sonnet_invalid_type.json", 0)
+
+	r := env.Run("explore", "99")
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3 (ExitSemantic via ErrInvalidResponse), got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+
+	inv := env.Invocations()
+	// El explorador NO debe invocarse — cortamos en reclassify.
+	for _, c := range inv.For("claude") {
+		joined := strings.Join(c.Args, " ")
+		if strings.Contains(joined, "ingeniero senior") {
+			t.Fatalf("explorer prompt should not be invoked when classifier response is invalid; got call with args=%v", c.Args)
+		}
+	}
+	// No labels parciales aplicados (el edit atómico nunca corre).
+	if edits := inv.FindCalls("gh", "issue", "edit", "99"); len(edits) > 0 {
+		t.Fatalf("expected no gh issue edit on invalid classifier response, got %+v", edits)
+	}
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) > 0 {
+		t.Fatalf("expected no gh issue comment on invalid classifier response, got %+v", comments)
+	}
+}
+
+// TestExplore_IssueMissingCtPlan_WithPreexistingStatus_PreservesStatus:
+// issue sin ct:plan pero con status:* preexistente (editado a mano) →
+// reclassify preserva el status y SOLO agrega ct:plan, sin meter un
+// status:idea arriba del status existente. Downstream, si ese status era
+// status:plan, el flow termina en "already explored" (ExitSemantic) porque
+// el gate decide después de reclassify mirando los labels resultantes.
+// Este test fija ese contrato — cuando se rediseñe el comportamiento,
+// flippear la aserción.
+func TestExplore_IssueMissingCtPlan_WithPreexistingStatus_PreservesStatus(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 55`).RespondStdoutFromFixture("explore/gh_issue_view_status_without_ctplan.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`clasificador de ideas`).
+		RespondStdoutFromFixture("idea/sonnet_single.json", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 55 `).RespondStdout("ok\n", 0)
+
+	r := env.Run("explore", "55")
+	// El issue queda con status:plan tras reclassify → gate downstream
+	// decide "already explored" y corta con ExitSemantic.
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3 (already explored tras reclassify que preserva status), got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "already")
+
+	inv := env.Invocations()
+	// El reclassify edit debe agregar SOLO ct:plan. No status:idea (porque
+	// ya hay status:plan), no type/size (ya estaban en el fixture).
+	edits := inv.FindCalls("gh", "issue", "edit", "55")
+	if len(edits) != 1 {
+		t.Fatalf("expected 1 gh issue edit (reclassify only; flow corta en gate), got %d", len(edits))
+	}
+	edits[0].AssertArgsContain(t, "--add-label", "ct:plan")
+	reclassArgs := strings.Join(edits[0].Args, " ")
+	if strings.Contains(reclassArgs, "status:idea") {
+		t.Fatalf("reclassify debería preservar status:plan y NO agregar status:idea; args=%v", edits[0].Args)
+	}
+	if strings.Contains(reclassArgs, "type:feature") || strings.Contains(reclassArgs, "size:m") {
+		t.Fatalf("reclassify debería preservar type/size existentes; args=%v", edits[0].Args)
+	}
+	// El explorador NO se invoca porque el gate post-reclassify rechaza.
+	for _, c := range inv.For("claude") {
+		joined := strings.Join(c.Args, " ")
+		if strings.Contains(joined, "ingeniero senior") {
+			t.Fatalf("explorer prompt should not be invoked when issue ends up already-planned; got args=%v", c.Args)
+		}
+	}
+}
+
 // TestExplore_IssueClosed_Exit3: issue is CLOSED → exit 3, stderr says so,
 // no claude call.
 func TestExplore_IssueClosed_Exit3(t *testing.T) {
