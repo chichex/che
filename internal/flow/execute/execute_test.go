@@ -1,14 +1,11 @@
 package execute
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	planpkg "github.com/chichex/che/internal/plan"
 )
@@ -18,7 +15,7 @@ func writeExecutable(path, content string) error {
 	return os.WriteFile(path, []byte(content), 0o755)
 }
 
-func getEnv(k string) string  { return os.Getenv(k) }
+func getEnv(k string) string   { return os.Getenv(k) }
 func setEnv(k, v string) error { return os.Setenv(k, v) }
 
 func TestGate(t *testing.T) {
@@ -31,6 +28,13 @@ func TestGate(t *testing.T) {
 			name: "ok",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
 				{Name: "ct:plan"}, {Name: "status:plan"},
+			}},
+			wantErr: "",
+		},
+		{
+			name: "ok with plan-validated:approve",
+			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
+				{Name: "ct:plan"}, {Name: "status:plan"}, {Name: "plan-validated:approve"},
 			}},
 			wantErr: "",
 		},
@@ -52,11 +56,20 @@ func TestGate(t *testing.T) {
 			wantErr: "executing",
 		},
 		{
-			name: "awaiting-human",
-			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "status:plan"}, {Name: "status:awaiting-human"},
+			name: "plan-validated:changes-requested blocks",
+			issue: Issue{Number: 42, State: "OPEN", Labels: []Label{
+				{Name: "ct:plan"}, {Name: "status:plan"},
+				{Name: "plan-validated:changes-requested"},
 			}},
-			wantErr: "awaiting-human",
+			wantErr: "plan-validated:changes-requested",
+		},
+		{
+			name: "plan-validated:needs-human blocks",
+			issue: Issue{Number: 42, State: "OPEN", Labels: []Label{
+				{Name: "ct:plan"}, {Name: "status:plan"},
+				{Name: "plan-validated:needs-human"},
+			}},
+			wantErr: "plan-validated:needs-human",
 		},
 		{
 			name: "not plan",
@@ -85,6 +98,23 @@ func TestGate(t *testing.T) {
 	}
 }
 
+// TestGate_ChangesRequestedErrorMentionsIterate: el mensaje de error del
+// gate debe guiar al usuario hacia `che iterate` cuando el plan fue
+// rechazado — evita tener que consultar el manual.
+func TestGate_ChangesRequestedErrorMentionsIterate(t *testing.T) {
+	issue := Issue{Number: 42, State: "OPEN", Labels: []Label{
+		{Name: "ct:plan"}, {Name: "status:plan"},
+		{Name: "plan-validated:changes-requested"},
+	}}
+	err := gate(&issue)
+	if err == nil {
+		t.Fatal("expected gate error")
+	}
+	if !strings.Contains(err.Error(), "che iterate 42") {
+		t.Errorf("expected error to mention `che iterate 42`; got: %v", err)
+	}
+}
+
 func TestParseAgent(t *testing.T) {
 	cases := []struct {
 		in      string
@@ -108,38 +138,6 @@ func TestParseAgent(t *testing.T) {
 		if got != c.want {
 			t.Errorf("ParseAgent(%q): got %v want %v", c.in, got, c.want)
 		}
-	}
-}
-
-func TestParseValidators(t *testing.T) {
-	cases := []struct {
-		in      string
-		wantLen int
-		wantErr bool
-	}{
-		{"", 0, false},
-		{"none", 0, false},
-		{"NONE", 0, false},
-		{"codex", 1, false},
-		{"codex,gemini", 2, false},
-		{"codex,codex,gemini", 3, false},
-		{"foo", 0, true},
-		{"codex,codex,codex,codex", 0, true},
-	}
-	for _, c := range cases {
-		got, err := ParseValidators(c.in)
-		if (err != nil) != c.wantErr {
-			t.Errorf("ParseValidators(%q): err=%v wantErr=%v", c.in, err, c.wantErr)
-			continue
-		}
-		if len(got) != c.wantLen {
-			t.Errorf("ParseValidators(%q): got %d items", c.in, len(got))
-		}
-	}
-	// Dedupe de instances:
-	got, _ := ParseValidators("codex,codex,gemini")
-	if got[0].Instance != 1 || got[1].Instance != 2 || got[2].Instance != 1 {
-		t.Errorf("instances wrong: %+v", got)
 	}
 }
 
@@ -210,14 +208,12 @@ func TestIsPlanEmpty(t *testing.T) {
 }
 
 // TestPreparePlan cubre la lógica de validación que gatea si un issue se
-// manda al agente o si cortamos con ExitSemantic. No invoca Run end-to-end
-// (eso requeriría mockear git/gh/repo) pero sí testea el contrato que usa
-// el branch de Run: cada error mappable a un mensaje accionable.
+// manda al agente o si cortamos con ExitSemantic.
 func TestPreparePlan(t *testing.T) {
 	cases := []struct {
 		name    string
 		body    string
-		wantErr error  // sentinel esperado (nil si ok)
+		wantErr error // sentinel esperado (nil si ok)
 		checkOk func(t *testing.T, p *ConsolidatedPlan)
 	}{
 		{
@@ -344,15 +340,12 @@ approach
 
 // TestPreparePlan_ErrorMessages valida que los mensajes accionables que Run
 // imprime a stderr (mapeados desde cada sentinel) contengan los tokens que
-// el operador espera ver. Es un shadow del switch en Run: si alguien cambia
-// los mensajes, este test se rompe y fuerza a mantener el contrato.
+// el operador espera ver. Es un shadow del switch en Run.
 func TestPreparePlan_ErrorMessages(t *testing.T) {
-	// No ejecutamos Run — reproducimos el switch localmente para cubrir que
-	// cada sentinel tiene un mensaje accionable distintivo.
 	cases := []struct {
 		name    string
 		err     error
-		wantSub []string // substrings esperados en el mensaje Run imprime
+		wantSub []string
 	}{
 		{
 			name:    "errPlanEmpty",
@@ -365,7 +358,6 @@ func TestPreparePlan_ErrorMessages(t *testing.T) {
 			wantSub: []string{"Plan consolidado", "sub-secciones", "che explore"},
 		},
 	}
-	// Mensajes copy-paste del switch en Run para detectar drift.
 	messages := map[error]string{
 		errPlanEmpty:    "error: issue #42 tiene el body vacío — agregá descripción o corré `che explore 42`\n",
 		errPlanDegraded: "error: issue #42 tiene '## Plan consolidado' pero las sub-secciones (Goal/Pasos/Criterios) no parsean — reconsolidalo con `che explore 42`\n",
@@ -408,33 +400,6 @@ func TestBuildPromptIncludesPlanSections(t *testing.T) {
 		if !strings.Contains(got, need) {
 			t.Errorf("prompt missing %q", need)
 		}
-	}
-}
-
-// TestWaitValidators_AllFinish: el wait drena N señales y retorna sin timeout,
-// emitiendo progreso acumulativo a stdout.
-func TestWaitValidators_AllFinish(t *testing.T) {
-	done := make(chan int, 2)
-	// Simulamos 2 validadores terminando en 10ms/20ms.
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		done <- 0
-		time.Sleep(10 * time.Millisecond)
-		done <- 1
-	}()
-	var buf bytes.Buffer
-	start := time.Now()
-	waitValidators(context.Background(), &buf, done, 2, 5*time.Second)
-	elapsed := time.Since(start)
-	if elapsed > 2*time.Second {
-		t.Fatalf("waitValidators took too long: %v", elapsed)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "(1/2)") || !strings.Contains(out, "(2/2)") {
-		t.Errorf("expected progress 1/2 and 2/2, got:\n%s", out)
-	}
-	if strings.Contains(out, "timeout:") {
-		t.Errorf("unexpected timeout message: %s", out)
 	}
 }
 
@@ -518,8 +483,7 @@ echo "  - Token scopes: 'read:org', 'repo:status'"
 
 // TestFindOpenPRForBranch_MultipleMatches: si gh pr list devuelve >1 PRs,
 // findOpenPRForBranch debe fallar con un mensaje accionable en vez de
-// agarrar el primero silenciosamente. Usamos un PATH temporal con un
-// script shell que simula gh — es más barato que armar un harness acá.
+// agarrar el primero silenciosamente.
 func TestFindOpenPRForBranch_MultipleMatches(t *testing.T) {
 	tmp := t.TempDir()
 	fakeGH := tmp + "/gh"
@@ -531,7 +495,6 @@ EOF
 	if err := writeExecutable(fakeGH, script); err != nil {
 		t.Fatalf("write fake gh: %v", err)
 	}
-	// Prepend tmp al PATH.
 	oldPath := getEnv("PATH")
 	setEnv("PATH", tmp+":"+oldPath)
 	t.Cleanup(func() { setEnv("PATH", oldPath) })
@@ -582,94 +545,23 @@ func TestFormatOpusLine(t *testing.T) {
 		name   string
 		line   string
 		wantOK bool
-		want   string // si wantOK, substring esperado
+		want   string
 	}{
-		{
-			name:   "empty",
-			line:   "",
-			wantOK: false,
-		},
-		{
-			name:   "whitespace",
-			line:   "   \t ",
-			wantOK: false,
-		},
-		{
-			name:   "non-json raw fallthrough",
-			line:   "ok",
-			wantOK: true,
-			want:   "ok",
-		},
-		{
-			name:   "malformed json falls through as raw",
-			line:   `{"type":"assistant"`,
-			wantOK: true,
-			want:   `{"type":"assistant"`,
-		},
-		{
-			name:   "system init",
-			line:   `{"type":"system","subtype":"init","session_id":"abc","tools":["Read","Edit"]}`,
-			wantOK: true,
-			want:   "sesión lista",
-		},
-		{
-			name:   "assistant tool_use Read",
-			line:   `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/repo/foo.go"}}]}}`,
-			wantOK: true,
-			want:   "Read /repo/foo.go",
-		},
-		{
-			name:   "assistant tool_use Edit",
-			line:   `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"internal/bar.go","old_string":"x","new_string":"y"}}]}}`,
-			wantOK: true,
-			want:   "Edit internal/bar.go",
-		},
-		{
-			name:   "assistant tool_use Bash",
-			line:   `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"go test ./..."}}]}}`,
-			wantOK: true,
-			want:   "Bash go test ./...",
-		},
-		{
-			name:   "assistant tool_use Bash truncated",
-			line:   `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"` + strings.Repeat("a", 200) + `"}}]}}`,
-			wantOK: true,
-			want:   "…",
-		},
-		{
-			name:   "assistant tool_use Grep",
-			line:   `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Grep","input":{"pattern":"foo.*bar","glob":"*.go"}}]}}`,
-			wantOK: true,
-			want:   "Grep foo.*bar",
-		},
-		{
-			name:   "assistant tool_use unknown tool only shows name",
-			line:   `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"SomethingNew","input":{"foo":"bar"}}]}}`,
-			wantOK: true,
-			want:   "SomethingNew",
-		},
-		{
-			name:   "assistant text-only is skipped",
-			line:   `{"type":"assistant","message":{"content":[{"type":"text","text":"Voy a leer el archivo..."}]}}`,
-			wantOK: false,
-		},
-		{
-			name:   "user tool_result is skipped",
-			line:   `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"..."}]}}`,
-			wantOK: false,
-		},
-		{
-			name:   "result success",
-			line:   `{"type":"result","subtype":"success","result":"done"}`,
-			wantOK: true,
-			want:   "OK",
-		},
-		{
-			name:   "result error",
-			line:   `{"type":"result","subtype":"error_max_turns"}`,
-			wantOK: true,
-			want:   "error_max_turns",
-		},
+		{name: "empty", line: "", wantOK: false},
+		{name: "whitespace", line: "   \t ", wantOK: false},
+		{name: "non-json raw fallthrough", line: "ok", wantOK: true, want: "ok"},
+		{name: "malformed json falls through as raw", line: `{"type":"assistant"`, wantOK: true, want: `{"type":"assistant"`},
+		{name: "system init", line: `{"type":"system","subtype":"init","session_id":"abc","tools":["Read","Edit"]}`, wantOK: true, want: "sesión lista"},
+		{name: "assistant tool_use Read", line: `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/repo/foo.go"}}]}}`, wantOK: true, want: "Read /repo/foo.go"},
+		{name: "assistant tool_use Edit", line: `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Edit","input":{"file_path":"internal/bar.go","old_string":"x","new_string":"y"}}]}}`, wantOK: true, want: "Edit internal/bar.go"},
+		{name: "assistant tool_use Bash", line: `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"go test ./..."}}]}}`, wantOK: true, want: "Bash go test ./..."},
+		{name: "assistant tool_use Bash truncated", line: `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"` + strings.Repeat("a", 200) + `"}}]}}`, wantOK: true, want: "…"},
+		{name: "assistant tool_use Grep", line: `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Grep","input":{"pattern":"foo.*bar","glob":"*.go"}}]}}`, wantOK: true, want: "Grep foo.*bar"},
+		{name: "assistant tool_use unknown tool only shows name", line: `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"SomethingNew","input":{"foo":"bar"}}]}}`, wantOK: true, want: "SomethingNew"},
+		{name: "assistant text-only is skipped", line: `{"type":"assistant","message":{"content":[{"type":"text","text":"Voy a leer el archivo..."}]}}`, wantOK: false},
+		{name: "user tool_result is skipped", line: `{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"..."}]}}`, wantOK: false},
+		{name: "result success", line: `{"type":"result","subtype":"success","result":"done"}`, wantOK: true, want: "OK"},
+		{name: "result error", line: `{"type":"result","subtype":"error_max_turns"}`, wantOK: true, want: "error_max_turns"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -684,106 +576,19 @@ func TestFormatOpusLine(t *testing.T) {
 	}
 }
 
-// TestWaitValidators_Timeout: si el timeout expira antes de que terminen
-// todos, retorna sin bloquear y loguea cuántos quedaron.
-func TestWaitValidators_Timeout(t *testing.T) {
-	done := make(chan int, 2)
-	// Solo 1 de 2 termina dentro del timeout.
-	go func() {
-		done <- 0
-	}()
-	var buf bytes.Buffer
-	start := time.Now()
-	waitValidators(context.Background(), &buf, done, 2, 50*time.Millisecond)
-	elapsed := time.Since(start)
-	if elapsed > 1*time.Second {
-		t.Fatalf("waitValidators did not respect timeout: %v", elapsed)
-	}
-	out := buf.String()
-	if !strings.Contains(out, "timeout:") {
-		t.Errorf("expected timeout message, got:\n%s", out)
-	}
-	if !strings.Contains(out, "1/2") {
-		t.Errorf("expected 1/2 completaron, got:\n%s", out)
-	}
-}
-
-// TestRenderValidatorComment_HeaderPrefix protege el wiring: el body del PR
-// comment que postea execute tiene que empezar con el HTML comment de che
-// (flow=execute, iter=N, agent=..., instance=..., role=validator) seguido del
-// cuerpo. Si alguien rompe el Sprintf o cambia el orden, este test lo
-// atrapa sin tocar la red ni el agente.
-func TestRenderValidatorComment_HeaderPrefix(t *testing.T) {
-	v := Validator{Agent: AgentOpus, Instance: 1}
-	got := renderValidatorComment(2, v, "findings del agente\n")
-
-	wantPrefix := "<!-- claude-cli: flow=execute iter=2 agent=opus instance=1 role=validator -->\n"
-	if !strings.HasPrefix(got, wantPrefix) {
-		t.Fatalf("body no arranca con el header esperado\n got:  %q\n want: prefix %q", got, wantPrefix)
-	}
-	if !strings.Contains(got, "## Validator opus#1") {
-		t.Errorf("falta el sub-header del validator en el body:\n%s", got)
-	}
-	if !strings.Contains(got, "findings del agente") {
-		t.Errorf("falta el output del agente en el body:\n%s", got)
-	}
-}
-
-// TestRenderValidatorComment_IterPropagated asegura que el iter que recibe
-// renderValidatorComment es el que termina en el header — Codex marcó este
-// punto: cuando execute reusa un PR existente, el iter tiene que numerar la
-// nueva tanda, no quedar fijo en 1.
-func TestRenderValidatorComment_IterPropagated(t *testing.T) {
-	for _, iter := range []int{1, 2, 7} {
-		got := renderValidatorComment(iter, Validator{Agent: AgentCodex, Instance: 2}, "x")
-		want := fmt.Sprintf("iter=%d", iter)
-		if !strings.Contains(got, want) {
-			t.Errorf("iter=%d no aparece en el header:\n%s", iter, got)
+// TestRenderIssueComment_LinksPR: el comment final al issue debe tener el
+// header estructurado + link al PR + hint sobre `che validate`. Sin el
+// hint, los usuarios nuevos no saben qué paso sigue.
+func TestRenderIssueComment_LinksPR(t *testing.T) {
+	got := renderIssueComment("https://github.com/acme/demo/pull/7")
+	for _, need := range []string{
+		"<!-- claude-cli: flow=execute",
+		"https://github.com/acme/demo/pull/7",
+		"status:executed",
+		"che validate",
+	} {
+		if !strings.Contains(got, need) {
+			t.Errorf("issue comment missing %q; got:\n%s", need, got)
 		}
-	}
-}
-
-// TestNextValidatorIter_Empty y sus hermanos cubren la lógica del selector
-// de iter que corre en el caller antes de fireValidators. Sin estos tests,
-// la fix del hardcoded iter=1 queda sin cobertura y puede regresar.
-func TestNextValidatorIter_Empty(t *testing.T) {
-	if got := nextValidatorIter(nil); got != 1 {
-		t.Errorf("sin comments previos, iter debe ser 1; got %d", got)
-	}
-	if got := nextValidatorIter([]PRComment{}); got != 1 {
-		t.Errorf("con slice vacío, iter debe ser 1; got %d", got)
-	}
-}
-
-func TestNextValidatorIter_IgnoraComentariosAjenos(t *testing.T) {
-	cs := []PRComment{
-		{Body: "hola humano aquí, sin header"},
-		{Body: "<!-- claude-cli: flow=explore iter=3 role=executor -->\nplan"},
-		{Body: "<!-- claude-cli: flow=execute iter=4 role=pr-link -->\ncomment al issue"},
-	}
-	if got := nextValidatorIter(cs); got != 1 {
-		t.Errorf("comments de otros flows/roles no deben contar; got %d", got)
-	}
-}
-
-func TestNextValidatorIter_MaxPlusOne(t *testing.T) {
-	cs := []PRComment{
-		{Body: renderValidatorComment(1, Validator{Agent: AgentOpus, Instance: 1}, "a")},
-		{Body: renderValidatorComment(1, Validator{Agent: AgentCodex, Instance: 1}, "b")},
-		{Body: renderValidatorComment(2, Validator{Agent: AgentOpus, Instance: 1}, "c")},
-	}
-	if got := nextValidatorIter(cs); got != 3 {
-		t.Errorf("max(iter)=2 → next=3; got %d", got)
-	}
-}
-
-// TestNextValidatorIter_ReusaRealRoundTrip arma un body como el que postearía
-// execute (via renderValidatorComment) y verifica que nextValidatorIter lo
-// parsea correctamente. Esto ata los dos extremos del contrato: lo que
-// escribimos es lo que después sabemos leer.
-func TestNextValidatorIter_ReusaRealRoundTrip(t *testing.T) {
-	body := renderValidatorComment(5, Validator{Agent: AgentGemini, Instance: 1}, "findings\n")
-	if got := nextValidatorIter([]PRComment{{Body: body}}); got != 6 {
-		t.Errorf("round-trip: iter posteado=5, siguiente debería ser 6; got %d", got)
 	}
 }
