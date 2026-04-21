@@ -2,6 +2,7 @@ package e2e_test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -62,10 +63,11 @@ func TestClose_ClosedPR_Exit3(t *testing.T) {
 func TestClose_ChangesRequestedLabel_WarnsButProceeds(t *testing.T) {
 	env := setupCloseEnv(t)
 	scriptClosePrechecks(env)
+	env.SetEnv("CHE_CLOSE_SKIP_REMOTE_CHECK", "1")
 
 	env.ExpectGh(`^pr view 7`).RespondStdoutFromFixture("close/gh_pr_view_changes_requested.json", 0)
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
-	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^pr merge 7 --merge --delete-branch$`).RespondStdout("Merged\n", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
@@ -77,18 +79,22 @@ func TestClose_ChangesRequestedLabel_WarnsButProceeds(t *testing.T) {
 	// El warning aparece en stderr pero no bloquea.
 	harness.AssertContains(t, r.Stderr, "changes-requested")
 	harness.AssertContains(t, r.Stderr, "warning")
-	// Sí debe haber mergeado.
-	if merges := env.Invocations().FindCalls("gh", "pr merge 7 --merge"); len(merges) != 1 {
-		t.Fatalf("expected 1 gh pr merge call, got %d", len(merges))
+	// Sí debe haber mergeado con --delete-branch.
+	if merges := env.Invocations().FindCalls("gh", "pr merge 7 --merge --delete-branch"); len(merges) != 1 {
+		t.Fatalf("expected 1 gh pr merge --delete-branch call, got %d", len(merges))
 	}
 }
 
 // TestClose_GoldenPath_DraftToReadyAndMerge: PR draft, CI verde, sin
 // conflictos → pasa a ready, merge, cierra issue asociado, transiciona
-// labels status:executed → status:closed.
+// labels status:executed → status:closed. También verifica que el merge
+// invoca --delete-branch (default de che close).
 func TestClose_GoldenPath_DraftToReadyAndMerge(t *testing.T) {
 	env := setupCloseEnv(t)
 	scriptClosePrechecks(env)
+	// Skip el ls-remote pre-merge: el fixture origin apunta a una URL
+	// bogus y no queremos network flakiness en el happy path.
+	env.SetEnv("CHE_CLOSE_SKIP_REMOTE_CHECK", "1")
 
 	// FetchPR inicial (gate) + FetchPR dentro del loop (iter 1). Ambas
 	// devuelven el mismo fixture — el paso a ready no es visible al fake.
@@ -100,8 +106,8 @@ func TestClose_GoldenPath_DraftToReadyAndMerge(t *testing.T) {
 	// FetchChecks iter 1 — todos SUCCESS.
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
 
-	// Merge.
-	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged PR #7\n", 0)
+	// Merge con --delete-branch (default).
+	env.ExpectGh(`^pr merge 7 --merge --delete-branch$`).RespondStdout("Merged PR #7\n", 0)
 
 	// Cerrar issue + transition labels (executed → closed).
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
@@ -111,6 +117,8 @@ func TestClose_GoldenPath_DraftToReadyAndMerge(t *testing.T) {
 	out := env.MustRun("close", "7")
 	harness.AssertContains(t, out, "Closed PR https://github.com/acme/demo/pull/7")
 	harness.AssertContains(t, out, "#42")
+	// Confirma que el delete se reporta en stdout.
+	harness.AssertContains(t, out, "Deleted branch exec/42-nuevo-flow")
 
 	inv := env.Invocations()
 	// Needles compuestos: "pr merge" y "issue close" evitan que
@@ -119,8 +127,8 @@ func TestClose_GoldenPath_DraftToReadyAndMerge(t *testing.T) {
 	if reads := inv.FindCalls("gh", "pr ready 7"); len(reads) != 1 {
 		t.Fatalf("expected 1 gh pr ready call, got %d", len(reads))
 	}
-	if merges := inv.FindCalls("gh", "pr merge 7 --merge"); len(merges) != 1 {
-		t.Fatalf("expected 1 gh pr merge call, got %d", len(merges))
+	if merges := inv.FindCalls("gh", "pr merge 7 --merge --delete-branch"); len(merges) != 1 {
+		t.Fatalf("expected 1 gh pr merge --delete-branch call, got %d", len(merges))
 	}
 	if closes := inv.FindCalls("gh", "issue close 42"); len(closes) != 1 {
 		t.Fatalf("expected 1 gh issue close call, got %d", len(closes))
@@ -140,6 +148,7 @@ func TestClose_GoldenPath_DraftToReadyAndMerge(t *testing.T) {
 func TestClose_NotDraft_SkipsReady(t *testing.T) {
 	env := setupCloseEnv(t)
 	scriptClosePrechecks(env)
+	env.SetEnv("CHE_CLOSE_SKIP_REMOTE_CHECK", "1")
 
 	// Custom fixture inline: copy del clean pero isDraft=false.
 	env.ExpectGh(`^pr view 7`).RespondStdout(`{
@@ -157,7 +166,7 @@ func TestClose_NotDraft_SkipsReady(t *testing.T) {
 }`, 0)
 
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
-	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^pr merge 7 --merge --delete-branch$`).RespondStdout("Merged\n", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
@@ -165,6 +174,221 @@ func TestClose_NotDraft_SkipsReady(t *testing.T) {
 	_ = env.MustRun("close", "7")
 	if readys := env.Invocations().FindCalls("gh", "pr ready"); len(readys) != 0 {
 		t.Fatalf("expected 0 gh pr ready calls on non-draft PR, got %d", len(readys))
+	}
+}
+
+// TestClose_KeepBranch_PreservesBranchAndWorktree: con --keep-branch el
+// merge NO debe incluir --delete-branch y el stdout anuncia la preservación.
+func TestClose_KeepBranch_PreservesBranchAndWorktree(t *testing.T) {
+	env := setupCloseEnv(t)
+	scriptClosePrechecks(env)
+	env.SetEnv("CHE_CLOSE_SKIP_REMOTE_CHECK", "1")
+
+	env.ExpectGh(`^pr view 7`).RespondStdout(`{
+  "number": 7,
+  "title": "feat: keep branch",
+  "url": "https://github.com/acme/demo/pull/7",
+  "state": "OPEN",
+  "isDraft": false,
+  "headRefName": "feat/preserved",
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "CLEAN",
+  "author": {"login": "acme-bot"},
+  "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
+  "labels": []
+}`, 0)
+
+	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
+	// Crucial: merge SIN --delete-branch.
+	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("close", "7", "--keep-branch")
+	harness.AssertContains(t, out, "Keeping branch feat/preserved (--keep-branch)")
+
+	inv := env.Invocations()
+	// Sin --delete-branch en los args.
+	if merges := inv.FindCalls("gh", "pr merge 7 --merge"); len(merges) != 1 {
+		t.Fatalf("expected 1 gh pr merge call, got %d", len(merges))
+	}
+	if deletes := inv.FindCalls("gh", "pr merge", "--delete-branch"); len(deletes) != 0 {
+		t.Fatalf("expected 0 gh pr merge --delete-branch calls (--keep-branch passed), got %d", len(deletes))
+	}
+}
+
+// TestClose_Default_CleansCheManagedWorktree: happy path con un worktree
+// real bajo `.worktrees/issue-42/` checkouteado en la head branch del PR.
+// Tras mergear, che close debe remover el worktree y borrar la branch local.
+func TestClose_Default_CleansCheManagedWorktree(t *testing.T) {
+	env := setupCloseEnv(t)
+	scriptClosePrechecks(env)
+	env.SetEnv("CHE_CLOSE_SKIP_REMOTE_CHECK", "1")
+
+	branch := "feat/managed"
+	wtPath := filepath.Join(env.RepoDir, ".worktrees", "issue-42")
+	runIn(t, env.RepoDir, "git", "branch", branch)
+	runIn(t, env.RepoDir, "git", "worktree", "add", wtPath, branch)
+
+	env.ExpectGh(`^pr view 7`).RespondStdout(`{
+  "number": 7,
+  "title": "feat: managed worktree",
+  "url": "https://github.com/acme/demo/pull/7",
+  "state": "OPEN",
+  "isDraft": false,
+  "headRefName": "feat/managed",
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "CLEAN",
+  "author": {"login": "acme-bot"},
+  "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
+  "labels": []
+}`, 0)
+	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
+	env.ExpectGh(`^pr merge 7 --merge --delete-branch$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	_ = env.MustRun("close", "7")
+
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatalf("expected che-managed worktree %s to be removed, but it still exists (err=%v)", wtPath, err)
+	}
+	if branchExists(t, env.RepoDir, branch) {
+		t.Fatalf("expected local branch %s to be deleted after merge cleanup", branch)
+	}
+}
+
+// TestClose_KeepBranch_PreservesCheManagedWorktree: con --keep-branch,
+// incluso sobre un worktree real bajo `.worktrees/`, ni el worktree ni la
+// branch local se deben tocar. Contrato público del flag (antes teníamos
+// un bug: el cleanup corría igual si el worktree era wtOwned, contradiciendo
+// el help del flag).
+func TestClose_KeepBranch_PreservesCheManagedWorktree(t *testing.T) {
+	env := setupCloseEnv(t)
+	scriptClosePrechecks(env)
+	env.SetEnv("CHE_CLOSE_SKIP_REMOTE_CHECK", "1")
+
+	branch := "feat/preserved-real"
+	wtPath := filepath.Join(env.RepoDir, ".worktrees", "issue-42")
+	runIn(t, env.RepoDir, "git", "branch", branch)
+	runIn(t, env.RepoDir, "git", "worktree", "add", wtPath, branch)
+
+	env.ExpectGh(`^pr view 7`).RespondStdout(`{
+  "number": 7,
+  "title": "feat: keep real worktree",
+  "url": "https://github.com/acme/demo/pull/7",
+  "state": "OPEN",
+  "isDraft": false,
+  "headRefName": "feat/preserved-real",
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "CLEAN",
+  "author": {"login": "acme-bot"},
+  "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
+  "labels": []
+}`, 0)
+	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
+	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	_ = env.MustRun("close", "7", "--keep-branch")
+
+	if _, err := os.Stat(wtPath); err != nil {
+		t.Fatalf("expected worktree %s to be preserved with --keep-branch, but stat failed: %v", wtPath, err)
+	}
+	if !branchExists(t, env.RepoDir, branch) {
+		t.Fatalf("expected local branch %s to be preserved with --keep-branch", branch)
+	}
+}
+
+// TestClose_Default_DoesNotTouchMainWorktree: si la head branch del PR
+// está checkouteada en el worktree principal (el cwd del usuario), che
+// close NO debe hacer `checkout --detach` ni `branch -D` — dejar el repo
+// en detached HEAD sería un side effect no anunciado. Es el blocker
+// identificado por el validador codex en iter 1.
+func TestClose_Default_DoesNotTouchMainWorktree(t *testing.T) {
+	env := setupCloseEnv(t)
+	scriptClosePrechecks(env)
+	env.SetEnv("CHE_CLOSE_SKIP_REMOTE_CHECK", "1")
+
+	branch := "feat/on-main"
+	// Checkoutear la branch en el worktree principal.
+	runIn(t, env.RepoDir, "git", "checkout", "-b", branch)
+
+	env.ExpectGh(`^pr view 7`).RespondStdout(`{
+  "number": 7,
+  "title": "feat: on main worktree",
+  "url": "https://github.com/acme/demo/pull/7",
+  "state": "OPEN",
+  "isDraft": false,
+  "headRefName": "feat/on-main",
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "CLEAN",
+  "author": {"login": "acme-bot"},
+  "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
+  "labels": []
+}`, 0)
+	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
+	env.ExpectGh(`^pr merge 7 --merge --delete-branch$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	_ = env.MustRun("close", "7")
+
+	// HEAD del main debe seguir attached a la branch (no detached).
+	head := gitOutput(t, env.RepoDir, "symbolic-ref", "--quiet", "HEAD")
+	if head != "refs/heads/"+branch {
+		t.Fatalf("expected main HEAD to stay attached to %s, got %q (detached HEAD means che touched the main worktree)", branch, head)
+	}
+	if !branchExists(t, env.RepoDir, branch) {
+		t.Fatalf("expected local branch %s to remain (che should not branch -D when the branch is on the main worktree)", branch)
+	}
+}
+
+// TestClose_Default_DoesNotTouchExternalWorktree: si la head branch está
+// checkouteada en un worktree que el usuario creó fuera de `.worktrees/`,
+// che close NO debe removerlo ni borrar la branch. Esos worktrees son del
+// usuario — che solo administra los que vos crea bajo `.worktrees/`.
+func TestClose_Default_DoesNotTouchExternalWorktree(t *testing.T) {
+	env := setupCloseEnv(t)
+	scriptClosePrechecks(env)
+	env.SetEnv("CHE_CLOSE_SKIP_REMOTE_CHECK", "1")
+
+	branch := "feat/external"
+	externalPath := filepath.Join(t.TempDir(), "user-worktree")
+	runIn(t, env.RepoDir, "git", "branch", branch)
+	runIn(t, env.RepoDir, "git", "worktree", "add", externalPath, branch)
+
+	env.ExpectGh(`^pr view 7`).RespondStdout(`{
+  "number": 7,
+  "title": "feat: external worktree",
+  "url": "https://github.com/acme/demo/pull/7",
+  "state": "OPEN",
+  "isDraft": false,
+  "headRefName": "feat/external",
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "CLEAN",
+  "author": {"login": "acme-bot"},
+  "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
+  "labels": []
+}`, 0)
+	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
+	env.ExpectGh(`^pr merge 7 --merge --delete-branch$`).RespondStdout("Merged\n", 0)
+	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
+
+	_ = env.MustRun("close", "7")
+
+	if _, err := os.Stat(externalPath); err != nil {
+		t.Fatalf("expected external worktree %s to be preserved, stat failed: %v", externalPath, err)
+	}
+	if !branchExists(t, env.RepoDir, branch) {
+		t.Fatalf("expected local branch %s to remain (not a che-managed worktree)", branch)
 	}
 }
 
@@ -279,4 +503,23 @@ func setupCloseEnv(t *testing.T) *harness.Env {
 func scriptClosePrechecks(env *harness.Env) {
 	env.ExpectGh(`^auth status$`).Consumable().
 		RespondStdout("Logged in as acme\n", 0)
+}
+
+// branchExists devuelve true si refs/heads/<branch> existe en el repo.
+func branchExists(t *testing.T, repoDir, branch string) bool {
+	t.Helper()
+	cmd := exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--quiet", "refs/heads/"+branch)
+	return cmd.Run() == nil
+}
+
+// gitOutput corre `git -C repoDir args...` y devuelve stdout trim. Falla
+// el test si el comando falla. Útil para leer HEAD, branch actual, etc.
+func gitOutput(t *testing.T, repoDir string, args ...string) string {
+	t.Helper()
+	full := append([]string{"-C", repoDir}, args...)
+	out, err := exec.Command("git", full...).Output()
+	if err != nil {
+		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(out))
 }

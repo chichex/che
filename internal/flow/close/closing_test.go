@@ -1,6 +1,7 @@
 package closing
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -393,6 +394,154 @@ func TestGroupCloseable(t *testing.T) {
 				if gotBlocked[i] != c.wantBlocked[i] {
 					t.Errorf("blocked[%d]: want %d, got %d", i, c.wantBlocked[i], gotBlocked[i])
 				}
+			}
+		})
+	}
+}
+
+func TestMergePRArgs(t *testing.T) {
+	cases := []struct {
+		name       string
+		ref        string
+		keepBranch bool
+		want       []string
+	}{
+		{
+			name:       "default: merge con --delete-branch",
+			ref:        "7",
+			keepBranch: false,
+			want:       []string{"pr", "merge", "7", "--merge", "--delete-branch"},
+		},
+		{
+			name:       "--keep-branch omite --delete-branch",
+			ref:        "7",
+			keepBranch: true,
+			want:       []string{"pr", "merge", "7", "--merge"},
+		},
+		{
+			name:       "ref URL funciona igual",
+			ref:        "https://github.com/acme/demo/pull/7",
+			keepBranch: false,
+			want:       []string{"pr", "merge", "https://github.com/acme/demo/pull/7", "--merge", "--delete-branch"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := mergePRArgs(c.ref, c.keepBranch)
+			if len(got) != len(c.want) {
+				t.Fatalf("got %v, want %v", got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("got %v, want %v", got, c.want)
+				}
+			}
+		})
+	}
+}
+
+// TestShouldCleanupWorktree codifica el contrato público de
+// shouldCleanupWorktree, usado por el defer de Run para decidir si el
+// worktree asociado al PR debe removerse al terminar.
+//
+// Casos de contrato:
+//   - --keep-branch: preserva SIEMPRE, aunque el worktree lo hayamos creado
+//     (el validador de v0.0.32 detectó que el comportamiento anterior
+//     contradecía el help del flag).
+//   - happy path sin --keep-branch: limpia el worktree asociado.
+//   - failure path: limpia solo si lo creamos en este run (no dejar residuo
+//     propio), pero no tocamos worktrees reusados.
+func TestShouldCleanupWorktree(t *testing.T) {
+	cases := []struct {
+		name       string
+		mergedOK   bool
+		keepBranch bool
+		wtOwned    bool
+		want       bool
+	}{
+		{"happy path sin flags: borra todo", true, false, false, true},
+		{"happy path con --keep-branch: preserva", true, true, false, false},
+		{"happy path con --keep-branch, worktree owned: igual preserva (keep-branch manda)", true, true, true, false},
+		{"happy path con worktree owned: borra", true, false, true, true},
+		{"early-return con worktree owned: limpia residuo propio", false, false, true, true},
+		{"early-return sin worktree owned: no toca nada", false, false, false, false},
+		{"early-return con --keep-branch sin owned: no toca nada", false, true, false, false},
+		{"early-return con --keep-branch y owned: preserva (keep-branch manda)", false, true, true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := shouldCleanupWorktree(c.mergedOK, c.keepBranch, c.wtOwned)
+			if got != c.want {
+				t.Fatalf("shouldCleanupWorktree(mergedOK=%v, keepBranch=%v, wtOwned=%v) = %v, want %v",
+					c.mergedOK, c.keepBranch, c.wtOwned, got, c.want)
+			}
+		})
+	}
+}
+
+// TestBranchOutcomeMessage cubre las tres ramas del stdout post-merge:
+// keep-branch, "already removed" (auto-delete pre-merge detectado), y el
+// caso default "Deleted branch". El branch "already removed" no se ejerce
+// en e2e porque allí seteamos CHE_CLOSE_SKIP_REMOTE_CHECK=1 (que fuerza
+// preRemoteKnown=false), así que este unit test es la única protección
+// contra regresiones en ese mensaje.
+func TestBranchOutcomeMessage(t *testing.T) {
+	cases := []struct {
+		name             string
+		branch           string
+		keepBranch       bool
+		preRemoteKnown   bool
+		preRemoteMissing bool
+		want             string
+	}{
+		{"keep-branch manda sobre todo lo demás", "feat/x", true, true, true, "Keeping branch feat/x (--keep-branch)"},
+		{"keep-branch sin info de remote", "feat/x", true, false, false, "Keeping branch feat/x (--keep-branch)"},
+		{"already removed: known + missing", "feat/x", false, true, true, "Branch feat/x already removed"},
+		{"deleted: remote conocido y presente pre-merge", "feat/x", false, true, false, "Deleted branch feat/x"},
+		{"deleted: remote desconocido (skip-check / red caída)", "feat/x", false, false, false, "Deleted branch feat/x"},
+		{"deleted: known=false ignora preRemoteMissing=true", "feat/x", false, false, true, "Deleted branch feat/x"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := branchOutcomeMessage(c.branch, c.keepBranch, c.preRemoteKnown, c.preRemoteMissing)
+			if got != c.want {
+				t.Fatalf("branchOutcomeMessage(%q, keep=%v, known=%v, missing=%v) = %q, want %q",
+					c.branch, c.keepBranch, c.preRemoteKnown, c.preRemoteMissing, got, c.want)
+			}
+		})
+	}
+}
+
+// TestIsCheManagedWorktree verifica que solo aceptamos paths bajo
+// `<repoRoot>/.worktrees/` como gestionados por che — el cleanup depende
+// de esto para no tocar el worktree principal ni worktrees del usuario.
+func TestIsCheManagedWorktree(t *testing.T) {
+	root := t.TempDir()
+	// Crear el árbol real — canonPath resuelve symlinks (macOS /var vs
+	// /private/var) y para ser consistente necesita que los paths existan.
+	mustMkdir := func(p string) {
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", p, err)
+		}
+	}
+	mustMkdir(filepath.Join(root, ".worktrees", "issue-42", "sub"))
+	externalDir := t.TempDir()
+
+	cases := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"worktree bajo .worktrees/", filepath.Join(root, ".worktrees", "issue-42"), true},
+		{"worktree anidado bajo .worktrees/", filepath.Join(root, ".worktrees", "issue-42", "sub"), true},
+		{"repoRoot directo NO es managed", root, false},
+		{".worktrees/ mismo NO es managed (hay que estar dentro)", filepath.Join(root, ".worktrees"), false},
+		{"directorio afuera del repo", externalDir, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := isCheManagedWorktree(root, c.path); got != c.want {
+				t.Fatalf("isCheManagedWorktree(%q, %q) = %v, want %v", root, c.path, got, c.want)
 			}
 		})
 	}
