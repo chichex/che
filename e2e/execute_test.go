@@ -408,3 +408,200 @@ func scriptExecutePrechecks(env *harness.Env) {
 	env.ExpectGh(`^auth status -t`).Consumable().RespondStdout(
 		"github.com\n  - Token: gho_xxx\n  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'\n", 0)
 }
+
+// TestExecute_PreviousPRMerged_CreatesNewPR: si hubo un PR previo para esta
+// branch que ya fue mergeado a main, `findOpenPRForBranch` lo filtra (usa
+// `--state open`) y el flow crea un PR nuevo contra main con los commits del
+// re-run. Contrato: merged no bloquea; se abre uno nuevo. Si alguien sacara
+// `--state open` del query, este test rompe porque encontraría el PR mergeado
+// y dispararía el path de "reuse" en vez de crear.
+func TestExecute_PreviousPRMerged_CreatesNewPR(t *testing.T) {
+	env := setupExecuteEnv(t)
+	scriptExecutePrechecks(env)
+	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("execute/gh_issue_view_ready.json", 0)
+
+	// PR previo mergeado → `gh pr list --state open` devuelve lista vacía.
+	env.ExpectGh(`^pr list --head exec/42-`).RespondStdout("[]\n", 0)
+
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0)
+
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior ejecutando`).
+		TouchFile("FOLLOWUP.md", "follow-up iteration\n").
+		RespondStdout("ok\n", 0)
+
+	// Se crea un PR nuevo — no reuse.
+	env.ExpectGh(`^pr create --draft`).
+		RespondStdout("https://github.com/acme/demo/pull/99\n", 0)
+
+	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue comment 42 --body-file`).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("execute", "--validators", "none", "42")
+	harness.AssertContains(t, out, "https://github.com/acme/demo/pull/99")
+
+	inv := env.Invocations()
+	// Contrato #1: la query siempre filtra por `--state open`.
+	prLists := inv.FindCalls("gh", "pr", "list", "--head")
+	if len(prLists) != 1 {
+		t.Fatalf("expected 1 gh pr list call, got %d", len(prLists))
+	}
+	prLists[0].AssertArgsContain(t, "--state", "open")
+
+	// Contrato #2: PR nuevo creado contra main (no se intentó reusar).
+	creates := inv.FindCalls("gh", "pr", "create")
+	if len(creates) != 1 {
+		t.Fatalf("expected 1 gh pr create, got %d", len(creates))
+	}
+	creates[0].AssertArgsContain(t, "--base", "main", "--draft")
+}
+
+// TestExecute_PreviousPRClosed_NoAutoReopen: si hubo un PR previo cerrado
+// SIN merge, `gh pr list --state open` también devuelve []. El flow intenta
+// `gh pr create`, que falla porque GitHub exige reopen explícito. El código
+// actual NO reabre automáticamente — retorna exit 2 con rollback de label.
+// El operador debe ejecutar `gh pr reopen <n>` a mano para reanudar.
+//
+// Si en el futuro se agrega auto-reopen, este test debe cambiarse para
+// esperar exit 0 y que `gh pr reopen` aparezca en las invocaciones.
+func TestExecute_PreviousPRClosed_NoAutoReopen(t *testing.T) {
+	env := setupExecuteEnv(t)
+	scriptExecutePrechecks(env)
+	// 1er view (gate): status:plan. 2do view (rollback): status:executing.
+	env.ExpectGh(`^issue view 42`).Consumable().RespondStdoutFromFixture("execute/gh_issue_view_ready.json", 0)
+	env.ExpectGh(`^issue view 42`).Consumable().RespondStdoutFromFixture("execute/gh_issue_view_locked_executing.json", 0)
+
+	env.ExpectGh(`^pr list --head exec/42-`).RespondStdout("[]\n", 0)
+
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0) // lock
+	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0) // rollback
+
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior ejecutando`).
+		TouchFile("IMPL.md", "work\n").
+		RespondStdout("ok\n", 0)
+
+	// gh pr create falla con el error específico que emite gh cuando hay
+	// un PR cerrado existente para la misma head-branch.
+	env.ExpectGh(`^pr create --draft`).RespondExitWithError(1,
+		"a pull request for branch \"exec/42-implementar-comando-che-execute\" into branch \"main\" already exists:\n"+
+			"https://github.com/acme/demo/pull/7\n"+
+			"To reopen the PR, use `gh pr reopen`\n")
+
+	r := env.Run("execute", "--validators", "none", "42")
+	if r.ExitCode != 2 {
+		t.Fatalf("expected exit 2 (retry), got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	// El stderr del gh se propaga al flow para que el operador vea la
+	// sugerencia de reopen sin tener que revisar el PR a mano.
+	harness.AssertContains(t, r.Stderr, "gh pr reopen")
+
+	inv := env.Invocations()
+	// Se intentó crear una sola vez (no hay retry automático).
+	creates := inv.FindCalls("gh", "pr", "create")
+	if len(creates) != 1 {
+		t.Fatalf("expected 1 gh pr create attempt, got %d", len(creates))
+	}
+	// El flow NO reabre PRs cerrados automáticamente.
+	if reopens := inv.FindCalls("gh", "pr", "reopen"); len(reopens) != 0 {
+		t.Fatalf("expected 0 gh pr reopen (auto-reopen no implementado), got %d", len(reopens))
+	}
+	// Rollback aplicado: 2 edits (lock + rollback a status:plan).
+	edits := inv.FindCalls("gh", "issue", "edit", "42")
+	if len(edits) != 2 {
+		t.Fatalf("expected 2 issue edits (lock + rollback), got %d", len(edits))
+	}
+	edits[1].AssertArgsContain(t, "--add-label", "status:plan")
+}
+
+// TestExecute_PRCreateFails_PostPush_CleanupCorrect: si `gh pr create` falla
+// después de que el push ya tuvo éxito (rate limit, network, scope transitorio),
+// el flow aplica rollback:
+//   - label: status:executing → status:plan (ownership-aware).
+//   - worktree local: .worktrees/issue-N removido.
+//   - branch local: exec/N-slug borrada.
+//   - branch remota: PERMANECE en el origin (el push ya consumó). Esto es
+//     intencional — un segundo `che execute` puede reusar el push sin re-subir
+//     el diff, y borrarla exigiría un `git push --delete` que puede fallar
+//     silenciosamente y dejar basura indetectable.
+//   - exit 2 (remediable).
+func TestExecute_PRCreateFails_PostPush_CleanupCorrect(t *testing.T) {
+	env := setupExecuteEnv(t)
+	scriptExecutePrechecks(env)
+	env.ExpectGh(`^issue view 42`).Consumable().RespondStdoutFromFixture("execute/gh_issue_view_ready.json", 0)
+	env.ExpectGh(`^issue view 42`).Consumable().RespondStdoutFromFixture("execute/gh_issue_view_locked_executing.json", 0)
+
+	env.ExpectGh(`^pr list --head exec/42-`).RespondStdout("[]\n", 0)
+
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0) // lock
+	env.ExpectGh(`^issue edit 42 `).Consumable().RespondStdout("ok\n", 0) // rollback
+
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior ejecutando`).
+		TouchFile("FEATURE.md", "done\n").
+		RespondStdout("ok\n", 0)
+
+	// Falla genérica post-push: rate limit.
+	env.ExpectGh(`^pr create --draft`).RespondExitWithError(1,
+		"API rate limit exceeded; try again in 30 minutes\n")
+
+	r := env.Run("execute", "--validators", "none", "42")
+	if r.ExitCode != 2 {
+		t.Fatalf("expected exit 2 (retry), got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "rate limit")
+
+	// Cleanup local #1: worktree removido.
+	wtPath := filepath.Join(env.RepoDir, ".worktrees", "issue-42")
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatalf("expected worktree %s removed, got stat err=%v", wtPath, err)
+	}
+
+	// Cleanup local #2: branch local (exec/42-*) borrada.
+	localBranches := gitListBranches(t, env.RepoDir, "exec/42-*")
+	if localBranches != "" {
+		t.Fatalf("expected exec/42-* local branch deleted, got: %q", localBranches)
+	}
+
+	// Cleanup remoto: branch remota SIGUE en el bare — el push ya consumó
+	// y el flow deliberadamente no hace `git push --delete` (best-effort
+	// para retry manual).
+	bare := filepath.Join(env.RepoDir, "..", "remote.git")
+	remoteBranches := gitListBranches(t, bare, "exec/42-*")
+	if remoteBranches == "" {
+		t.Fatalf("expected exec/42-* to persist on bare remote (best-effort post-push), got empty")
+	}
+
+	inv := env.Invocations()
+	// Rollback del label aplicado (2do edit agrega status:plan).
+	edits := inv.FindCalls("gh", "issue", "edit", "42")
+	if len(edits) != 2 {
+		t.Fatalf("expected 2 issue edits (lock + rollback), got %d", len(edits))
+	}
+	edits[1].AssertArgsContain(t, "--add-label", "status:plan")
+
+	// Se intentó crear una sola vez — el fallo no desencadena retry.
+	if creates := inv.FindCalls("gh", "pr", "create"); len(creates) != 1 {
+		t.Fatalf("expected 1 gh pr create attempt, got %d", len(creates))
+	}
+	// No hubo comentario al issue — eso pasa solo después del PR exitoso.
+	if comments := inv.FindCalls("gh", "issue", "comment", "42"); len(comments) != 0 {
+		t.Fatalf("expected 0 issue comments on failure, got %d", len(comments))
+	}
+}
+
+// gitListBranches devuelve la salida de `git -C dir branch --list <glob>`
+// trimmed. Lo usamos para verificar el cleanup: "" significa que no hay
+// branches que coincidan con el glob.
+func gitListBranches(t *testing.T, dir, glob string) string {
+	t.Helper()
+	cmd := exec.Command("git", "-C", dir, "branch", "--list", glob)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git branch --list %s (dir=%s): %v\n%s", glob, dir, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
