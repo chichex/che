@@ -24,6 +24,7 @@ package iterate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +39,7 @@ import (
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
+	planpkg "github.com/chichex/che/internal/plan"
 )
 
 // ExitCode es el código de salida semántico.
@@ -293,12 +295,382 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 //   - hay findings de validate en comments del issue.
 //   - el body del issue tiene un plan consolidado parseable.
 func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCode {
-	// stub — implementado en el siguiente commit.
-	_ = issueRef
-	_ = opts
-	_ = stdout
-	log.Error("iterate modo plan no está implementado todavía")
-	return ExitSemantic
+	log.Info("obteniendo issue desde GitHub")
+	issue, err := validate.FetchIssue(issueRef)
+	if err != nil {
+		log.Error("fetching issue failed", output.F{Cause: err})
+		return ExitRetry
+	}
+	if issue.State != "OPEN" {
+		log.Error(fmt.Sprintf("issue #%d is not OPEN (state=%s)", issue.Number, issue.State))
+		return ExitSemantic
+	}
+	if !issue.HasLabel(labels.PlanValidatedChangesRequested) {
+		log.Error(fmt.Sprintf("issue #%d no tiene plan-validated:changes-requested — corré `che validate %d` primero", issue.Number, issue.Number))
+		return ExitSemantic
+	}
+	// Execute ya corrió → iterar el plan no tiene efecto sobre el PR.
+	if issue.HasLabel(labels.StatusExecuting) || issue.HasLabel(labels.StatusExecuted) {
+		log.Error(fmt.Sprintf("issue #%d ya pasó por execute — iterar el plan no tiene efecto sobre el PR asociado. Iterar el PR directamente con `che iterate <pr>`.", issue.Number))
+		return ExitSemantic
+	}
+
+	currentPlan, parseErr := planpkg.Parse(issue.Body)
+	if parseErr != nil {
+		log.Error(fmt.Sprintf("no pude parsear el plan consolidado del issue #%d: %v", issue.Number, parseErr))
+		return ExitSemantic
+	}
+	if !planpkg.HasConsolidatedHeader(issue.Body) {
+		log.Error(fmt.Sprintf("issue #%d no tiene plan consolidado en el body — corré `che explore %d`", issue.Number, issue.Number))
+		return ExitSemantic
+	}
+
+	log.Step("leyendo comments del issue para buscar findings de validate")
+	comments, err := validate.FetchIssueComments(issueRef)
+	if err != nil {
+		log.Error("fetching comments failed", output.F{Cause: err})
+		return ExitRetry
+	}
+	findingsBlocks := LatestValidateFindings(comments)
+	if len(findingsBlocks) == 0 {
+		log.Error(fmt.Sprintf("no encontré findings de che validate en el issue #%d — corré `che validate %d` primero", issue.Number, issue.Number))
+		return ExitSemantic
+	}
+
+	iter := DetermineIterateIter(comments)
+	log.Success("encontré findings del último run de validate", output.F{Issue: issue.Number, Iter: iter, Detail: fmt.Sprintf("%d validators", len(findingsBlocks))})
+
+	originalBody := extractOriginalBody(issue.Body)
+	prompt := BuildPlanIteratePrompt(issue, originalBody, currentPlan, findingsBlocks, iter)
+
+	log.Step("invocando a opus para reescribir el plan", output.F{Agent: "opus"})
+	out, err := runPlanAgent(prompt, log)
+	if err != nil {
+		log.Error("opus falló", output.F{Agent: "opus", Cause: err})
+		return ExitRetry
+	}
+
+	newPlan, err := parseIteratedPlan(out)
+	if err != nil {
+		log.Error("opus devolvió un plan inválido", output.F{Agent: "opus", Cause: err})
+		return ExitRetry
+	}
+
+	// Si el plan resultante es idéntico al actual (misma JSON canónica),
+	// consideramos que opus no tuvo qué aplicar — exit retry con mensaje
+	// accionable para que el humano revise a mano.
+	if plansEqual(currentPlan, newPlan) {
+		log.Error(fmt.Sprintf("opus no produjo cambios al plan del issue #%d — revisá los findings a mano o reintentá", issue.Number))
+		return ExitRetry
+	}
+
+	newBody := planpkg.Render(newPlan, originalBody)
+
+	log.Step("editando body del issue con el plan iterado")
+	if err := editIssueBody(issueRef, newBody); err != nil {
+		log.Error("gh issue edit --body-file fallo", output.F{Cause: err})
+		return ExitRetry
+	}
+
+	log.Step("posteando comment de iterate en el issue")
+	body := RenderIteratePlanComment(iter, len(findingsBlocks))
+	if err := postIssueComment(issueRef, body); err != nil {
+		log.Warn("warning: no se pudo postear comment de iterate — sigo igual", output.F{Cause: err})
+	}
+
+	log.Step("removiendo label plan-validated:changes-requested del issue")
+	if err := removeIssueLabel(issueRef, labels.PlanValidatedChangesRequested); err != nil {
+		log.Warn("warning: no se pudo remover label — removelo a mano", output.F{Cause: err})
+	}
+
+	log.Success("iterated plan", output.F{Issue: issue.Number, URL: issue.URL})
+	fmt.Fprintf(stdout, "Iterated plan %s\n", issue.URL)
+	fmt.Fprintf(stdout, "Re-validá con `che validate %d`.\n", issue.Number)
+	fmt.Fprintln(stdout, "Done.")
+	return ExitOK
+}
+
+// extractOriginalBody devuelve la sección "## Idea original" (sin el header)
+// del body del issue, o el body entero si no hay esa sección. Es lo que
+// plan.Render espera como segundo argumento cuando queremos reemplazar el
+// plan consolidado sin duplicar el texto original. Best-effort: si el body
+// no matchea el shape esperado, devolvemos issue.Body tal cual y que
+// plan.Render anide — no es ideal pero es mejor que borrar contexto.
+func extractOriginalBody(body string) string {
+	const marker = "## Idea original"
+	i := strings.Index(body, marker)
+	if i < 0 {
+		return body
+	}
+	rest := body[i+len(marker):]
+	// saltar el header tail ("(de `che idea`)") hasta el primer \n\n
+	if j := strings.Index(rest, "\n\n"); j >= 0 {
+		return strings.TrimLeft(rest[j+2:], "\n")
+	}
+	// fallback: sin doble newline, cortamos después del primer \n
+	if j := strings.Index(rest, "\n"); j >= 0 {
+		return strings.TrimLeft(rest[j+1:], "\n")
+	}
+	return rest
+}
+
+// runPlanAgent invoca a opus (claude) en modo text (no stream-json) sobre el
+// prompt dado. Modo text porque el output es un JSON chico y sincrónico —
+// no necesitamos ver tool_use en vivo (opus no edita archivos en este modo,
+// solo devuelve el plan nuevo).
+func runPlanAgent(prompt string, log *output.Logger) (string, error) {
+	res, err := agent.Run(agent.AgentOpus, prompt, agent.RunOpts{
+		Timeout: AgentTimeout,
+		Format:  agent.OutputText,
+		OnLine: func(line string) {
+			if log != nil {
+				log.Step("opus: " + line)
+			}
+		},
+		OnStderrLine: func(line string) {
+			if log != nil {
+				log.Step("opus stderr: " + line)
+			}
+		},
+	})
+	if errors.Is(err, agent.ErrTimeout) {
+		if se := strings.TrimSpace(res.Stderr); se != "" {
+			return res.Stdout, fmt.Errorf("opus timed out after %s; stderr: %s", AgentTimeout, se)
+		}
+		return res.Stdout, fmt.Errorf("opus timed out after %s (subí CHE_ITERATE_AGENT_TIMEOUT_SECS)", AgentTimeout)
+	}
+	var ee *agent.ExitError
+	if errors.As(err, &ee) {
+		return res.Stdout, fmt.Errorf("opus exit %d: %s", ee.ExitCode, ee.Stderr)
+	}
+	if err != nil {
+		return res.Stdout, err
+	}
+	return res.Stdout, nil
+}
+
+// parseIteratedPlan extrae el ConsolidatedPlan del stdout del agente,
+// tolerando code fences y texto alrededor (mismo algoritmo que validate.
+// parseResponse). Valida campos requeridos (summary/goal/approach no
+// vacíos, al menos 1 step y 1 acceptance criterion) antes de devolver.
+func parseIteratedPlan(raw string) (*planpkg.ConsolidatedPlan, error) {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "```") {
+		if nl := strings.Index(raw, "\n"); nl >= 0 {
+			raw = raw[nl+1:]
+		}
+		if idx := strings.LastIndex(raw, "```"); idx >= 0 {
+			raw = raw[:idx]
+		}
+		raw = strings.TrimSpace(raw)
+	}
+	if i := strings.Index(raw, "{"); i > 0 {
+		raw = raw[i:]
+	}
+	if i := strings.LastIndex(raw, "}"); i >= 0 && i < len(raw)-1 {
+		raw = raw[:i+1]
+	}
+	var p planpkg.ConsolidatedPlan
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return nil, fmt.Errorf("invalid JSON from opus: %w", err)
+	}
+	if strings.TrimSpace(p.Summary) == "" {
+		return nil, fmt.Errorf("summary is empty")
+	}
+	if strings.TrimSpace(p.Goal) == "" {
+		return nil, fmt.Errorf("goal is empty")
+	}
+	if strings.TrimSpace(p.Approach) == "" {
+		return nil, fmt.Errorf("approach is empty")
+	}
+	if len(p.AcceptanceCriteria) == 0 {
+		return nil, fmt.Errorf("acceptance_criteria is empty")
+	}
+	if len(p.Steps) == 0 {
+		return nil, fmt.Errorf("steps is empty")
+	}
+	return &p, nil
+}
+
+// plansEqual compara dos planes por JSON canónico. json.Marshal con el shape
+// de ConsolidatedPlan es determinista (tags fijos, orden de fields por
+// struct): si los bytes coinciden, los planes son funcionalmente iguales.
+func plansEqual(a, b *planpkg.ConsolidatedPlan) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	ja, _ := json.Marshal(a)
+	jb, _ := json.Marshal(b)
+	return string(ja) == string(jb)
+}
+
+// BuildPlanIteratePrompt arma el prompt para opus en modo plan. Le damos:
+//   - rol (ingeniero senior reescribiendo plan pre-implementación),
+//   - título + body original del issue,
+//   - plan consolidado actual serializado como JSON pretty (para que opus
+//     entienda el shape exacto que tiene que devolver),
+//   - bodies completos de los findings tal como los posteó validate,
+//   - reglas sobre kind=product (no resolver unilateralmente, mencionar
+//     en summary) y delta mínimo,
+//   - shape de output esperado (ConsolidatedPlan JSON, sin fences).
+func BuildPlanIteratePrompt(issue *validate.Issue, originalBody string, currentPlan *planpkg.ConsolidatedPlan, findings []string, iter int) string {
+	var sb strings.Builder
+	sb.WriteString("Sos un ingeniero senior reescribiendo un plan de implementación ANTES de implementar. ")
+	sb.WriteString("Otro agente propuso un plan y validadores marcaron gaps; tu tarea es aplicar los fixes al plan — ")
+	sb.WriteString("NO implementar código, NO tocar archivos, solo devolver el plan nuevo como JSON.\n\n")
+
+	sb.WriteString(fmt.Sprintf("Issue #%d — %s\n", issue.Number, issue.Title))
+	sb.WriteString("URL: " + issue.URL + "\n")
+	sb.WriteString(fmt.Sprintf("Iter de iterate: %d\n\n", iter))
+
+	sb.WriteString("## Body original del issue (criterios iniciales, contexto, idea)\n\n")
+	sb.WriteString("<<<\n")
+	sb.WriteString(originalBody)
+	if !strings.HasSuffix(originalBody, "\n") {
+		sb.WriteString("\n")
+	}
+	sb.WriteString(">>>\n\n")
+
+	sb.WriteString("## Plan consolidado actual (lo que hay que iterar)\n\n")
+	sb.WriteString("```json\n")
+	if js, err := json.MarshalIndent(currentPlan, "", "  "); err == nil {
+		sb.Write(js)
+	} else {
+		sb.WriteString("{}")
+	}
+	sb.WriteString("\n```\n\n")
+
+	sb.WriteString("## Findings de los validadores (markdown del último run de che validate)\n\n")
+	for i, body := range findings {
+		if i > 0 {
+			sb.WriteString("\n---\n\n")
+		}
+		sb.WriteString(body)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+
+	sb.WriteString("## Reglas\n")
+	sb.WriteString("- Priorizá findings con severity blocker → major → minor.\n")
+	sb.WriteString("- Findings con `kind=product` y `needs_human=true`: NO los resuelvas unilateralmente. Mencionalos en el summary del plan nuevo como decisión pendiente que el humano tiene que zanjar.\n")
+	sb.WriteString("- Findings con `kind=technical` o `kind=documented`: aplicalos al plan (editá steps, approach, acceptance_criteria, risks, etc).\n")
+	sb.WriteString("- Hacé el delta mínimo: no reescribas secciones que los findings no tocan.\n")
+	sb.WriteString("- El shape de output debe ser IDÉNTICO al del plan actual (mismos fields, mismos tipos).\n\n")
+
+	sb.WriteString("## Output esperado\n")
+	sb.WriteString("Devolvé EXCLUSIVAMENTE un objeto JSON con este shape — sin texto antes ni después, sin markdown code fences:\n\n")
+	sb.WriteString("{\n")
+	sb.WriteString("  \"summary\": \"...\",\n")
+	sb.WriteString("  \"goal\": \"...\",\n")
+	sb.WriteString("  \"acceptance_criteria\": [\"...\"],\n")
+	sb.WriteString("  \"approach\": \"...\",\n")
+	sb.WriteString("  \"steps\": [\"...\"],\n")
+	sb.WriteString("  \"risks_to_mitigate\": [{\"risk\": \"...\", \"likelihood\": \"low|medium|high\", \"impact\": \"low|medium|high\", \"mitigation\": \"...\"}],\n")
+	sb.WriteString("  \"out_of_scope\": [\"...\"]\n")
+	sb.WriteString("}\n")
+	return sb.String()
+}
+
+// RenderIteratePlanComment arma el body del comment flow=iterate que se
+// postea en el issue después de editar el body. Incluye header HTML
+// estructurado para que validate/iterate futuros calculen el iter correcto.
+func RenderIteratePlanComment(iter int, numValidators int) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("<!-- claude-cli: flow=iterate iter=%d agent=opus instance=1 role=executor -->\n", iter))
+	sb.WriteString(fmt.Sprintf("## [che · iterate · plan · iter:%d]\n\n", iter))
+	sb.WriteString(fmt.Sprintf("Plan iterado aplicando findings de %d validador(es). Ver el body del issue para el plan actualizado.\n\n", numValidators))
+	sb.WriteString("El label `plan-validated:changes-requested` fue removido. Re-validá con `che validate` para obtener un verdict nuevo.\n")
+	return sb.String()
+}
+
+// editIssueBody reemplaza el body del issue via `gh issue edit --body-file`.
+// Usa un archivo temporal para evitar problemas con argv largos.
+func editIssueBody(ref, body string) error {
+	tmpDir, err := os.MkdirTemp("", "che-iterate-body-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	bodyFile := filepath.Join(tmpDir, "body.md")
+	if err := os.WriteFile(bodyFile, []byte(body), 0o644); err != nil {
+		return err
+	}
+	cmd := exec.Command("gh", "issue", "edit", ref, "--body-file", bodyFile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gh issue edit --body-file: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// postIssueComment postea un comment en el issue via `gh issue comment`.
+func postIssueComment(issueRef, body string) error {
+	tmpDir, err := os.MkdirTemp("", "che-iterate-issuec-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	bodyFile := filepath.Join(tmpDir, "body.md")
+	if err := os.WriteFile(bodyFile, []byte(body), 0o644); err != nil {
+		return err
+	}
+	cmd := exec.Command("gh", "issue", "comment", issueRef, "--body-file", bodyFile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gh issue comment: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// removeIssueLabel saca un label del issue vía `gh issue edit --remove-label`.
+func removeIssueLabel(issueRef, name string) error {
+	cmd := exec.Command("gh", "issue", "edit", issueRef, "--remove-label", name)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gh issue edit --remove-label %s: %s", name, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// ListIterablePlanCandidates devuelve los issues abiertos del repo con
+// plan-validated:changes-requested — candidatos a iteración de plan. La TUI
+// lo consume para poblar la lista "plans to iterate". Reusa validate.
+// PlanCandidate como shape (number/title/url) porque es exactamente lo
+// mismo que la TUI necesita para validate sobre plan, solo que filtrado
+// por un label distinto.
+func ListIterablePlanCandidates() ([]validate.PlanCandidate, error) {
+	cmd := exec.Command("gh", "issue", "list",
+		"--label", labels.PlanValidatedChangesRequested,
+		"--state", "open",
+		"--json", "number,title,url,labels",
+		"--limit", "50")
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("gh issue list: %s", strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, err
+	}
+	var raw []validate.Issue
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("parse gh issue list output: %w", err)
+	}
+	return filterIterablePlanCandidates(raw), nil
+}
+
+// filterIterablePlanCandidates proyecta la respuesta cruda de gh a shape
+// PlanCandidate. No aplica exclusiones extra: ya filtramos por label en el
+// comando gh. Lo separamos en helper pura para testear sin depender de gh.
+func filterIterablePlanCandidates(raw []validate.Issue) []validate.PlanCandidate {
+	out := make([]validate.PlanCandidate, 0, len(raw))
+	for _, i := range raw {
+		out = append(out, validate.PlanCandidate{
+			Number: i.Number,
+			Title:  i.Title,
+			URL:    i.URL,
+		})
+	}
+	return out
 }
 
 // firstClosingIssue devuelve el primer issue referenciado por "Closes #N",
