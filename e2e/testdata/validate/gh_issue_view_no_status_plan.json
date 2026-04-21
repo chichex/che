@@ -1,0 +1,13 @@
+{
+  "number": 42,
+  "title": "Idea vaga sin explorar",
+  "body": "no hay plan consolidado acá",
+  "url": "https://github.com/acme/demo/issues/42",
+  "state": "OPEN",
+  "labels": [
+    {"name": "ct:plan"},
+    {"name": "status:idea"},
+    {"name": "type:feat"},
+    {"name": "size:m"}
+  ]
+}

@@ -3,11 +3,14 @@ package validate
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/chichex/che/internal/labels"
+	planpkg "github.com/chichex/che/internal/plan"
 )
 
 func TestParsePRRef(t *testing.T) {
@@ -417,5 +420,302 @@ func TestRenderSummaryComment_Table(t *testing.T) {
 	}
 	if !strings.Contains(out, "| codex#1 | changes_requested | 1 |") {
 		t.Fatalf("summary row for codex missing. Got:\n%s", out)
+	}
+}
+
+// TestResolveRefNumber cubre el helper local que extrae el número sin tocar
+// gh. Es la base de detectTarget: fallamos acá si el parsing local no toma
+// los formatos que cmd/validate acepta (número, URL de pull o issues,
+// owner/repo#N).
+func TestResolveRefNumber(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    int
+		wantErr bool
+	}{
+		{"plain number", "7", 7, false},
+		{"large number", "1234", 1234, false},
+		{"owner/repo#N", "acme/demo#42", 42, false},
+		{"URL pull", "https://github.com/acme/demo/pull/7", 7, false},
+		{"URL issues", "https://github.com/acme/demo/issues/42", 42, false},
+		{"URL pull with suffix", "https://github.com/acme/demo/pull/7/files", 7, false},
+		{"URL pull with query", "https://github.com/acme/demo/pull/7?tab=1", 7, false},
+		{"URL pull with fragment", "https://github.com/acme/demo/pull/7#issuecomment-1", 7, false},
+		{"unrecognized", "nonsense", 0, true},
+		{"# without number", "acme/demo#foo", 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := resolveRefNumber(c.in)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q, got %d", c.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error for %q: %v", c.in, err)
+			}
+			if got != c.want {
+				t.Fatalf("want %d, got %d", c.want, got)
+			}
+		})
+	}
+}
+
+// TestDetectTarget valida el despachador target usando fakes de `gh api`
+// inyectados en PATH. No ejecuta runPR/runPlan — solo chequea que el
+// campo pull_request discrimina issue vs PR.
+func TestDetectTarget(t *testing.T) {
+	// Stub de gh que devuelve el fixture según el número pedido. Lo
+	// hacemos con un shim bash simple en un tempdir + PATH.
+	cases := []struct {
+		name        string
+		apiResponse string
+		want        Target
+		wantErr     bool
+	}{
+		{
+			name:        "issue (pull_request null)",
+			apiResponse: `{"number": 42, "pull_request": null}`,
+			want:        TargetPlan,
+		},
+		{
+			name:        "issue (pull_request absent)",
+			apiResponse: `{"number": 42, "title": "foo"}`,
+			want:        TargetPlan,
+		},
+		{
+			name:        "PR (pull_request object)",
+			apiResponse: `{"number": 7, "pull_request": {"url": "https://api.github.com/repos/acme/demo/pulls/7"}}`,
+			want:        TargetPR,
+		},
+		{
+			name:        "malformed JSON",
+			apiResponse: `not json`,
+			want:        TargetUnknown,
+			wantErr:     true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			withFakeGh(t, c.apiResponse, 0)
+			got, err := detectTarget("42")
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != c.want {
+				t.Fatalf("want %v, got %v", c.want, got)
+			}
+		})
+	}
+}
+
+// TestDetectTarget_GhError verifica que un exit non-zero de gh se
+// propague como error (caller debería hacer retry).
+func TestDetectTarget_GhError(t *testing.T) {
+	withFakeGh(t, "", 1)
+	_, err := detectTarget("99")
+	if err == nil {
+		t.Fatalf("expected error when gh api fails")
+	}
+}
+
+// withFakeGh instala un fake gh en PATH que siempre responde con stdout y
+// exit dado, independiente de los args. Útil para tests donde el contenido
+// depende del test pero los args son siempre `api repos/.../issues/<n>`.
+func withFakeGh(t *testing.T, stdout string, exit int) {
+	t.Helper()
+	dir := t.TempDir()
+	script := "#!/bin/sh\n"
+	if stdout != "" {
+		// usar printf para evitar problemas con escaping shell de los JSON
+		// braces
+		script += "printf '%s' " + shellQuote(stdout) + "\n"
+	}
+	script += fmt.Sprintf("exit %d\n", exit)
+	path := filepath.Join(dir, "gh")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+}
+
+// shellQuote pone el contenido entre comillas simples, escapando las que ya
+// estuvieran dentro. Suficiente para los fixtures JSON cortos de estos
+// tests.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// TestVerdictToPlanLabel cubre el mapeo del verdict al label plan-validated:*.
+// Es el hermano de TestVerdictToLabel; los dos viven para que un rename o
+// cambio de constantes lo rompa de inmediato.
+func TestVerdictToPlanLabel(t *testing.T) {
+	cases := map[string]string{
+		"approve":           labels.PlanValidatedApprove,
+		"changes_requested": labels.PlanValidatedChangesRequested,
+		"needs_human":       labels.PlanValidatedNeedsHuman,
+		"":                  "",
+		"bogus":             "",
+	}
+	for in, want := range cases {
+		if got := verdictToPlanLabel(in); got != want {
+			t.Errorf("verdictToPlanLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestBuildPlanValidatorPrompt chequea que el prompt incluya los campos
+// clave del plan parseado (goal, summary, acceptance_criteria, steps) para
+// que el validador tenga contexto suficiente. El contrato de respuesta
+// (verdict + findings con severity/area/kind) también debe estar presente.
+func TestBuildPlanValidatorPrompt(t *testing.T) {
+	issue := &Issue{
+		Number: 42,
+		Title:  "Agregar rate limiting al endpoint /login",
+		Body:   "## Plan consolidado\n\ndetalles...",
+	}
+	cplan := &planpkg.ConsolidatedPlan{
+		Summary:            "Rate limit a /login para frenar brute force",
+		Goal:               "Bloquear >5 intentos/minuto por IP",
+		Approach:           "Middleware in-memory con LRU",
+		AcceptanceCriteria: []string{"6to intento devuelve 429", "contador se resetea tras 1min"},
+		Steps:              []string{"agregar middleware", "wirearlo a /login", "test"},
+		RisksToMitigate: []planpkg.Risk{
+			{Risk: "IP share (NAT)", Likelihood: "low", Impact: "medium", Mitigation: "usar IP+useragent"},
+		},
+		OutOfScope: []string{"rate limit global"},
+	}
+
+	prompt := buildPlanValidatorPrompt(issue, cplan)
+
+	// Campos del plan deben aparecer textualmente.
+	mustContain := []string{
+		"Issue #42",
+		"Agregar rate limiting",
+		"Rate limit a /login",
+		"Bloquear >5 intentos/minuto",
+		"Middleware in-memory",
+		"6to intento devuelve 429",
+		"agregar middleware",
+		"IP share (NAT)",
+		"rate limit global",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(prompt, s) {
+			t.Errorf("prompt missing %q", s)
+		}
+	}
+
+	// Contrato de respuesta: enumera los verdicts válidos y el kind
+	// product/technical/documented.
+	contract := []string{"approve", "changes_requested", "needs_human", "product", "technical", "documented"}
+	for _, s := range contract {
+		if !strings.Contains(prompt, s) {
+			t.Errorf("prompt missing contract keyword %q", s)
+		}
+	}
+}
+
+// TestBuildPlanValidatorPrompt_Fallback: si el plan parseado viene vacío
+// (caller pasó un plan degradado), el prompt incluye el body raw para que
+// el validador al menos pueda opinar sobre lo que hay en el issue.
+func TestBuildPlanValidatorPrompt_Fallback(t *testing.T) {
+	issue := &Issue{
+		Number: 9,
+		Title:  "legacy issue",
+		Body:   "body raw que no parseó bien",
+	}
+	empty := &planpkg.ConsolidatedPlan{}
+	prompt := buildPlanValidatorPrompt(issue, empty)
+	if !strings.Contains(prompt, "body raw que no parseó bien") {
+		t.Errorf("fallback prompt missing raw body")
+	}
+	if !strings.Contains(prompt, "fallback") && !strings.Contains(prompt, "Body raw") {
+		t.Errorf("fallback marker or raw body section missing")
+	}
+}
+
+// TestFilterPlanCandidates cubre la regla de exclusión: plan-validated:approve
+// desaparece de la lista; los otros plan-validated:* siguen visibles.
+func TestFilterPlanCandidates(t *testing.T) {
+	mk := func(n int, lbls ...string) Issue {
+		i := Issue{Number: n, Title: fmt.Sprintf("Issue %d", n), URL: fmt.Sprintf("https://x/%d", n)}
+		for _, l := range lbls {
+			i.Labels = append(i.Labels, IssueLabel{Name: l})
+		}
+		return i
+	}
+
+	cases := []struct {
+		name    string
+		in      []Issue
+		wantNum []int
+	}{
+		{"empty", nil, nil},
+		{"sin labels", []Issue{mk(1), mk(2)}, []int{1, 2}},
+		{
+			"plan-validated:approve excluido",
+			[]Issue{mk(1, labels.PlanValidatedApprove), mk(2)},
+			[]int{2},
+		},
+		{
+			"changes-requested incluido",
+			[]Issue{mk(1, labels.PlanValidatedChangesRequested)},
+			[]int{1},
+		},
+		{
+			"needs-human incluido",
+			[]Issue{mk(1, labels.PlanValidatedNeedsHuman)},
+			[]int{1},
+		},
+		{
+			"mix: solo approve se excluye",
+			[]Issue{
+				mk(1, labels.PlanValidatedApprove),
+				mk(2, labels.PlanValidatedChangesRequested),
+				mk(3, labels.PlanValidatedNeedsHuman),
+				mk(4),
+			},
+			[]int{2, 3, 4},
+		},
+		{
+			"otros labels no interfieren",
+			[]Issue{mk(1, labels.StatusPlan, "ct:plan")},
+			[]int{1},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := filterPlanCandidates(c.in)
+			if len(got) != len(c.wantNum) {
+				t.Fatalf("want %d candidates, got %d", len(c.wantNum), len(got))
+			}
+			for i, n := range c.wantNum {
+				if got[i].Number != n {
+					t.Errorf("candidate %d: want number %d, got %d", i, n, got[i].Number)
+				}
+			}
+		})
+	}
+}
+
+// TestIssue_HasLabel cubre el helper análogo al de PullRequest.
+func TestIssue_HasLabel(t *testing.T) {
+	i := &Issue{}
+	i.Labels = append(i.Labels, IssueLabel{Name: labels.PlanValidatedApprove})
+	if !i.HasLabel(labels.PlanValidatedApprove) {
+		t.Errorf("expected HasLabel(plan-validated:approve)=true")
+	}
+	if i.HasLabel(labels.PlanValidatedNeedsHuman) {
+		t.Errorf("expected HasLabel(plan-validated:needs-human)=false")
 	}
 }
