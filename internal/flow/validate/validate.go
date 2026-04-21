@@ -29,6 +29,7 @@ import (
 	"github.com/chichex/che/internal/agent"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
+	planpkg "github.com/chichex/che/internal/plan"
 )
 
 // Target discrimina el tipo de ref que recibió `che validate`. La detección
@@ -303,9 +304,7 @@ func Run(ref string, opts Opts) ExitCode {
 	case TargetPR:
 		return runPR(ref, opts, stdout, log)
 	case TargetPlan:
-		// TODO (próximo commit): implementar runPlan.
-		log.Error("target plan (issue) aún no implementado — solo PR por ahora")
-		return ExitSemantic
+		return runPlan(ref, opts, stdout, log)
 	default:
 		log.Error(fmt.Sprintf("tipo de ref desconocido: %v", target))
 		return ExitRetry
@@ -387,6 +386,100 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 
 	fmt.Fprintln(stdout, renderReport(results))
 	fmt.Fprintf(stdout, "che ya dejó los comments en el PR %s\n", pr.URL)
+	return ExitOK
+}
+
+// runPlan es el flow nuevo: valida el plan consolidado del body de un issue
+// en status:plan, postea comments en el issue y aplica plan-validated:*.
+// El preflight (auth + remote) ya corrió en Run.
+//
+// Gates:
+//   - issue abierto
+//   - issue tiene status:plan (corré `che explore` si no)
+//   - body del issue tiene un plan consolidado parseable (no basta
+//     HasConsolidatedHeader: Parse puede devolver ambigüedad irrecuperable
+//     o sin sub-secciones; acá rechazamos con mensaje accionable).
+func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCode {
+	log.Info("obteniendo issue desde GitHub")
+	issue, err := FetchIssue(issueRef)
+	if err != nil {
+		log.Error("fetching issue failed", output.F{Cause: err})
+		return ExitRetry
+	}
+	if issue.State != "OPEN" {
+		log.Error(fmt.Sprintf("issue #%d is not OPEN (state=%s)", issue.Number, issue.State))
+		return ExitSemantic
+	}
+	if !issue.HasLabel(labels.StatusPlan) {
+		log.Error(fmt.Sprintf("issue #%d no está en status:plan — corré `che explore %d` primero", issue.Number, issue.Number))
+		return ExitSemantic
+	}
+
+	// Parseamos el plan consolidado del body. Dos modos de fallo semantic:
+	//   - ErrAmbiguousPlan: body con múltiples headers "## Plan consolidado"
+	//     (typically porque alguien editó a mano o corrieron explore dos
+	//     veces). Acción del humano: limpiar el body.
+	//   - Plan parseado pero sin header real ni sub-secciones: el issue tiene
+	//     status:plan pero nunca se consolidó. Acción: correr explore.
+	consolidated, parseErr := planpkg.Parse(issue.Body)
+	if parseErr != nil {
+		log.Error(fmt.Sprintf("no pude parsear el plan consolidado del issue #%d: %v", issue.Number, parseErr))
+		return ExitSemantic
+	}
+	if !planpkg.HasConsolidatedHeader(issue.Body) {
+		log.Error(fmt.Sprintf("issue #%d tiene status:plan pero no tiene plan consolidado en el body — corré `che explore %d`", issue.Number, issue.Number))
+		return ExitSemantic
+	}
+
+	log.Step("leyendo comments previos para calcular iter")
+	comments, err := FetchIssueComments(issueRef)
+	if err != nil {
+		log.Error("fetching comments failed", output.F{Cause: err})
+		return ExitRetry
+	}
+	iter := DetermineIter(comments)
+
+	log.Info(fmt.Sprintf("corriendo %d validador(es) en paralelo sobre el plan", len(opts.Validators)), output.F{Iter: iter, Issue: issue.Number})
+	prompt := buildPlanValidatorPrompt(issue, consolidated)
+	results := runValidatorsParallel(prompt, opts.Validators, log)
+
+	log.Step("posteando comments de validadores")
+	for _, r := range results {
+		body := renderValidatorComment(r, iter)
+		if err := postIssueComment(issueRef, body); err != nil {
+			log.Error(fmt.Sprintf("posting %s#%d comment failed", r.Validator.Agent, r.Validator.Instance),
+				output.F{Validator: fmt.Sprintf("%s#%d", r.Validator.Agent, r.Validator.Instance), Cause: err})
+			return ExitRetry
+		}
+		verdict := ""
+		if r.Response != nil {
+			verdict = r.Response.Verdict
+		}
+		log.Success("comment posteado",
+			output.F{Validator: fmt.Sprintf("%s#%d", r.Validator.Agent, r.Validator.Instance), Verdict: verdict})
+	}
+
+	log.Step("posteando comment resumen")
+	summary := renderSummaryComment(results, iter)
+	if err := postIssueComment(issueRef, summary); err != nil {
+		log.Error("posting summary comment failed", output.F{Cause: err})
+		return ExitRetry
+	}
+
+	if verdict := consolidateVerdict(results); verdict != "" {
+		target := verdictToPlanLabel(verdict)
+		log.Step("aplicando label al issue", output.F{Labels: []string{target}, Issue: issue.Number})
+		if err := applyPlanValidatedLabel(issueRef, issue, target); err != nil {
+			log.Warn("warning: no pude aplicar label al issue",
+				output.F{Labels: []string{target}, Issue: issue.Number, Cause: err})
+		} else {
+			log.Success("verdict consolidado",
+				output.F{Issue: issue.Number, Verdict: verdict, Labels: []string{target}})
+		}
+	}
+
+	fmt.Fprintln(stdout, renderReport(results))
+	fmt.Fprintf(stdout, "che ya dejó los comments en el issue %s\n", issue.URL)
 	return ExitOK
 }
 
@@ -1027,4 +1120,330 @@ func postPRComment(prRef, body string) error {
 		return fmt.Errorf("gh pr comment: %s", strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// ---- modo plan: issue fetch, comments, prompt, labels ----
+
+// Issue modela el subset de `gh issue view --json ...` que usamos en el modo
+// plan. Mismo shape minimalista que usa explore; no lo importamos de ahí
+// para no crear dependencia cruzada entre flows.
+type Issue struct {
+	Number int         `json:"number"`
+	Title  string      `json:"title"`
+	Body   string      `json:"body"`
+	URL    string      `json:"url"`
+	State  string      `json:"state"`
+	Labels []IssueLabel `json:"labels"`
+}
+
+// IssueLabel es el shape que gh devuelve para cada label del issue.
+type IssueLabel struct {
+	Name string `json:"name"`
+}
+
+// HasLabel devuelve true si el issue tiene un label con ese nombre.
+func (i *Issue) HasLabel(name string) bool {
+	for _, l := range i.Labels {
+		if l.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// FetchIssue corre `gh issue view <ref> --json ...` para el modo plan. Trae
+// un superset mínimo: number/title/body/labels/url/state. Los comments se
+// fetchean aparte con FetchIssueComments porque es consistente con cómo se
+// hace en modo PR (dos round-trips, más barato que pedir un JSON enorme).
+func FetchIssue(ref string) (*Issue, error) {
+	cmd := exec.Command("gh", "issue", "view", ref,
+		"--json", "number,title,body,labels,url,state")
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("gh issue view: %s", strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, err
+	}
+	var issue Issue
+	if err := json.Unmarshal(out, &issue); err != nil {
+		return nil, fmt.Errorf("parse gh issue view output: %w", err)
+	}
+	return &issue, nil
+}
+
+// FetchIssueComments trae los comments del issue (para calcular iter). Usa
+// una llamada separada a gh issue view con --json comments. El shape de
+// comments es el mismo que para PRs (PRComment lo reusamos).
+func FetchIssueComments(ref string) ([]PRComment, error) {
+	cmd := exec.Command("gh", "issue", "view", ref, "--json", "comments")
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("gh issue view comments: %s", strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, err
+	}
+	var wrap struct {
+		Comments []PRComment `json:"comments"`
+	}
+	if err := json.Unmarshal(out, &wrap); err != nil {
+		return nil, fmt.Errorf("parse gh issue view comments: %w", err)
+	}
+	return wrap.Comments, nil
+}
+
+// postIssueComment postea un comment en el issue via `gh issue comment <ref>
+// --body-file`. Hermano de postPRComment — los mantenemos separados porque
+// la abstracción "dispatcher por target" es más ruido que señal: son dos
+// líneas de diferencia y el llamador siempre sabe qué target está.
+func postIssueComment(issueRef, body string) error {
+	tmpDir, err := os.MkdirTemp("", "che-validate-issuec-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+	bodyFile := filepath.Join(tmpDir, "body.md")
+	if err := os.WriteFile(bodyFile, []byte(body), 0o644); err != nil {
+		return err
+	}
+	cmd := exec.Command("gh", "issue", "comment", issueRef, "--body-file", bodyFile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gh issue comment: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// verdictToPlanLabel mapea un verdict JSON (snake_case) al label plan-validated
+// correspondiente (kebab-case). Hermano de verdictToLabel, pero con los labels
+// del set AllPlanValidated (aplicado sobre issues, no PRs).
+func verdictToPlanLabel(verdict string) string {
+	switch verdict {
+	case "approve":
+		return labels.PlanValidatedApprove
+	case "changes_requested":
+		return labels.PlanValidatedChangesRequested
+	case "needs_human":
+		return labels.PlanValidatedNeedsHuman
+	}
+	return ""
+}
+
+// applyPlanValidatedLabel es al modo plan lo que applyValidatedLabel al modo
+// PR: asegura que target exista, lo aplica al issue, y remueve los otros
+// plan-validated:* presentes (son mutuamente excluyentes). Idempotente.
+func applyPlanValidatedLabel(issueRef string, issue *Issue, target string) error {
+	if target == "" {
+		return fmt.Errorf("empty target label")
+	}
+	if err := labels.Ensure(target); err != nil {
+		return err
+	}
+	args := []string{"issue", "edit", issueRef}
+	changes := false
+	for _, l := range labels.AllPlanValidated {
+		if l == target {
+			continue
+		}
+		if issue.HasLabel(l) {
+			args = append(args, "--remove-label", l)
+			changes = true
+		}
+	}
+	if !issue.HasLabel(target) {
+		args = append(args, "--add-label", target)
+		changes = true
+	}
+	if !changes {
+		return nil
+	}
+	cmd := exec.Command("gh", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("gh issue edit: %s", strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// buildPlanValidatorPrompt arma el prompt del validador en modo plan. La
+// diferencia con buildPRValidatorPrompt es qué se le pide analizar (un plan
+// escrito, no código) y qué anti-patrones buscar (ambigüedad de producto,
+// gaps técnicos del plan, criterios poco observables, effort sospechoso).
+// El contrato de respuesta (verdict + findings con severity/area/kind) es
+// idéntico — así el render de comments, el consolidador de verdict y el
+// parser de respuestas se comparten tal cual.
+//
+// Si el plan parseado vino sin secciones (degradado) pasamos el body raw
+// como input secundario para que el validador igual pueda opinar.
+func buildPlanValidatorPrompt(issue *Issue, c *planpkg.ConsolidatedPlan) string {
+	var sb strings.Builder
+	sb.WriteString(`Sos un validador técnico senior. Otro agente produjo un PLAN DE IMPLEMENTACIÓN para un issue.
+Tu tarea es revisar el plan ANTES de que se empiece a codear y marcar lo que está flojo — NO reescribir el plan.
+
+Estamos en la etapa previa a ` + "`che execute`" + `: si aprobás, el plan va a alimentar directo a un agente que implementa.
+
+Chequeá específicamente:
+1. ¿El goal y el summary son consistentes con el título del issue?
+2. ¿Los criterios de aceptación son observables y testeables? (Evitá "funciona bien".)
+3. ¿Los pasos son concretos y accionables? ¿Cubren end-to-end el approach?
+4. ¿El effort implícito (número y tamaño de pasos) es razonable para el approach?
+5. ¿Faltan riesgos obvios que el plan no menciona?
+6. ¿Hay asunciones del plan que no son correctas (e.g. dep que no existe, API distinta)?
+7. ¿El approach elegido tiene caminos alternativos razonables que el plan descartó sin justificar?
+8. ¿Hay ambigüedad de producto irreducible que el plan resolvió arbitrariamente y debería escalarse al humano?
+
+IMPORTANTE — Clasificación de findings:
+
+- kind="product": ambigüedad irreducible de dominio/producto (política, UX opinada, alcance).
+  Puede ir con needs_human=true si requiere decisión del dueño.
+- kind="technical": gap técnico del plan (paso faltante, criterio poco claro, riesgo no listado, asunción incorrecta).
+  needs_human=false — es feedback para re-consolidar el plan.
+- kind="documented": el plan ignoró algo que está en el body del issue / criterios iniciales / labels.
+  needs_human=false — bug del consolidador, se resuelve re-leyendo.
+
+Valores válidos:
+- verdict: "approve" (plan listo para ejecutar), "changes_requested" (gaps técnicos a corregir antes de ejecutar), "needs_human" (ambigüedad de producto irreducible)
+- severity: "blocker" | "major" | "minor"
+- area: "code" | "tests" | "docs" | "security" | "other"
+- kind: "product" | "technical" | "documented"
+
+Reglas:
+- Si el plan es sólido y accionable, verdict=approve y findings=[].
+- needs_human=true requiere kind=product Y decisión del dueño del producto.
+- No inventes faltantes — si el plan cubre algo aunque sea brevemente, no lo marques como gap.
+- "where" puede referenciar una sección del plan ("steps[3]", "acceptance_criteria", "approach") — no hay paths de archivo todavía.
+
+Devolvé EXCLUSIVAMENTE un objeto JSON con este shape — sin texto antes ni después, sin markdown code fences:
+
+{
+  "verdict": "approve|changes_requested|needs_human",
+  "summary": "Tu opinión global en 1-2 oraciones",
+  "findings": [
+    {
+      "severity": "major",
+      "area": "code",
+      "where": "steps[2] o approach o acceptance_criteria[1]",
+      "issue": "qué está flojo o mal",
+      "suggestion": "cómo arreglarlo antes de ejecutar",
+      "needs_human": false,
+      "kind": "technical"
+    }
+  ]
+}
+
+Issue #`)
+	sb.WriteString(fmt.Sprint(issue.Number))
+	sb.WriteString(` (título: "`)
+	sb.WriteString(issue.Title)
+	sb.WriteString(`")
+
+PLAN CONSOLIDADO (parseado del body):
+`)
+	if c != nil {
+		if strings.TrimSpace(c.Summary) != "" {
+			sb.WriteString("Resumen: " + c.Summary + "\n")
+		}
+		if strings.TrimSpace(c.Goal) != "" {
+			sb.WriteString("Goal: " + c.Goal + "\n")
+		}
+		if strings.TrimSpace(c.Approach) != "" {
+			sb.WriteString("Approach: " + c.Approach + "\n")
+		}
+		if len(c.AcceptanceCriteria) > 0 {
+			sb.WriteString("Acceptance criteria:\n")
+			for i, crit := range c.AcceptanceCriteria {
+				sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, crit))
+			}
+		}
+		if len(c.Steps) > 0 {
+			sb.WriteString("Steps:\n")
+			for i, step := range c.Steps {
+				sb.WriteString(fmt.Sprintf("  %d. %s\n", i+1, step))
+			}
+		}
+		if len(c.RisksToMitigate) > 0 {
+			sb.WriteString("Risks to mitigate:\n")
+			for _, r := range c.RisksToMitigate {
+				sb.WriteString(fmt.Sprintf("  - %s (likelihood=%s, impact=%s) — %s\n",
+					r.Risk, r.Likelihood, r.Impact, r.Mitigation))
+			}
+		}
+		if len(c.OutOfScope) > 0 {
+			sb.WriteString("Out of scope:\n")
+			for _, o := range c.OutOfScope {
+				sb.WriteString("  - " + o + "\n")
+			}
+		}
+	}
+	// Fallback: si el plan parseado viene sin secciones (body con el header
+	// pero sin sub-secciones reconocibles) incluimos el body raw para que
+	// el validador pueda opinar sobre el texto real, no sobre vacío.
+	planEmpty := c == nil ||
+		(strings.TrimSpace(c.Goal) == "" && strings.TrimSpace(c.Approach) == "" &&
+			len(c.AcceptanceCriteria) == 0 && len(c.Steps) == 0)
+	if planEmpty {
+		sb.WriteString("\n(El parser no extrajo secciones estructuradas; se adjunta el body raw como fallback.)\n")
+	}
+	sb.WriteString("\nBody raw del issue:\n<<<\n")
+	sb.WriteString(issue.Body)
+	sb.WriteString("\n>>>\n")
+	return sb.String()
+}
+
+// ---- list candidates (para TUI PR #6) ----
+
+// PlanCandidate es la vista mínima de un issue listo para validar como plan:
+// abierto, con status:plan, sin plan-validated:approve. La TUI lo consume
+// para poblar la lista "plans pending validation". Es un struct dedicado en
+// vez de reusar explore.Candidate porque el set de labels relevantes y los
+// filtros de exclusión son distintos (acá excluimos plan-validated:approve,
+// allá filtramos por ct:plan sin status).
+type PlanCandidate struct {
+	Number int
+	Title  string
+	URL    string
+}
+
+// ListPlanCandidates devuelve los issues abiertos con status:plan que NO
+// tienen plan-validated:approve — candidatos a validar como plan. Limita a
+// 50 (la TUI se vuelve inmanejable con más, igual que ListOpenPRs).
+//
+// Excluye plan-validated:approve pero mantiene :changes-requested y
+// :needs-human visibles: el humano puede re-validar tras editar el plan.
+func ListPlanCandidates() ([]PlanCandidate, error) {
+	cmd := exec.Command("gh", "issue", "list",
+		"--label", labels.StatusPlan,
+		"--state", "open",
+		"--json", "number,title,url,labels",
+		"--limit", "50")
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("gh issue list: %s", strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, err
+	}
+	var raw []Issue
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("parse gh issue list output: %w", err)
+	}
+	return filterPlanCandidates(raw), nil
+}
+
+// filterPlanCandidates aplica la regla de exclusión de approve. Lo separamos
+// en función testeable para no depender de `gh` en los unit tests.
+func filterPlanCandidates(raw []Issue) []PlanCandidate {
+	out := make([]PlanCandidate, 0, len(raw))
+	for _, i := range raw {
+		if i.HasLabel(labels.PlanValidatedApprove) {
+			continue
+		}
+		out = append(out, PlanCandidate{
+			Number: i.Number,
+			Title:  i.Title,
+			URL:    i.URL,
+		})
+	}
+	return out
 }
