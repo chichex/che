@@ -323,6 +323,25 @@ func Run(ref string, opts Opts) ExitCode {
 	}
 }
 
+// DetectTarget decide si un ref apunta a un issue (TargetPlan) o a un PR
+// (TargetPR). Expuesto para que otros flows (ej. iterate) reusen exactamente
+// la misma detección (mismo endpoint `gh api` + manejo de errores) sin
+// duplicar lógica.
+//
+// Errores: devuelve un error que matchea `errors.Is(err, ErrInvalidRef)`
+// cuando el ref tiene formato irreparable (no número, no URL con /pull/ o
+// /issues/, no owner/repo#N). El resto de los errores vienen de `gh api`
+// (red, 404) — el caller los trata como remediables.
+func DetectTarget(ref string) (Target, error) {
+	return detectTarget(ref)
+}
+
+// ErrInvalidRef es el error que DetectTarget devuelve cuando el ref tiene
+// formato irreparable. Expuesto para que los callers distingan "input del
+// usuario malformado" (ExitSemantic) de "gh api falló" (ExitRetry) vía
+// errors.Is.
+var ErrInvalidRef = errInvalidRef
+
 // runPR es el flow histórico: valida el diff de un PR abierto, postea
 // comments en el PR y aplica validated:*. El preflight (auth + remote)
 // ya corrió en Run.

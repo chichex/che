@@ -10,27 +10,29 @@ import (
 )
 
 var iterateCmd = &cobra.Command{
-	Use:   "iterate <pr-ref>",
-	Short: "aplica los findings de che validate con opus sobre un PR con validated:changes-requested",
-	Long: `iterate toma un PR que tiene verdict validated:changes-requested y le
-aplica los cambios que pidieron los validadores:
+	Use:   "iterate <ref>",
+	Short: "aplica findings de che validate sobre un plan (issue) o PR",
+	Long: `iterate aplica los findings del último run de che validate al ref dado.
+Detecta si <ref> es un issue o un PR y despacha en consecuencia:
 
-  1. Lee los comments del último run de che validate (todos los findings).
-  2. Resuelve el worktree del PR (reusa ` + "`.worktrees/issue-<N>`" + ` si lo
-     creó che execute, o crea uno nuevo sobre la head branch).
-  3. Invoca a opus (claude) con los findings y el contexto del PR.
-  4. Si opus dejó commits, los pushea, postea un comment flow=iterate y
-     remueve el label validated:changes-requested para dejar el PR listo
-     para una nueva validación.
-  5. Si opus no produjo cambios reales, sale con exit 2 y deja todo como
-     estaba — no miente sobre una iteración que no ocurrió.
+Modo plan (issue con plan-validated:changes-requested):
+  1. Lee los comments del último run de che validate en el issue.
+  2. Invoca a opus para reescribir el plan consolidado aplicando los findings.
+  3. Reemplaza el body del issue con el plan iterado (sin tocar git ni worktree).
+  4. Postea un comment flow=iterate y remueve plan-validated:changes-requested.
 
-iterate NO gatea por estado del PR (abierto/draft/etc) más allá de lo
-mínimo; el humano pide iterar y che obedece. Tampoco requiere que el PR
-tenga el label validated:changes-requested — si no hay findings de
-validate en los comments, sale con exit 3 porque no hay nada que iterar.
+Modo PR (PR con validated:changes-requested):
+  1. Lee los comments del último run de che validate en el PR.
+  2. Resuelve el worktree del PR (reusa .worktrees/issue-<N> si existe).
+  3. Invoca a opus con los findings y el contexto del PR.
+  4. Si opus dejó commits, los pushea, postea flow=iterate y remueve el label.
+  5. Si no produjo cambios reales, sale con exit 2 y deja todo como estaba.
 
-Formatos aceptados para <pr-ref>:
+Ejemplos:
+  che iterate 42    # issue con plan-validated:changes-requested → edita plan consolidado
+  che iterate 7     # PR con validated:changes-requested → commits en la branch
+
+Formatos aceptados para <ref>:
   che iterate 7
   che iterate https://github.com/owner/repo/pull/7
   che iterate owner/repo#7
@@ -41,7 +43,7 @@ No hay flag --agent: iterate usa opus (claude) por diseño.`,
 		if _, err := validate.ParseRef(args[0]); err != nil {
 			cmd.SilenceUsage = true
 			cmd.SilenceErrors = true
-			os.Stderr.WriteString("error: invalid pr ref: " + err.Error() + "\n")
+			os.Stderr.WriteString("error: invalid ref: " + err.Error() + "\n")
 			os.Exit(int(iterate.ExitSemantic))
 		}
 		code := iterate.Run(args[0], iterate.Opts{

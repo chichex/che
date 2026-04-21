@@ -1,6 +1,7 @@
 package e2e_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -44,6 +45,7 @@ func TestIterate_InvalidPRRef_Exit3(t *testing.T) {
 func TestIterate_NoFindings_Exit3(t *testing.T) {
 	env := setupIterateEnv(t)
 	scriptIteratePrechecks(env)
+	scriptIterateDetectTargetPR(env, 7)
 
 	env.ExpectGh(`^pr view 7 --json number,title`).
 		RespondStdoutFromFixture("iterate/gh_pr_view_changes_requested.json", 0)
@@ -64,6 +66,7 @@ func TestIterate_NoFindings_Exit3(t *testing.T) {
 func TestIterate_AgentNoChanges_Exit2(t *testing.T) {
 	env := setupIterateEnv(t)
 	scriptIteratePrechecks(env)
+	scriptIterateDetectTargetPR(env, 7)
 	env.SetEnv("CHE_ITERATE_SKIP_FETCH", "1")
 	runIn(t, env.RepoDir, "git", "branch", "feat/x")
 
@@ -94,6 +97,155 @@ func TestIterate_AgentNoChanges_Exit2(t *testing.T) {
 	}
 }
 
+// TestIterate_PlanGoldenPath: issue con plan-validated:changes-requested,
+// comments de validate → opus iteró el plan → se edita body, se postea
+// comment, se remueve el label.
+func TestIterate_PlanGoldenPath(t *testing.T) {
+	env := setupIterateEnv(t)
+	scriptIteratePrechecks(env)
+	scriptIterateDetectTargetPlan(env, 42)
+
+	env.ExpectGh(`^issue view 42 --json number,title,body,labels,url,state$`).
+		RespondStdoutFromFixture("iterate/gh_issue_view_plan_changes_requested.json", 0)
+	env.ExpectGh(`^issue view 42 --json comments$`).
+		RespondStdoutFromFixture("iterate/gh_issue_comments_with_findings.json", 0)
+
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior reescribiendo`).
+		RespondStdoutFromFixture("iterate/opus_iterated_plan.json", 0)
+
+	env.ExpectGh(`^issue edit 42 --body-file`).Consumable().RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue comment 42 --body-file`).Consumable().RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 42 --remove-label plan-validated:changes-requested$`).
+		Consumable().RespondStdout("ok\n", 0)
+
+	out := env.MustRun("iterate", "42")
+	harness.AssertContains(t, out, "Iterated plan")
+	harness.AssertContains(t, out, "che validate 42")
+
+	inv := env.Invocations()
+	if len(inv.For("claude")) != 1 {
+		t.Fatalf("expected 1 claude call, got %d", len(inv.For("claude")))
+	}
+	if edits := inv.FindCalls("gh", "issue", "edit", "42", "--body-file"); len(edits) != 1 {
+		t.Fatalf("expected 1 issue edit --body-file, got %d", len(edits))
+	}
+	if comments := inv.FindCalls("gh", "issue", "comment", "42", "--body-file"); len(comments) != 1 {
+		t.Fatalf("expected 1 issue comment, got %d", len(comments))
+	}
+	if rm := inv.FindCalls("gh", "issue", "edit", "42", "--remove-label", "plan-validated:changes-requested"); len(rm) != 1 {
+		t.Fatalf("expected 1 remove-label call, got %d", len(rm))
+	}
+}
+
+// TestIterate_Plan_NoLabel_Exit3: issue sin plan-validated:changes-requested
+// → exit semantic, no llama opus.
+func TestIterate_Plan_NoLabel_Exit3(t *testing.T) {
+	env := setupIterateEnv(t)
+	scriptIteratePrechecks(env)
+	scriptIterateDetectTargetPlan(env, 42)
+
+	env.ExpectGh(`^issue view 42 --json number,title,body,labels,url,state$`).
+		RespondStdoutFromFixture("iterate/gh_issue_view_plan_no_label.json", 0)
+
+	r := env.Run("iterate", "42")
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "plan-validated:changes-requested")
+	env.Invocations().AssertNotCalled(t, "claude")
+}
+
+// TestIterate_Plan_Executing_Exit3: issue con status:executing → exit
+// semantic, mensaje accionable explicando que el plan ya se ejecutó.
+func TestIterate_Plan_Executing_Exit3(t *testing.T) {
+	env := setupIterateEnv(t)
+	scriptIteratePrechecks(env)
+	scriptIterateDetectTargetPlan(env, 42)
+
+	env.ExpectGh(`^issue view 42 --json number,title,body,labels,url,state$`).
+		RespondStdoutFromFixture("iterate/gh_issue_view_plan_executing.json", 0)
+
+	r := env.Run("iterate", "42")
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "execute")
+	env.Invocations().AssertNotCalled(t, "claude")
+}
+
+// TestIterate_Plan_NoFindings_Exit3: issue con el label pero sin comments
+// de validate → exit semantic.
+func TestIterate_Plan_NoFindings_Exit3(t *testing.T) {
+	env := setupIterateEnv(t)
+	scriptIteratePrechecks(env)
+	scriptIterateDetectTargetPlan(env, 42)
+
+	env.ExpectGh(`^issue view 42 --json number,title,body,labels,url,state$`).
+		RespondStdoutFromFixture("iterate/gh_issue_view_plan_changes_requested.json", 0)
+	env.ExpectGh(`^issue view 42 --json comments$`).
+		RespondStdoutFromFixture("iterate/gh_issue_comments_empty.json", 0)
+
+	r := env.Run("iterate", "42")
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "findings de che validate")
+	env.Invocations().AssertNotCalled(t, "claude")
+}
+
+// TestIterate_Plan_NoConsolidated_Exit3: body sin plan consolidado → exit
+// semantic.
+func TestIterate_Plan_NoConsolidated_Exit3(t *testing.T) {
+	env := setupIterateEnv(t)
+	scriptIteratePrechecks(env)
+	scriptIterateDetectTargetPlan(env, 42)
+
+	env.ExpectGh(`^issue view 42 --json number,title,body,labels,url,state$`).
+		RespondStdoutFromFixture("iterate/gh_issue_view_plan_no_consolidated.json", 0)
+
+	r := env.Run("iterate", "42")
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "plan consolidado")
+	env.Invocations().AssertNotCalled(t, "claude")
+}
+
+// TestIterate_Plan_NoChanges_ExitRetry: opus devuelve el mismo plan →
+// exit retry (2) con mensaje accionable, no edita body ni postea comment.
+func TestIterate_Plan_NoChanges_ExitRetry(t *testing.T) {
+	env := setupIterateEnv(t)
+	scriptIteratePrechecks(env)
+	scriptIterateDetectTargetPlan(env, 42)
+
+	env.ExpectGh(`^issue view 42 --json number,title,body,labels,url,state$`).
+		RespondStdoutFromFixture("iterate/gh_issue_view_plan_changes_requested.json", 0)
+	env.ExpectGh(`^issue view 42 --json comments$`).
+		RespondStdoutFromFixture("iterate/gh_issue_comments_with_findings.json", 0)
+
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior reescribiendo`).
+		RespondStdoutFromFixture("iterate/opus_same_plan.json", 0)
+
+	r := env.Run("iterate", "42")
+	if r.ExitCode != 2 {
+		t.Fatalf("expected exit 2, got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "no produjo cambios")
+
+	inv := env.Invocations()
+	if edits := inv.FindCalls("gh", "issue", "edit", "42", "--body-file"); len(edits) != 0 {
+		t.Fatalf("expected 0 issue edit --body-file on no-change, got %d", len(edits))
+	}
+	if comments := inv.FindCalls("gh", "issue", "comment", "42", "--body-file"); len(comments) != 0 {
+		t.Fatalf("expected 0 issue comment on no-change, got %d", len(comments))
+	}
+	if rm := inv.FindCalls("gh", "issue", "edit", "42", "--remove-label"); len(rm) != 0 {
+		t.Fatalf("expected 0 remove-label on no-change, got %d", len(rm))
+	}
+}
+
 // ---- helpers ----
 
 // setupIterateEnv prepara un repo git real + remote bare para que el
@@ -119,4 +271,21 @@ func setupIterateEnv(t *testing.T) *harness.Env {
 func scriptIteratePrechecks(env *harness.Env) {
 	env.ExpectGh(`^auth status$`).Consumable().
 		RespondStdout("Logged in as acme\n", 0)
+}
+
+// scriptIterateDetectTargetPR scriptea la respuesta del `gh api
+// repos/{owner}/{repo}/issues/<n>` que iterate consulta vía DetectTarget:
+// pull_request:{} indica PR → modo PR.
+func scriptIterateDetectTargetPR(env *harness.Env, number int) {
+	env.ExpectGh(fmt.Sprintf(`^api repos/\{owner\}/\{repo\}/issues/%d$`, number)).
+		Consumable().
+		RespondStdout(fmt.Sprintf(`{"number":%d,"pull_request":{"url":"https://api.github.com/repos/acme/demo/pulls/%d"}}`, number, number), 0)
+}
+
+// scriptIterateDetectTargetPlan scriptea la respuesta para modo plan:
+// pull_request:null indica issue.
+func scriptIterateDetectTargetPlan(env *harness.Env, number int) {
+	env.ExpectGh(fmt.Sprintf(`^api repos/\{owner\}/\{repo\}/issues/%d$`, number)).
+		Consumable().
+		RespondStdout(fmt.Sprintf(`{"number":%d,"pull_request":null}`, number), 0)
 }

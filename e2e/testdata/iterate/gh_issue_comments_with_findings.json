@@ -1,0 +1,14 @@
+{
+  "comments": [
+    {
+      "body": "<!-- claude-cli: flow=validate iter=1 agent=opus instance=1 role=validator -->\n## [che · validate · opus#1 · iter:1 · changes_requested]\n\n**Resumen:** faltan tests para el caso X.\n\n### Findings\n- **[major · tests · technical]** tests faltantes para ventana deslizante _(en: steps[3])_\n  - sugerencia: agregar step explícito de tests de expiración\n",
+      "createdAt": "2026-04-20T00:00:00Z",
+      "author": {"login": "chichex"}
+    },
+    {
+      "body": "<!-- claude-cli: flow=validate iter=1 role=summary -->\n## 🤖 [che · validate · resumen iter:1]\n\n| Validador | Verdict | Findings |\n|---|---|---|\n| opus#1 | changes_requested | 1 |\n",
+      "createdAt": "2026-04-20T00:00:01Z",
+      "author": {"login": "chichex"}
+    }
+  ]
+}
