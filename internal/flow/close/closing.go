@@ -1151,19 +1151,6 @@ func runGit(repoRoot string, args ...string) error {
 	return nil
 }
 
-// runGitCtx corre `git -C repoRoot args...` con contexto para el cleanup
-// (evita colgarse si un remove queda zombi). Análogo a runGit pero cancela
-// el subproceso si ctx vence.
-func runGitCtx(ctx context.Context, repoRoot string, args ...string) error {
-	full := append([]string{"-C", repoRoot}, args...)
-	cmd := exec.CommandContext(ctx, "git", full...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git %s: %s", strings.Join(args, " "), strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
 // cleanupWorktree remueve el worktree asociado al PR mergeado y borra la
 // branch local residual. Todo error acá es post-merge: emitimos warning a
 // stderr y seguimos — el merge ya ocurrió.
