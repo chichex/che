@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -704,5 +705,85 @@ func TestWaitValidators_Timeout(t *testing.T) {
 	}
 	if !strings.Contains(out, "1/2") {
 		t.Errorf("expected 1/2 completaron, got:\n%s", out)
+	}
+}
+
+// TestRenderValidatorComment_HeaderPrefix protege el wiring: el body del PR
+// comment que postea execute tiene que empezar con el HTML comment de che
+// (flow=execute, iter=N, agent=..., instance=..., role=validator) seguido del
+// cuerpo. Si alguien rompe el Sprintf o cambia el orden, este test lo
+// atrapa sin tocar la red ni el agente.
+func TestRenderValidatorComment_HeaderPrefix(t *testing.T) {
+	v := Validator{Agent: AgentOpus, Instance: 1}
+	got := renderValidatorComment(2, v, "findings del agente\n")
+
+	wantPrefix := "<!-- claude-cli: flow=execute iter=2 agent=opus instance=1 role=validator -->\n"
+	if !strings.HasPrefix(got, wantPrefix) {
+		t.Fatalf("body no arranca con el header esperado\n got:  %q\n want: prefix %q", got, wantPrefix)
+	}
+	if !strings.Contains(got, "## Validator opus#1") {
+		t.Errorf("falta el sub-header del validator en el body:\n%s", got)
+	}
+	if !strings.Contains(got, "findings del agente") {
+		t.Errorf("falta el output del agente en el body:\n%s", got)
+	}
+}
+
+// TestRenderValidatorComment_IterPropagated asegura que el iter que recibe
+// renderValidatorComment es el que termina en el header — Codex marcó este
+// punto: cuando execute reusa un PR existente, el iter tiene que numerar la
+// nueva tanda, no quedar fijo en 1.
+func TestRenderValidatorComment_IterPropagated(t *testing.T) {
+	for _, iter := range []int{1, 2, 7} {
+		got := renderValidatorComment(iter, Validator{Agent: AgentCodex, Instance: 2}, "x")
+		want := fmt.Sprintf("iter=%d", iter)
+		if !strings.Contains(got, want) {
+			t.Errorf("iter=%d no aparece en el header:\n%s", iter, got)
+		}
+	}
+}
+
+// TestNextValidatorIter_Empty y sus hermanos cubren la lógica del selector
+// de iter que corre en el caller antes de fireValidators. Sin estos tests,
+// la fix del hardcoded iter=1 queda sin cobertura y puede regresar.
+func TestNextValidatorIter_Empty(t *testing.T) {
+	if got := nextValidatorIter(nil); got != 1 {
+		t.Errorf("sin comments previos, iter debe ser 1; got %d", got)
+	}
+	if got := nextValidatorIter([]PRComment{}); got != 1 {
+		t.Errorf("con slice vacío, iter debe ser 1; got %d", got)
+	}
+}
+
+func TestNextValidatorIter_IgnoraComentariosAjenos(t *testing.T) {
+	cs := []PRComment{
+		{Body: "hola humano aquí, sin header"},
+		{Body: "<!-- claude-cli: flow=explore iter=3 role=executor -->\nplan"},
+		{Body: "<!-- claude-cli: flow=execute iter=4 role=pr-link -->\ncomment al issue"},
+	}
+	if got := nextValidatorIter(cs); got != 1 {
+		t.Errorf("comments de otros flows/roles no deben contar; got %d", got)
+	}
+}
+
+func TestNextValidatorIter_MaxPlusOne(t *testing.T) {
+	cs := []PRComment{
+		{Body: renderValidatorComment(1, Validator{Agent: AgentOpus, Instance: 1}, "a")},
+		{Body: renderValidatorComment(1, Validator{Agent: AgentCodex, Instance: 1}, "b")},
+		{Body: renderValidatorComment(2, Validator{Agent: AgentOpus, Instance: 1}, "c")},
+	}
+	if got := nextValidatorIter(cs); got != 3 {
+		t.Errorf("max(iter)=2 → next=3; got %d", got)
+	}
+}
+
+// TestNextValidatorIter_ReusaRealRoundTrip arma un body como el que postearía
+// execute (via renderValidatorComment) y verifica que nextValidatorIter lo
+// parsea correctamente. Esto ata los dos extremos del contrato: lo que
+// escribimos es lo que después sabemos leer.
+func TestNextValidatorIter_ReusaRealRoundTrip(t *testing.T) {
+	body := renderValidatorComment(5, Validator{Agent: AgentGemini, Instance: 1}, "findings\n")
+	if got := nextValidatorIter([]PRComment{{Body: body}}); got != 6 {
+		t.Errorf("round-trip: iter posteado=5, siguiente debería ser 6; got %d", got)
 	}
 }

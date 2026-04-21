@@ -3,6 +3,7 @@ package e2e_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/chichex/che/e2e/harness"
@@ -211,6 +212,42 @@ func TestClose_ConflictsExhaustAttempts_Exit2(t *testing.T) {
 	// NO debe haber cerrado el issue.
 	if closes := inv.FindCalls("gh", "issue close"); len(closes) != 0 {
 		t.Fatalf("expected 0 gh issue close calls, got %d", len(closes))
+	}
+}
+
+// TestClose_NoChecksReported_TreatedAsCINone: PR con conflicts y sin CI
+// configurado. `gh pr checks` sale con exit=1 y stderr "no checks reported
+// on the '<branch>' branch". Tratamos ese caso como CINone (no bloquea)
+// — el único problema real es el conflict, que el flow debe reportar
+// normalmente en vez de abortar con "error: gh pr checks: no checks
+// reported…".
+func TestClose_NoChecksReported_TreatedAsCINone(t *testing.T) {
+	env := setupCloseEnv(t)
+	scriptClosePrechecks(env)
+	env.SetEnv("CHE_CLOSE_SKIP_FETCH", "1")
+	runIn(t, env.RepoDir, "git", "branch", "feat/conflicting")
+
+	env.ExpectGh(`^pr view 7`).RespondStdoutFromFixture("close/gh_pr_view_conflicting.json", 0)
+	// gh pr checks: exit 1 con el mensaje típico del caso "PR con
+	// conflicts donde CI nunca corrió" — reproduce el bug reportado.
+	env.ExpectGh(`^pr checks 7`).RespondExitWithError(1,
+		"no checks reported on the 'feat/conflicting' branch\n")
+
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`Conflictos con main`).
+		RespondStdout("no pude resolver los conflictos\n", 0)
+
+	r := env.Run("close", "7")
+	if r.ExitCode != 2 {
+		t.Fatalf("expected exit 2 (retry por conflicts sin resolver), got %d\nstderr: %s",
+			r.ExitCode, r.Stderr)
+	}
+	// El flow debe reportar el problema real (conflicts) y agotar intentos
+	// — no abortar con el mensaje de gh pr checks.
+	harness.AssertContains(t, r.Stderr, "conflicts")
+	if strings.Contains(r.Stderr, "gh pr checks: no checks reported") {
+		t.Fatalf("no checks reported debió tratarse como CINone, pero close abortó con el error de gh\nstderr: %s",
+			r.Stderr)
 	}
 }
 

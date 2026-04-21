@@ -1010,13 +1010,20 @@ func FetchChecks(ref string) ([]Check, error) {
 	out, err := cmd.Output()
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
-			// `gh pr checks` sale con exit=8 cuando hay checks que fallan
-			// — el stdout igual viene bien formado. Tratamos 8 como OK y
-			// dejamos que aggregateCIState detecte el failure.
-			if ee.ExitCode() == 8 && len(ee.Stderr) == 0 {
-				// continuamos con lo que haya en stdout del cmd
-			} else {
-				return nil, fmt.Errorf("gh pr checks: %s", strings.TrimSpace(string(ee.Stderr)))
+			stderr := strings.TrimSpace(string(ee.Stderr))
+			switch {
+			case ee.ExitCode() == 8 && stderr == "":
+				// `gh pr checks` sale con exit=8 cuando hay checks que
+				// fallan — el stdout igual viene bien formado. Tratamos 8
+				// como OK y dejamos que aggregateCIState detecte el failure.
+			case strings.Contains(stderr, "no checks reported"):
+				// PR sin checks configurados o con CI bloqueado por
+				// conflicts: gh sale con exit=1 y tira "no checks reported
+				// on the '<branch>' branch". Semánticamente es CINone —
+				// no hay nada que parsear, devolvemos slice vacío.
+				return nil, nil
+			default:
+				return nil, fmt.Errorf("gh pr checks: %s", stderr)
 			}
 		}
 	}
