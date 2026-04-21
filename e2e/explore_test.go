@@ -113,6 +113,64 @@ func TestExplore_IssueMissingCtPlan_ClassifiesAndContinues(t *testing.T) {
 		"--add-label", "status:plan")
 }
 
+// TestExplore_IssueMissingCtPlan_NoTypeSize_AppliesInferred: issue sin
+// ct:plan Y sin type/size → el LLM clasifica y el primer `gh issue edit` debe
+// aplicar también los labels inferidos (type:feature + size:m del fixture de
+// idea) además de ct:plan + status:idea. Cubre la rama principal del issue
+// #31: issues creados a mano sin ningún label del pipeline.
+func TestExplore_IssueMissingCtPlan_NoTypeSize_AppliesInferred(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 77`).RespondStdoutFromFixture("explore/gh_issue_view_without_labels.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`clasificador de ideas`).
+		RespondStdoutFromFixture("idea/sonnet_single.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectGh(`^issue comment 77`).RespondStdout("https://github.com/acme/demo/issues/77#issuecomment-1\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 77 `).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("explore", "--validators", "none", "77")
+	harness.AssertContains(t, out, "Explored")
+
+	inv := env.Invocations()
+	if n := len(inv.For("claude")); n != 2 {
+		t.Fatalf("expected 2 claude calls (classifier + explorer), got %d", n)
+	}
+	edits := inv.FindCalls("gh", "issue", "edit", "77")
+	if len(edits) < 2 {
+		t.Fatalf("expected at least 2 gh issue edit calls (reclassify + status transition), got %d", len(edits))
+	}
+	// La primera edit debe aplicar los 4 labels en una sola llamada atómica:
+	// ct:plan + status:idea + type/size inferidos por el LLM (feature / m del
+	// fixture idea/sonnet_single.json).
+	edits[0].AssertArgsContain(t,
+		"--add-label", "ct:plan",
+		"--add-label", "status:idea",
+		"--add-label", "type:feature",
+		"--add-label", "size:m",
+	)
+	// labels.Ensure debe haberse invocado para cada uno de esos labels (son los
+	// `gh label create --force` idempotentes antes del edit).
+	labelCreates := inv.FindCalls("gh", "label", "create")
+	joined := ""
+	for _, c := range labelCreates {
+		joined += " " + strings.Join(c.Args, " ")
+	}
+	for _, expected := range []string{"ct:plan", "status:idea", "type:feature", "size:m"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected gh label create for %q; calls=%v", expected, labelCreates)
+		}
+	}
+	// La última edit es la transición a status:plan.
+	edits[len(edits)-1].AssertArgsContain(t,
+		"--remove-label", "status:idea",
+		"--add-label", "status:plan")
+}
+
 // TestExplore_IssueMissingCtPlan_ClassifierFails_Exit2: si el LLM falla o
 // devuelve JSON inválido, explore aborta con exit 2 y NO aplica labels
 // parciales. El issue queda como estaba antes.
