@@ -12,6 +12,12 @@ func TestTransitionFor_Valid(t *testing.T) {
 		wantRem  []string
 	}{
 		{
+			from:    StatusIdea,
+			to:      StatusPlan,
+			wantAdd: []string{StatusPlan},
+			wantRem: []string{StatusIdea},
+		},
+		{
 			from:    StatusPlan,
 			to:      StatusExecuting,
 			wantAdd: []string{StatusExecuting},
