@@ -19,6 +19,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	closing "github.com/chichex/che/internal/flow/close"
 	"github.com/chichex/che/internal/flow/execute"
 	"github.com/chichex/che/internal/flow/explore"
@@ -178,6 +179,11 @@ type Model struct {
 	version string
 	repo    string
 	branch  string
+
+	// width es el ancho de la terminal, recibido vía tea.WindowSizeMsg.
+	// Cuando es 0 (antes del primer resize), los helpers de render caen
+	// a límites hardcodeados para no romper tests ni la primera frame.
+	width int
 
 	// ctx es el context raíz del TUI (signal.NotifyContext en tui.Run).
 	// Cada flow en background se corre sobre un subcontext derivado —
@@ -457,6 +463,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		return m.handleKey(msg)
+
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		return m, nil
 
 	case shutdownMsg:
 		// Señal externa (SIGTERM/SIGINT fuera de la TUI). Si hay un run
@@ -1589,7 +1599,7 @@ func (m Model) View() string {
 		return renderExploreAgent(m)
 	case screenExploreRunning:
 		return renderRunning(m, "Explorando issue…",
-			renderRunSubject(m.exploreChosenRef, m.exploreChosenTitle),
+			renderRunSubject(m.exploreChosenRef, m.exploreChosenTitle, runSubjectContentWidth(m.width)),
 			"Ctrl+C cancela")
 	case screenExecuteLoading:
 		return renderExecuteLoading(m)
@@ -1599,7 +1609,7 @@ func (m Model) View() string {
 		return renderExecuteAgent(m)
 	case screenExecuteRunning:
 		return renderRunning(m, "Ejecutando issue…",
-			renderRunSubject(m.executeChosenRef, m.executeChosenTitle),
+			renderRunSubject(m.executeChosenRef, m.executeChosenTitle, runSubjectContentWidth(m.width)),
 			"Ctrl+C cancela")
 	case screenValidateLoading:
 		return renderValidateLoading(m)
@@ -1613,7 +1623,7 @@ func (m Model) View() string {
 			validateTitle = "Validando plan…"
 		}
 		return renderRunning(m, validateTitle,
-			renderRunSubject(m.validateChosenRef, m.validateChosenTitle),
+			renderRunSubject(m.validateChosenRef, m.validateChosenTitle, runSubjectContentWidth(m.width)),
 			"Ctrl+C cancela")
 	case screenCloseLoading:
 		return renderCloseLoading(m)
@@ -1631,7 +1641,7 @@ func (m Model) View() string {
 			iterateTitle = "Iterando sobre plan…"
 		}
 		return renderRunning(m, iterateTitle,
-			renderRunSubject(m.iterateChosenRef, m.iterateChosenTitle),
+			renderRunSubject(m.iterateChosenRef, m.iterateChosenTitle, runSubjectContentWidth(m.width)),
 			"Ctrl+C cancela")
 	case screenLocksLoading:
 		return renderLocksLoading(m)
@@ -1949,7 +1959,7 @@ func renderMenu(m Model) string {
 	sb.WriteString("\n")
 	sb.WriteString(contextLineStyle.Render(formatContext(m)))
 	sb.WriteString("\n")
-	if line := formatLastAction(m.lastAction); line != "" {
+	if line := formatLastAction(m.lastAction, contextContentWidth(m.width)); line != "" {
 		sb.WriteString(contextLineStyle.Render(line))
 		sb.WriteString("\n")
 	}
@@ -1991,7 +2001,12 @@ func renderMenu(m Model) string {
 // «título» · hace 3m". Devuelve "" si no hay lastAction (primer menú).
 // El verbo conjugado se elige según el flow (idea/explore/execute/etc.);
 // para flows que no tienen ref (idea) omite el "#N".
-func formatLastAction(la *lastAction) string {
+//
+// contentWidth es el ancho disponible para el texto (ya descontado el
+// padding del contextLineStyle). Si es <= 0 se usa el cap histórico de
+// 40 runas para el título, preservando la firma previa en tests que
+// construyen Model{} sin width.
+func formatLastAction(la *lastAction, contentWidth int) string {
 	if la == nil {
 		return ""
 	}
@@ -1999,18 +2014,58 @@ func formatLastAction(la *lastAction) string {
 	if verb == "" {
 		return ""
 	}
-	parts := []string{"Última: " + verb}
+	head := "Última: " + verb
+	refPart := ""
 	if la.Ref != "" {
-		ref := "#" + la.Ref
-		if la.Title != "" {
-			ref += " «" + truncateRunes(la.Title, 40) + "»"
-		}
-		parts[0] += " " + ref
+		refPart = " #" + la.Ref
 	}
+	timePart := ""
 	if !la.At.IsZero() {
-		parts = append(parts, "hace "+humanDuration(time.Since(la.At)))
+		timePart = " · hace " + humanDuration(time.Since(la.At))
 	}
-	return strings.Join(parts, " · ")
+
+	// Sin título o sin ref: no hay nada para truncar.
+	if la.Title == "" || la.Ref == "" {
+		return head + refPart + timePart
+	}
+
+	// Título envuelto como " «...»". Overhead fijo de 3 caracteres.
+	const wrapOverhead = 3
+	maxTitle := 40
+	if contentWidth > 0 {
+		remaining := contentWidth - lipgloss.Width(head+refPart+timePart) - wrapOverhead
+		if remaining < 4 {
+			// No entra ni un título útil: preferimos soltarlo antes que
+			// perder el "hace Xm" al final (el usuario ya ve ref arriba).
+			if lipgloss.Width(head+refPart+timePart) > contentWidth {
+				// Tampoco entra con time: probamos sin él.
+				if lipgloss.Width(head+refPart) <= contentWidth {
+					return head + refPart
+				}
+			}
+			return head + refPart + timePart
+		}
+		maxTitle = remaining
+		if maxTitle > 80 {
+			maxTitle = 80
+		}
+	}
+	return head + refPart + " «" + truncateRunes(la.Title, maxTitle) + "»" + timePart
+}
+
+// contextContentWidth devuelve el ancho disponible dentro del
+// contextLineStyle (descuenta el padding horizontal = 4). Si width es
+// 0 (antes del primer WindowSizeMsg) devuelve 0 para que los helpers
+// caigan a sus límites hardcodeados.
+func contextContentWidth(width int) int {
+	if width <= 0 {
+		return 0
+	}
+	const horizontalPadding = 4 // contextLineStyle: Padding(0, 2, 1, 2)
+	if width <= horizontalPadding {
+		return 1
+	}
+	return width - horizontalPadding
 }
 
 // lastActionVerb devuelve el verbo conjugado en pretérito para mostrar
@@ -2113,8 +2168,9 @@ func renderRunning(m Model, title, subject, hint string) string {
 		sb.WriteString(hintStyle.Render("  arrancando…"))
 		sb.WriteString("\n")
 	} else {
+		style := logLineContentStyle(m.width)
 		for _, line := range m.runLog {
-			sb.WriteString("  " + logLineStyle.Render(line) + "\n")
+			sb.WriteString("  " + style.Render(line) + "\n")
 		}
 	}
 
@@ -2122,6 +2178,21 @@ func renderRunning(m Model, title, subject, hint string) string {
 	sb.WriteString(hintStyle.Render(hint))
 	sb.WriteString("\n")
 	return sb.String()
+}
+
+// logLineContentStyle devuelve logLineStyle con MaxWidth aplicado cuando
+// hay width disponible. Las log lines se imprimen con prefijo "  " (2
+// espacios), así que reservamos 2 columnas antes del contenido.
+func logLineContentStyle(width int) lipgloss.Style {
+	if width <= 0 {
+		return logLineStyle
+	}
+	const prefix = 2
+	maxContent := width - prefix
+	if maxContent < 1 {
+		maxContent = 1
+	}
+	return logLineStyle.MaxWidth(maxContent)
 }
 
 func renderExploreLoading(m Model) string {
@@ -2223,8 +2294,9 @@ func renderResult(m Model) string {
 		sb.WriteString("\n")
 		sb.WriteString(subtitleStyle.Render("Log:"))
 		sb.WriteString("\n")
+		logStyle := logLineContentStyle(m.width)
 		for _, line := range m.runLog {
-			sb.WriteString("  " + logLineStyle.Render(line) + "\n")
+			sb.WriteString("  " + logStyle.Render(line) + "\n")
 		}
 	}
 
@@ -2237,12 +2309,22 @@ func renderResult(m Model) string {
 			sb.WriteString(subtitleStyle.Render("Resultado:"))
 			sb.WriteString("\n")
 		}
+		maxContent := 0
+		if m.width > 0 {
+			maxContent = m.width - 2
+			if maxContent < 1 {
+				maxContent = 1
+			}
+		}
 		for _, line := range m.resultLines {
 			style := logLineStyle
 			if strings.HasPrefix(line, "error:") || strings.Contains(line, "(exit ") {
 				style = errorStyle
 			} else if strings.HasPrefix(line, "Created ") {
 				style = successStyle
+			}
+			if maxContent > 0 {
+				style = style.MaxWidth(maxContent)
 			}
 			sb.WriteString("  " + style.Render(line) + "\n")
 		}

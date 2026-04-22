@@ -88,7 +88,10 @@ var runSubjectStyle = lipgloss.NewStyle().Padding(0, 2)
 // renderRunSubject arma la línea "#N — título" para el header de flows
 // en ejecución. Coloreada inline (accent para el #N, text para el título)
 // y truncada para no romper el layout en títulos largos.
-func renderRunSubject(ref, title string) string {
+//
+// contentWidth es el ancho disponible después de restar el padding del
+// runSubjectStyle. Si es <= 0 cae al cap histórico de 70 runas.
+func renderRunSubject(ref, title string, contentWidth int) string {
 	if ref == "" {
 		return ""
 	}
@@ -97,8 +100,36 @@ func renderRunSubject(ref, title string) string {
 		return runSubjectStyle.Render(label)
 	}
 	sep := mutedBadge(" — ")
-	body := lipgloss.NewStyle().Foreground(colorText).Render(truncateRunes(title, 70))
+	maxTitle := 70
+	if contentWidth > 0 {
+		// Overhead del label "#<ref>" + " — " medido como ancho visible.
+		overhead := lipgloss.Width(label) + lipgloss.Width(sep)
+		remaining := contentWidth - overhead
+		if remaining < 4 {
+			// No cabe título útil: dejamos sólo el "#ref".
+			return runSubjectStyle.Render(label)
+		}
+		maxTitle = remaining
+		if maxTitle > 120 {
+			maxTitle = 120
+		}
+	}
+	body := lipgloss.NewStyle().Foreground(colorText).Render(truncateRunes(title, maxTitle))
 	return runSubjectStyle.Render(label + sep + body)
+}
+
+// runSubjectContentWidth devuelve el ancho disponible dentro del
+// runSubjectStyle (Padding(0, 2) = 4 horizontales). Devuelve 0 si
+// width es 0 para que el helper caiga a su cap hardcodeado.
+func runSubjectContentWidth(width int) int {
+	if width <= 0 {
+		return 0
+	}
+	const horizontalPadding = 4
+	if width <= horizontalPadding {
+		return 1
+	}
+	return width - horizontalPadding
 }
 
 // truncateRunes corta s a max runas, agregando … si fue truncado.

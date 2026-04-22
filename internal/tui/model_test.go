@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/chichex/che/internal/flow/validate"
@@ -369,13 +370,13 @@ func TestStepper_RenderIncluyeTotal(t *testing.T) {
 // ---- línea de contexto del header en flows en ejecución ----
 
 func TestRenderRunSubject_RefVacioDevuelveVacio(t *testing.T) {
-	if got := renderRunSubject("", "Fix login"); got != "" {
+	if got := renderRunSubject("", "Fix login", 0); got != "" {
 		t.Errorf("ref vacío debería devolver string vacío, got %q", got)
 	}
 }
 
 func TestRenderRunSubject_IncluyeRefYTitulo(t *testing.T) {
-	got := renderRunSubject("42", "Fix login bug")
+	got := renderRunSubject("42", "Fix login bug", 0)
 	if !strings.Contains(got, "#42") {
 		t.Errorf("falta #42 en subject: %q", got)
 	}
@@ -386,7 +387,7 @@ func TestRenderRunSubject_IncluyeRefYTitulo(t *testing.T) {
 
 func TestRenderRunSubject_TruncaTitulosLargos(t *testing.T) {
 	long := strings.Repeat("a", 200)
-	got := renderRunSubject("42", long)
+	got := renderRunSubject("42", long, 0)
 	if !strings.Contains(got, "…") {
 		t.Errorf("título largo debería terminar con …: %q", got)
 	}
@@ -398,7 +399,7 @@ func TestRenderRunSubject_TruncaTitulosLargos(t *testing.T) {
 
 func TestRenderRunning_IncluyeSubjectEntreTituloYElapsed(t *testing.T) {
 	m := Model{}
-	subject := renderRunSubject("42", "Fix login bug")
+	subject := renderRunSubject("42", "Fix login bug", 0)
 	out := renderRunning(m, "Explorando issue…", subject, "Ctrl+C cancela")
 
 	idxTitle := strings.Index(out, "Explorando issue")
@@ -419,6 +420,79 @@ func TestRenderRunning_SinSubjectNoMuestraLineaContexto(t *testing.T) {
 	out := renderRunning(m, "Procesando idea…", "", "Ctrl+C cancela")
 	if strings.Contains(out, "#") {
 		t.Errorf("sin subject no debería haber #N en el header: %q", out)
+	}
+}
+
+// Con un contentWidth chico, el título se trunca agresivamente para
+// que la línea completa entre. Esto previene la regresión donde el
+// emulador cortaba el render silenciosamente (ver issue del "hace 1"
+// sin unidad cuando el ancho no daba).
+func TestRenderRunSubject_TruncaDinamicamenteConWidthChico(t *testing.T) {
+	long := "este titulo es largo pero no tanto como para superar 70 chars siempre"
+	// contentWidth = 20 deja ~14 chars para el título después del
+	// overhead de "#42 — " (seis visibles).
+	got := renderRunSubject("42", long, 20)
+	if !strings.Contains(got, "#42") {
+		t.Errorf("falta #42: %q", got)
+	}
+	if !strings.Contains(got, "…") {
+		t.Errorf("con width chico el título debería truncarse: %q", got)
+	}
+}
+
+// ---- formatLastAction adapta a ancho ----
+
+func TestFormatLastAction_SinWidthUsaCapHistorico(t *testing.T) {
+	la := &lastAction{
+		Flow:  "execute",
+		Ref:   "115",
+		Title: strings.Repeat("x", 200),
+	}
+	got := formatLastAction(la, 0)
+	if !strings.Contains(got, "#115") {
+		t.Errorf("falta #115: %q", got)
+	}
+	if !strings.Contains(got, "…") {
+		t.Errorf("título largo debería terminar con …: %q", got)
+	}
+	// El cap histórico es 40 runas, así que 100 'x' seguidas no deberían
+	// aparecer aunque el título original tenga 200.
+	if strings.Contains(got, strings.Repeat("x", 100)) {
+		t.Errorf("título no fue truncado al cap histórico de 40: %q", got)
+	}
+}
+
+func TestFormatLastAction_WidthChicoPreservaTimeYRef(t *testing.T) {
+	la := &lastAction{
+		Flow:  "execute",
+		Ref:   "115",
+		Title: "[Pricing #5] Mobile Provider — form de configuración del provider",
+		At:    time.Now().Add(-3 * time.Minute),
+	}
+	// Ancho típico de la captura: ~70-80 columnas de contenido.
+	got := formatLastAction(la, 60)
+	if !strings.Contains(got, "#115") {
+		t.Errorf("#115 se perdió: %q", got)
+	}
+	if !strings.Contains(got, "hace ") || !strings.Contains(got, "m") {
+		t.Errorf("el 'hace Xm' debería sobrevivir al truncado: %q", got)
+	}
+}
+
+func TestFormatLastAction_AnchoInsuficienteSueltaTitulo(t *testing.T) {
+	la := &lastAction{
+		Flow:  "execute",
+		Ref:   "115",
+		Title: "título que no entra",
+		At:    time.Now().Add(-5 * time.Minute),
+	}
+	// Ancho muy chico: cabe el verbo + ref + tiempo pero no el título.
+	got := formatLastAction(la, 32)
+	if !strings.Contains(got, "#115") {
+		t.Errorf("falta #115 con ancho mínimo: %q", got)
+	}
+	if strings.Contains(got, "«") {
+		t.Errorf("con ancho chico no debería haber título: %q", got)
 	}
 }
 
