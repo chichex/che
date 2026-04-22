@@ -342,6 +342,17 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitSemantic
 	}
 
+	progress("aplicando lock che:locked…")
+	if err := labels.Lock(issueRef); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
+	}
+	defer func() {
+		if err := labels.Unlock(issueRef); err != nil {
+			fmt.Fprintf(stderr, "warning: no se pudo quitar che:locked de %s: %v — corré `che unlock %s`\n", issueRef, err, issueRef)
+		}
+	}()
+
 	a := opts.Agent
 	if a == "" {
 		a = DefaultAgent
@@ -434,6 +445,9 @@ func ListCandidates() ([]Candidate, error) {
 		if i.HasLabel(labels.StatusPlan) ||
 			i.HasLabel(labels.StatusExecuting) || i.HasLabel(labels.StatusExecuted) {
 			continue
+		}
+		if i.HasLabel(labels.CheLocked) {
+			continue // otro flow lo tiene agarrado.
 		}
 		out = append(out, Candidate{Number: i.Number, Title: i.Title})
 	}
@@ -581,6 +595,9 @@ func gateBasic(i *Issue) error {
 	}
 	if i.HasLabel(labels.StatusPlan) {
 		return fmt.Errorf("issue #%d was already explored (status:plan present)", i.Number)
+	}
+	if i.HasLabel(labels.CheLocked) {
+		return fmt.Errorf("issue #%d tiene che:locked — otro flow lo tiene agarrado, o quedó colgado. Si es lo segundo: `che unlock %d`", i.Number, i.Number)
 	}
 	return nil
 }

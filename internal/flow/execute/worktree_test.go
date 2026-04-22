@@ -217,6 +217,89 @@ func TestCreateWorktree_FetchesOriginMainAndUsesRemoteRef(t *testing.T) {
 	}
 }
 
+// TestDetectBaseBranch_EnvOverride: si CHE_BASE_BRANCH está seteado, se usa
+// sin llamar a gh ni git. Es el escape hatch que usan los e2e y el usuario
+// cuando tiene un repo con default branch no-convencional.
+func TestDetectBaseBranch_EnvOverride(t *testing.T) {
+	t.Setenv("CHE_BASE_BRANCH", "develop")
+	got, err := DetectBaseBranch(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "develop" {
+		t.Errorf("got %q, want %q", got, "develop")
+	}
+}
+
+// TestDetectBaseBranch_GhRepoView: con un fake gh que devuelve el JSON
+// esperado, DetectBaseBranch parsea defaultBranchRef.name.
+func TestDetectBaseBranch_GhRepoView(t *testing.T) {
+	t.Setenv("CHE_BASE_BRANCH", "")
+	tmp := t.TempDir()
+	fakeGH := filepath.Join(tmp, "gh")
+	script := "#!/bin/sh\ncat <<EOF\n{\"defaultBranchRef\":{\"name\":\"master\"}}\nEOF\n"
+	if err := os.WriteFile(fakeGH, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	t.Setenv("PATH", tmp+":"+os.Getenv("PATH"))
+
+	got, err := DetectBaseBranch(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "master" {
+		t.Errorf("got %q, want %q", got, "master")
+	}
+}
+
+// TestDetectBaseBranch_FallbackToSymbolicRef: si gh falla, caemos a
+// `git symbolic-ref refs/remotes/origin/HEAD`. Armamos un repo con origin/HEAD
+// apuntando a master y un fake gh que sale con error.
+func TestDetectBaseBranch_FallbackToSymbolicRef(t *testing.T) {
+	t.Setenv("CHE_BASE_BRANCH", "")
+	base := t.TempDir()
+
+	bare := filepath.Join(base, "origin.git")
+	runOrFail(t, "", "git", "init", "--bare", "-b", "master", "-q", bare)
+
+	seed := filepath.Join(base, "seed")
+	runOrFail(t, "", "git", "init", "-b", "master", "-q", seed)
+	runOrFail(t, seed, "git", "config", "user.email", "a@example.com")
+	runOrFail(t, seed, "git", "config", "user.name", "A")
+	runOrFail(t, seed, "git", "remote", "add", "origin", bare)
+	if err := os.WriteFile(filepath.Join(seed, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runOrFail(t, seed, "git", "add", "a.txt")
+	runOrFail(t, seed, "git", "commit", "-q", "-m", "init")
+	runOrFail(t, seed, "git", "push", "-q", "-u", "origin", "master")
+
+	root := filepath.Join(base, "repo")
+	runOrFail(t, "", "git", "clone", "-q", bare, root)
+
+	tmpBin := t.TempDir()
+	fakeGH := filepath.Join(tmpBin, "gh")
+	script := "#!/bin/sh\necho 'not authenticated' >&2\nexit 4\n"
+	if err := os.WriteFile(fakeGH, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake gh: %v", err)
+	}
+	t.Setenv("PATH", tmpBin+":"+os.Getenv("PATH"))
+
+	cwd, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	got, err := DetectBaseBranch(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "master" {
+		t.Errorf("got %q, want %q", got, "master")
+	}
+}
+
 func mustRevParse(t *testing.T, dir, ref string) string {
 	t.Helper()
 	cmd := exec.Command("git", "-C", dir, "rev-parse", ref)

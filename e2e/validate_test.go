@@ -325,6 +325,7 @@ func setupValidateEnv(t *testing.T) *harness.Env {
 func scriptValidatePrechecks(env *harness.Env) {
 	env.ExpectGh(`^auth status$`).Consumable().
 		RespondStdout("Logged in as acme\n", 0)
+	scriptCheLockDefault(env)
 }
 
 // scriptDetectTargetPR scriptea la respuesta de `gh api repos/.../issues/<n>`

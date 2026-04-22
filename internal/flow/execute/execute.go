@@ -252,6 +252,12 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitRetry
 	}
 
+	baseBranch, err := DetectBaseBranch(ctx)
+	if err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
+	}
+
 	// Si ya entró una señal mientras corrían los prechecks, abortamos sin
 	// tocar nada (no hay lock todavía).
 	if ctx.Err() != nil {
@@ -291,7 +297,25 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitSemantic
 	}
 
-	// Transition plan → executing. Desde acá se lockea el issue.
+	// Mutex vía label: aplicamos che:locked ANTES de la transición de status.
+	// Si el Lock falla, no tocamos nada más (el status sigue en plan, el ref
+	// queda limpio). Si el Lock pasa y después algo falla, el defer de Unlock
+	// (stackeado inmediatamente abajo) saca el label en LIFO tras el
+	// cleanupLocal — así el label se remueve siempre, sea éxito o rollback.
+	progress("aplicando lock che:locked…")
+	if err := labels.Lock(issueRef); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
+	}
+	defer func() {
+		if err := labels.Unlock(issueRef); err != nil {
+			fmt.Fprintf(stderr, "warning: no se pudo quitar che:locked de %s: %v — corré `che unlock %s`\n", issueRef, err, issueRef)
+		}
+	}()
+
+	// Transition plan → executing. Desde acá se lockea el issue (también vía
+	// status — redundante con che:locked pero preservado porque el listado
+	// de candidatos y el gate ya dependen de status).
 	progress("transicionando issue a status:executing…")
 	if err := labels.Apply(issueRef, labels.StatusPlan, labels.StatusExecuting); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -400,9 +424,10 @@ func Run(issueRef string, opts Opts) ExitCode {
 	slug := Slugify(issue.Title)
 	progress(fmt.Sprintf("creando worktree .worktrees/issue-%d (branch exec/%d-%s)…", issue.Number, issue.Number, slug))
 	wt, err = CreateWorktree(WorktreeOpts{
-		RepoRoot: repoRoot,
-		IssueNum: issue.Number,
-		Slug:     slug,
+		RepoRoot:   repoRoot,
+		IssueNum:   issue.Number,
+		Slug:       slug,
+		BaseBranch: baseBranch,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
@@ -412,7 +437,7 @@ func Run(issueRef string, opts Opts) ExitCode {
 	// Antes de invocar al agente, chequeamos si ya hay un PR abierto para
 	// esta branch — si lo hay, estamos en modo "re-ejecutar" (idempotente)
 	// y vamos a actualizarlo después de pushear los nuevos commits.
-	existingPR, err := findOpenPRForBranch(ctx, wt.Branch)
+	existingPR, err := findOpenPRForBranch(ctx, wt.Branch, baseBranch)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ExitCancelled
@@ -478,8 +503,8 @@ func Run(issueRef string, opts Opts) ExitCode {
 		prURL = existingPR
 		prCreated = true
 	} else {
-		progress("creando PR draft contra main…")
-		prURL, err = createDraftPR(ctx, wt.Path, wt.Branch, issue)
+		progress(fmt.Sprintf("creando PR draft contra %s…", baseBranch))
+		prURL, err = createDraftPR(ctx, wt.Path, wt.Branch, issue, baseBranch)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ExitCancelled
@@ -541,6 +566,9 @@ func ListCandidates() ([]Candidate, error) {
 	}
 	out2 := make([]Candidate, 0, len(raw))
 	for _, i := range raw {
+		if i.HasLabel(labels.CheLocked) {
+			continue // otro flow lo tiene agarrado; no lo mostramos.
+		}
 		out2 = append(out2, Candidate{Number: i.Number, Title: i.Title})
 	}
 	return out2, nil
@@ -668,6 +696,9 @@ func gate(i *Issue) error {
 	}
 	if i.HasLabel(labels.StatusExecuting) {
 		return fmt.Errorf("issue #%d is already status:executing — otro run en curso o quedó colgado; quitá el label a mano si es lo segundo", i.Number)
+	}
+	if i.HasLabel(labels.CheLocked) {
+		return fmt.Errorf("issue #%d tiene che:locked — otro flow lo tiene agarrado, o quedó colgado. Si es lo segundo: `che unlock %d`", i.Number, i.Number)
 	}
 	if i.HasLabel(labels.PlanValidatedChangesRequested) {
 		return fmt.Errorf("issue #%d tiene plan-validated:changes-requested — corré `che iterate %d` primero, o re-validá", i.Number, i.Number)
@@ -859,15 +890,15 @@ func runGitIn(ctx context.Context, dir string, args ...string) error {
 
 // ---- PR ops ----
 
-// findOpenPRForBranch busca un PR abierto (contra main) cuyo head-branch sea
-// el dado. Devuelve la URL si lo encuentra, "" si no. Si hay más de uno,
+// findOpenPRForBranch busca un PR abierto (contra baseBranch) cuyo head-branch
+// sea el dado. Devuelve la URL si lo encuentra, "" si no. Si hay más de uno,
 // devuelve error accionable: el caso es suficientemente raro como para
-// frenar en vez de agarrar uno silenciosamente. Filtrar por --base main
-// evita falsos positivos si la branch tiene un PR abierto contra otra base.
-func findOpenPRForBranch(ctx context.Context, branch string) (string, error) {
+// frenar en vez de agarrar uno silenciosamente. Filtrar por --base evita
+// falsos positivos si la branch tiene un PR abierto contra otra base.
+func findOpenPRForBranch(ctx context.Context, branch, baseBranch string) (string, error) {
 	cmd := exec.CommandContext(ctx, "gh", "pr", "list",
 		"--head", branch,
-		"--base", "main",
+		"--base", baseBranch,
 		"--state", "open",
 		"--json", "url,number")
 	out, err := cmd.Output()
@@ -897,8 +928,8 @@ func findOpenPRForBranch(ctx context.Context, branch string) (string, error) {
 	return prs[0].URL, nil
 }
 
-// createDraftPR crea un PR draft contra main con Closes #<n> en el body.
-func createDraftPR(ctx context.Context, wtPath, branch string, issue *Issue) (string, error) {
+// createDraftPR crea un PR draft contra baseBranch con Closes #<n> en el body.
+func createDraftPR(ctx context.Context, wtPath, branch string, issue *Issue, baseBranch string) (string, error) {
 	tmpDir, err := os.MkdirTemp("", "che-exec-pr-*")
 	if err != nil {
 		return "", err
@@ -915,7 +946,7 @@ func createDraftPR(ctx context.Context, wtPath, branch string, issue *Issue) (st
 
 	cmd := exec.CommandContext(ctx, "gh", "pr", "create",
 		"--draft",
-		"--base", "main",
+		"--base", baseBranch,
 		"--head", branch,
 		"--title", title,
 		"--body-file", bodyFile)

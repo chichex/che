@@ -499,7 +499,7 @@ EOF
 	setEnv("PATH", tmp+":"+oldPath)
 	t.Cleanup(func() { setEnv("PATH", oldPath) })
 
-	_, err := findOpenPRForBranch(context.Background(), "exec/42-foo")
+	_, err := findOpenPRForBranch(context.Background(), "exec/42-foo", "main")
 	if err == nil {
 		t.Fatalf("expected error on multiple matches")
 	}
@@ -527,7 +527,7 @@ EOF
 	setEnv("PATH", tmp+":"+oldPath)
 	t.Cleanup(func() { setEnv("PATH", oldPath) })
 
-	got, err := findOpenPRForBranch(context.Background(), "exec/42-foo")
+	got, err := findOpenPRForBranch(context.Background(), "exec/42-foo", "main")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

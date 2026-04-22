@@ -89,9 +89,13 @@ func ListIterable() ([]validate.Candidate, error) {
 func filterIterable(raw []validate.PullRequest) []validate.Candidate {
 	res := make([]validate.Candidate, 0, len(raw))
 	for _, p := range raw {
-		if hasChangesRequested(p) {
-			res = append(res, validate.ToCandidate(p))
+		if !hasChangesRequested(p) {
+			continue
 		}
+		if p.HasLabel(labels.CheLocked) {
+			continue // otro flow lo tiene agarrado.
+		}
+		res = append(res, validate.ToCandidate(p))
 	}
 	return res
 }
@@ -197,6 +201,21 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		log.Error(fmt.Sprintf("PR #%d no tiene head branch (¿fork?) — iterate no soporta ese caso", pr.Number))
 		return ExitSemantic
 	}
+	if pr.HasLabel(labels.CheLocked) {
+		log.Error(fmt.Sprintf("PR #%d tiene che:locked — otro flow lo tiene agarrado, o quedó colgado. Si es lo segundo: `che unlock %d`", pr.Number, pr.Number))
+		return ExitSemantic
+	}
+
+	log.Step("aplicando lock che:locked", output.F{PR: pr.Number})
+	if err := labels.Lock(prRef); err != nil {
+		log.Error("no pude aplicar che:locked", output.F{Cause: err})
+		return ExitRetry
+	}
+	defer func() {
+		if err := labels.Unlock(prRef); err != nil {
+			log.Warn(fmt.Sprintf("no se pudo quitar che:locked de %s: %v — corré `che unlock %s`", prRef, err, prRef))
+		}
+	}()
 
 	log.Step("leyendo comments previos para buscar findings")
 	comments, err := validate.FetchPRComments(prRef)
@@ -314,6 +333,21 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		log.Error(fmt.Sprintf("issue #%d ya pasó por execute — iterar el plan no tiene efecto sobre el PR asociado. Iterar el PR directamente con `che iterate <pr>`.", issue.Number))
 		return ExitSemantic
 	}
+	if issue.HasLabel(labels.CheLocked) {
+		log.Error(fmt.Sprintf("issue #%d tiene che:locked — otro flow lo tiene agarrado, o quedó colgado. Si es lo segundo: `che unlock %d`", issue.Number, issue.Number))
+		return ExitSemantic
+	}
+
+	log.Step("aplicando lock che:locked", output.F{Issue: issue.Number})
+	if err := labels.Lock(issueRef); err != nil {
+		log.Error("no pude aplicar che:locked", output.F{Cause: err})
+		return ExitRetry
+	}
+	defer func() {
+		if err := labels.Unlock(issueRef); err != nil {
+			log.Warn(fmt.Sprintf("no se pudo quitar che:locked de %s: %v — corré `che unlock %s`", issueRef, err, issueRef))
+		}
+	}()
 
 	currentPlan, parseErr := planpkg.Parse(issue.Body)
 	if parseErr != nil {
@@ -664,6 +698,9 @@ func ListIterablePlanCandidates() ([]validate.PlanCandidate, error) {
 func filterIterablePlanCandidates(raw []validate.Issue) []validate.PlanCandidate {
 	out := make([]validate.PlanCandidate, 0, len(raw))
 	for _, i := range raw {
+		if i.HasLabel(labels.CheLocked) {
+			continue // otro flow lo tiene agarrado.
+		}
 		out = append(out, validate.PlanCandidate{
 			Number: i.Number,
 			Title:  i.Title,

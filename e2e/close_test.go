@@ -70,7 +70,7 @@ func TestClose_ChangesRequestedLabel_WarnsButProceeds(t *testing.T) {
 	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
 	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/git/refs/heads/feat/x$`).RespondStdout("", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
 	r := env.Run("close", "7")
@@ -120,7 +120,7 @@ func TestClose_GoldenPath_DraftToReadyAndMerge(t *testing.T) {
 
 	// Cerrar issue + transition labels (executed → closed).
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
 	out := env.MustRun("close", "7")
@@ -187,7 +187,7 @@ func TestClose_NotDraft_SkipsReady(t *testing.T) {
 	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
 	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/git/refs/heads/feat/ready$`).RespondStdout("", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
 	_ = env.MustRun("close", "7")
@@ -221,7 +221,7 @@ func TestClose_KeepBranch_PreservesBranchAndWorktree(t *testing.T) {
 	// Crucial: merge SIN --delete-branch.
 	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
 	out := env.MustRun("close", "7", "--keep-branch")
@@ -267,7 +267,7 @@ func TestClose_Default_CleansCheManagedWorktree(t *testing.T) {
 	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
 	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/git/refs/heads/feat/managed$`).RespondStdout("", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
 	_ = env.MustRun("close", "7")
@@ -311,7 +311,7 @@ func TestClose_KeepBranch_PreservesCheManagedWorktree(t *testing.T) {
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
 	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
 	_ = env.MustRun("close", "7", "--keep-branch")
@@ -355,7 +355,7 @@ func TestClose_Default_DoesNotTouchMainWorktree(t *testing.T) {
 	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
 	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/git/refs/heads/feat/on-main$`).RespondStdout("", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
 	_ = env.MustRun("close", "7")
@@ -401,7 +401,7 @@ func TestClose_Default_DoesNotTouchExternalWorktree(t *testing.T) {
 	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
 	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/git/refs/heads/feat/external$`).RespondStdout("", 0)
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
 	_ = env.MustRun("close", "7")
@@ -447,7 +447,7 @@ func TestClose_RemoteDeleteFails_WarnsButExitsOK(t *testing.T) {
 	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/git/refs/heads/feat/delete-fails$`).
 		RespondExitWithError(1, "HTTP 403: You need admin access to delete branches\n")
 	env.ExpectGh(`^issue close 42$`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^label create status:closed --force$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue edit 42 `).RespondStdout("ok\n", 0)
 
 	r := env.Run("close", "7")
@@ -575,6 +575,7 @@ func setupCloseEnv(t *testing.T) *harness.Env {
 func scriptClosePrechecks(env *harness.Env) {
 	env.ExpectGh(`^auth status$`).Consumable().
 		RespondStdout("Logged in as acme\n", 0)
+	scriptCheLockDefault(env)
 }
 
 // branchExists devuelve true si refs/heads/<branch> existe en el repo.

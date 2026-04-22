@@ -264,6 +264,9 @@ func ListCloseable() (CloseablePRs, error) {
 func groupCloseable(raw []validate.PullRequest) CloseablePRs {
 	out := CloseablePRs{}
 	for _, p := range raw {
+		if p.HasLabel(labels.CheLocked) {
+			continue // otro flow lo tiene agarrado.
+		}
 		c := validate.ToCandidate(p)
 		if hasBlockingLabel(p) {
 			out.Blocked = append(out.Blocked, c)
@@ -352,6 +355,21 @@ func Run(prRef string, opts Opts) ExitCode {
 		log.Error(fmt.Sprintf("PR #%d is not OPEN (state=%s)", pr.Number, pr.State))
 		return ExitSemantic
 	}
+	if pr.HasLabel(labels.CheLocked) {
+		log.Error(fmt.Sprintf("PR #%d tiene che:locked — otro flow lo tiene agarrado, o quedó colgado. Si es lo segundo: `che unlock %d`", pr.Number, pr.Number))
+		return ExitSemantic
+	}
+
+	log.Step("aplicando lock che:locked", output.F{PR: pr.Number})
+	if err := labels.Lock(prRef); err != nil {
+		log.Error("no pude aplicar che:locked", output.F{Cause: err})
+		return ExitRetry
+	}
+	defer func() {
+		if err := labels.Unlock(prRef); err != nil {
+			log.Warn(fmt.Sprintf("no se pudo quitar che:locked de %s: %v — corré `che unlock %s`", prRef, err, prRef))
+		}
+	}()
 
 	if blocking := BlockingVerdict(pr); blocking != "" {
 		log.Warn(fmt.Sprintf("warning: PR #%d tiene verdict bloqueante — procedo igual porque así lo pediste", pr.Number),

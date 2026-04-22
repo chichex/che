@@ -2,6 +2,7 @@ package execute
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,6 +11,53 @@ import (
 	"regexp"
 	"strings"
 )
+
+// DetectBaseBranch devuelve el default branch del repo remoto. Preferimos
+// `gh repo view --json defaultBranchRef` (autoritativo sobre GitHub); si gh
+// falla o el repo no tiene remoto configurado en gh, caemos a
+// `git symbolic-ref refs/remotes/origin/HEAD` (el HEAD local del remote, que
+// suele quedar seteado al clonar). Si ambos fallan devolvemos error — el
+// caller decide si quiere fallar o asumir "main".
+func DetectBaseBranch(ctx context.Context) (string, error) {
+	if v := strings.TrimSpace(os.Getenv("CHE_BASE_BRANCH")); v != "" {
+		return v, nil
+	}
+
+	var ghErr error
+	out, err := exec.CommandContext(ctx, "gh", "repo", "view", "--json", "defaultBranchRef").Output()
+	if err == nil {
+		var parsed struct {
+			DefaultBranchRef struct {
+				Name string `json:"name"`
+			} `json:"defaultBranchRef"`
+		}
+		if jerr := json.Unmarshal(out, &parsed); jerr == nil {
+			if name := strings.TrimSpace(parsed.DefaultBranchRef.Name); name != "" {
+				return name, nil
+			}
+			ghErr = fmt.Errorf("gh repo view: defaultBranchRef vacío en la respuesta")
+		} else {
+			ghErr = fmt.Errorf("gh repo view: parsing JSON: %w", jerr)
+		}
+	} else {
+		if ee, ok := err.(*exec.ExitError); ok {
+			ghErr = fmt.Errorf("gh repo view: %s", strings.TrimSpace(string(ee.Stderr)))
+		} else {
+			ghErr = fmt.Errorf("gh repo view: %w", err)
+		}
+	}
+
+	out2, err2 := exec.CommandContext(ctx, "git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD").Output()
+	if err2 == nil {
+		name := strings.TrimSpace(string(out2))
+		name = strings.TrimPrefix(name, "origin/")
+		if name != "" {
+			return name, nil
+		}
+	}
+
+	return "", fmt.Errorf("no se pudo detectar el default branch: %v; fallback git symbolic-ref también falló: %v", ghErr, err2)
+}
 
 // Worktree representa un git worktree aislado creado por `che execute` para
 // trabajar un issue sin ensuciar el cwd del usuario. Contiene la ruta

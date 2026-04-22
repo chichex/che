@@ -271,6 +271,7 @@ func setupIterateEnv(t *testing.T) *harness.Env {
 func scriptIteratePrechecks(env *harness.Env) {
 	env.ExpectGh(`^auth status$`).Consumable().
 		RespondStdout("Logged in as acme\n", 0)
+	scriptCheLockDefault(env)
 }
 
 // scriptIterateDetectTargetPR scriptea la respuesta del `gh api

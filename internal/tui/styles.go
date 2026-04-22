@@ -54,6 +54,10 @@ var (
 			Foreground(colorMuted).
 			Italic(true)
 
+	suggestedBadgeStyle = lipgloss.NewStyle().
+				Foreground(colorSuccess).
+				Italic(true)
+
 	logLineStyle = lipgloss.NewStyle().
 			Foreground(colorMuted)
 
@@ -75,4 +79,33 @@ func accentBadge(s string) string {
 
 func mutedBadge(s string) string {
 	return lipgloss.NewStyle().Foreground(colorMuted).Render(s)
+}
+
+// runSubjectStyle es el padding lateral para la línea de contexto del
+// header de flows en ejecución (queda pegada al título, sin gap).
+var runSubjectStyle = lipgloss.NewStyle().Padding(0, 2)
+
+// renderRunSubject arma la línea "#N — título" para el header de flows
+// en ejecución. Coloreada inline (accent para el #N, text para el título)
+// y truncada para no romper el layout en títulos largos.
+func renderRunSubject(ref, title string) string {
+	if ref == "" {
+		return ""
+	}
+	label := accentBadge("#" + ref)
+	if title == "" {
+		return runSubjectStyle.Render(label)
+	}
+	sep := mutedBadge(" — ")
+	body := lipgloss.NewStyle().Foreground(colorText).Render(truncateRunes(title, 70))
+	return runSubjectStyle.Render(label + sep + body)
+}
+
+// truncateRunes corta s a max runas, agregando … si fue truncado.
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max-1]) + "…"
 }

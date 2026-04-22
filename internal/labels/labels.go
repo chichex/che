@@ -130,17 +130,22 @@ func TransitionFor(from, to string) (Transition, error) {
 
 // Apply ejecuta la transición en un issue concreto. `ref` es el identificador
 // del issue en el formato que acepta `gh issue edit` (número, URL, o
-// owner/repo#N). Asegura que todos los labels a agregar existan antes de
-// aplicar el edit.
+// owner/repo#N). Asegura que todos los labels involucrados (Add y Remove)
+// existan en el repo antes de aplicar el edit: `gh issue edit --remove-label X`
+// falla con "not found" si X no está registrado en el repo — aunque el issue
+// no lo tenga aplicado. Esto cubre el caso de issues marcados con `ct:plan` a
+// mano que nunca pasaron por `che idea`, por lo que `status:idea` jamás se
+// creó en el repo.
 func Apply(ref, from, to string) error {
 	tr, err := TransitionFor(from, to)
 	if err != nil {
 		return err
 	}
-	for _, lbl := range tr.Add {
-		if err := Ensure(lbl); err != nil {
-			return err
-		}
+	if err := EnsureAll(tr.Add...); err != nil {
+		return err
+	}
+	if err := EnsureAll(tr.Remove...); err != nil {
+		return err
 	}
 	return applyTransition(ref, tr)
 }

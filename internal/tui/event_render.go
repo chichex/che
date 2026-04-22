@@ -57,6 +57,41 @@ func levelStyle(lv output.Level) lipgloss.Style {
 	return logLineStyle
 }
 
+// renderPayloadLine estiliza las lineas de stdout "payload" de los flows
+// (Done., Executed URL, PR: URL, etc.) para que destaquen frente al runLog
+// del agente — que va en logLineStyle muted. Sin esto, el resultado final
+// queda indistinguible del ruido de pasos.
+//
+// Lipgloss anida ANSI: aunque el caller envuelva con logLineStyle.Render,
+// los escapes internos de successStyle/payloadPrimary sobreviven.
+func renderPayloadLine(line string) string {
+	trim := strings.TrimSpace(line)
+
+	// Prefijos de "lo logré": verbo en pretérito + Done.
+	successPrefixes := []string{"Done", "Executed ", "Explored ", "Created ", "Creating ", "Iterated ", "Closed ", "Cerrado"}
+	for _, p := range successPrefixes {
+		if strings.HasPrefix(trim, p) {
+			return lipgloss.NewStyle().Foreground(colorSuccess).Bold(true).Render(line)
+		}
+	}
+
+	// Links accionables: label en muted, URL en cian bold.
+	linkPrefixes := []string{"PR: ", "Comment: "}
+	for _, p := range linkPrefixes {
+		if strings.HasPrefix(trim, p) {
+			label := trim[:len(p)]
+			rest := trim[len(p):]
+			mutedLabel := lipgloss.NewStyle().Foreground(colorMuted).Render(label)
+			url := lipgloss.NewStyle().Foreground(colorPrimary).Bold(true).Underline(true).Render(rest)
+			return mutedLabel + url
+		}
+	}
+
+	// Resto (p.ej. "Nuevos commits: 3", reporte de validate): off-white
+	// para que se lea bien sin competir con los items destacados.
+	return lipgloss.NewStyle().Foreground(colorText).Render(line)
+}
+
 func renderEventFields(f output.F) string {
 	var parts []string
 	num := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)

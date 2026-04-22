@@ -148,7 +148,7 @@ func TestValidateItemAt_PlanVsPR(t *testing.T) {
 		{3, 8, "u8", true},
 	}
 	for _, c := range cases {
-		n, url, isPR := m.validateItemAt(c.idx)
+		n, url, _, isPR := m.validateItemAt(c.idx)
 		if n != c.wantNum || url != c.wantURL || isPR != c.wantIsPR {
 			t.Errorf("idx=%d: got (%d,%q,%v), want (%d,%q,%v)",
 				c.idx, n, url, isPR, c.wantNum, c.wantURL, c.wantIsPR)
@@ -249,11 +249,11 @@ func TestIterateItemAt_PlanVsPR(t *testing.T) {
 		iteratePlans: []validate.PlanCandidate{{Number: 10, URL: "p"}},
 		iteratePRs:   []validate.Candidate{{Number: 20, URL: "r"}},
 	}
-	n0, url0, isPR0 := m.iterateItemAt(0)
+	n0, url0, _, isPR0 := m.iterateItemAt(0)
 	if n0 != 10 || url0 != "p" || isPR0 {
 		t.Errorf("idx=0: got (%d,%q,%v); want plan", n0, url0, isPR0)
 	}
-	n1, url1, isPR1 := m.iterateItemAt(1)
+	n1, url1, _, isPR1 := m.iterateItemAt(1)
 	if n1 != 20 || url1 != "r" || !isPR1 {
 		t.Errorf("idx=1: got (%d,%q,%v); want PR", n1, url1, isPR1)
 	}
@@ -363,6 +363,173 @@ func TestStepper_RenderIncluyeTotal(t *testing.T) {
 	}
 	if !strings.Contains(out, "[ 1 ]") {
 		t.Errorf("render debería incluir stepper [ 1 ]: %s", out)
+	}
+}
+
+// ---- línea de contexto del header en flows en ejecución ----
+
+func TestRenderRunSubject_RefVacioDevuelveVacio(t *testing.T) {
+	if got := renderRunSubject("", "Fix login"); got != "" {
+		t.Errorf("ref vacío debería devolver string vacío, got %q", got)
+	}
+}
+
+func TestRenderRunSubject_IncluyeRefYTitulo(t *testing.T) {
+	got := renderRunSubject("42", "Fix login bug")
+	if !strings.Contains(got, "#42") {
+		t.Errorf("falta #42 en subject: %q", got)
+	}
+	if !strings.Contains(got, "Fix login bug") {
+		t.Errorf("falta título en subject: %q", got)
+	}
+}
+
+func TestRenderRunSubject_TruncaTitulosLargos(t *testing.T) {
+	long := strings.Repeat("a", 200)
+	got := renderRunSubject("42", long)
+	if !strings.Contains(got, "…") {
+		t.Errorf("título largo debería terminar con …: %q", got)
+	}
+	// El runtime real no debe imprimir 200 'a' seguidas.
+	if strings.Contains(got, strings.Repeat("a", 100)) {
+		t.Errorf("título no fue truncado: %q", got)
+	}
+}
+
+func TestRenderRunning_IncluyeSubjectEntreTituloYElapsed(t *testing.T) {
+	m := Model{}
+	subject := renderRunSubject("42", "Fix login bug")
+	out := renderRunning(m, "Explorando issue…", subject, "Ctrl+C cancela")
+
+	idxTitle := strings.Index(out, "Explorando issue")
+	idxRef := strings.Index(out, "#42")
+	idxElapsed := strings.Index(out, "transcurridos")
+	if idxTitle < 0 || idxRef < 0 || idxElapsed < 0 {
+		t.Fatalf("falta alguna pieza: title=%d ref=%d elapsed=%d (out=%q)",
+			idxTitle, idxRef, idxElapsed, out)
+	}
+	if !(idxTitle < idxRef && idxRef < idxElapsed) {
+		t.Errorf("orden esperado: título → #N → elapsed; got title=%d ref=%d elapsed=%d",
+			idxTitle, idxRef, idxElapsed)
+	}
+}
+
+func TestRenderRunning_SinSubjectNoMuestraLineaContexto(t *testing.T) {
+	m := Model{}
+	out := renderRunning(m, "Procesando idea…", "", "Ctrl+C cancela")
+	if strings.Contains(out, "#") {
+		t.Errorf("sin subject no debería haber #N en el header: %q", out)
+	}
+}
+
+// ---- last action + sugerencia de próximo paso ----
+
+func TestSuggestedNext_MapeoPorFlow(t *testing.T) {
+	cases := []struct {
+		name     string
+		la       lastAction
+		wantScr  screen
+		wantHave bool
+	}{
+		{"idea → explore", lastAction{Flow: "idea"}, screenExploreLoading, true},
+		{"explore → validate", lastAction{Flow: "explore"}, screenValidateLoading, true},
+		{"execute → validate", lastAction{Flow: "execute"}, screenValidateLoading, true},
+		{"validate plan → execute", lastAction{Flow: "validate", IsPR: false}, screenExecuteLoading, true},
+		{"validate PR → close", lastAction{Flow: "validate", IsPR: true}, screenCloseLoading, true},
+		{"iterate plan → validate", lastAction{Flow: "iterate", IsPR: false}, screenValidateLoading, true},
+		{"iterate PR → validate", lastAction{Flow: "iterate", IsPR: true}, screenValidateLoading, true},
+		{"close → nada", lastAction{Flow: "close"}, 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			scr, ok := suggestedNext(&c.la)
+			if ok != c.wantHave {
+				t.Fatalf("ok: got %v want %v", ok, c.wantHave)
+			}
+			if ok && scr != c.wantScr {
+				t.Errorf("screen: got %v want %v", scr, c.wantScr)
+			}
+		})
+	}
+}
+
+func TestSuggestedNext_NilNoHaySugerencia(t *testing.T) {
+	if _, ok := suggestedNext(nil); ok {
+		t.Fatalf("nil lastAction no debería sugerir nada")
+	}
+}
+
+func TestRecordFlowSuccess_SeteaLastActionYMueveCursor(t *testing.T) {
+	m := Model{cursor: 0}
+	m = m.recordFlowSuccess("explore", "42", "mi issue", false)
+	if m.lastAction == nil || m.lastAction.Flow != "explore" {
+		t.Fatalf("lastAction mal seteado: %+v", m.lastAction)
+	}
+	if m.lastAction.Ref != "42" || m.lastAction.Title != "mi issue" {
+		t.Errorf("campos mal: %+v", m.lastAction)
+	}
+	// Explore sugiere Validar → índice 3 en menuItems (0=idea,1=explore,2=ejecutar,3=validar).
+	if m.cursor != 3 {
+		t.Errorf("cursor debería apuntar a Validar (3), got %d", m.cursor)
+	}
+}
+
+func TestRecordFlowSuccess_CloseNoMueveCursor(t *testing.T) {
+	m := Model{cursor: 2}
+	m = m.recordFlowSuccess("close", "7", "", true)
+	// Close no tiene sugerencia → cursor intacto.
+	if m.cursor != 2 {
+		t.Errorf("cursor no debería moverse en close, got %d", m.cursor)
+	}
+	if m.lastAction == nil || m.lastAction.Flow != "close" {
+		t.Errorf("lastAction igual debería grabarse: %+v", m.lastAction)
+	}
+}
+
+func TestRenderMenu_SinLastActionNoMuestraLinea(t *testing.T) {
+	m := Model{}
+	out := renderMenu(m)
+	if strings.Contains(out, "Última") {
+		t.Errorf("sin lastAction no debería aparecer 'Última': %s", out)
+	}
+	if strings.Contains(out, "sugerido") {
+		t.Errorf("sin lastAction no debería aparecer 'sugerido': %s", out)
+	}
+}
+
+func TestRenderMenu_ConLastActionMuestraLineaYSugerido(t *testing.T) {
+	m := Model{
+		cursor: 3, // Validar (sugerido después de explore)
+		lastAction: &lastAction{
+			Flow:  "explore",
+			Ref:   "42",
+			Title: "mi issue",
+		},
+	}
+	out := renderMenu(m)
+	if !strings.Contains(out, "Última") {
+		t.Errorf("falta línea 'Última': %s", out)
+	}
+	if !strings.Contains(out, "#42") {
+		t.Errorf("falta ref #42 en línea de última acción: %s", out)
+	}
+	if !strings.Contains(out, "sugerido") {
+		t.Errorf("falta marca 'sugerido' en el item del menú: %s", out)
+	}
+}
+
+func TestRenderMenu_IdeaSinRefNoImprimeHash(t *testing.T) {
+	m := Model{
+		cursor:     1, // Explorar (sugerido tras idea)
+		lastAction: &lastAction{Flow: "idea"},
+	}
+	out := renderMenu(m)
+	if !strings.Contains(out, "Última") {
+		t.Errorf("falta línea 'Última': %s", out)
+	}
+	// Idea sin ref no debería imprimir "#" (el único "#" del menú es en el item de ref).
+	if strings.Contains(out, "#") {
+		t.Errorf("idea sin ref no debería imprimir '#': %s", out)
 	}
 }
 

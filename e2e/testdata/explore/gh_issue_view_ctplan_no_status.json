@@ -1,0 +1,12 @@
+{
+  "number": 115,
+  "title": "Issue con ct:plan a mano, sin status:idea",
+  "body": "Creado vía `/issue` o a mano: tiene ct:plan pero jamás pasó por `che idea`, por lo que el label status:idea no existe en el repo.\n",
+  "url": "https://github.com/acme/demo/issues/115",
+  "state": "OPEN",
+  "labels": [
+    {"name": "ct:plan"},
+    {"name": "type:feature"},
+    {"name": "size:m"}
+  ]
+}

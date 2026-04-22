@@ -356,6 +356,21 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		log.Error(fmt.Sprintf("PR #%d is not OPEN (state=%s)", pr.Number, pr.State))
 		return ExitSemantic
 	}
+	if pr.HasLabel(labels.CheLocked) {
+		log.Error(fmt.Sprintf("PR #%d tiene che:locked — otro flow lo tiene agarrado, o quedó colgado. Si es lo segundo: `che unlock %d`", pr.Number, pr.Number))
+		return ExitSemantic
+	}
+
+	log.Step("aplicando lock che:locked", output.F{PR: pr.Number})
+	if err := labels.Lock(prRef); err != nil {
+		log.Error("no pude aplicar che:locked", output.F{Cause: err})
+		return ExitRetry
+	}
+	defer func() {
+		if err := labels.Unlock(prRef); err != nil {
+			log.Warn(fmt.Sprintf("no se pudo quitar che:locked de %s: %v — corré `che unlock %s`", prRef, err, prRef))
+		}
+	}()
 
 	log.Step("descargando diff del PR", output.F{PR: pr.Number})
 	diff, err := FetchDiff(prRef)
@@ -445,6 +460,21 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		log.Error(fmt.Sprintf("issue #%d no está en status:plan — corré `che explore %d` primero", issue.Number, issue.Number))
 		return ExitSemantic
 	}
+	if issue.HasLabel(labels.CheLocked) {
+		log.Error(fmt.Sprintf("issue #%d tiene che:locked — otro flow lo tiene agarrado, o quedó colgado. Si es lo segundo: `che unlock %d`", issue.Number, issue.Number))
+		return ExitSemantic
+	}
+
+	log.Step("aplicando lock che:locked", output.F{Issue: issue.Number})
+	if err := labels.Lock(issueRef); err != nil {
+		log.Error("no pude aplicar che:locked", output.F{Cause: err})
+		return ExitRetry
+	}
+	defer func() {
+		if err := labels.Unlock(issueRef); err != nil {
+			log.Warn(fmt.Sprintf("no se pudo quitar che:locked de %s: %v — corré `che unlock %s`", issueRef, err, issueRef))
+		}
+	}()
 
 	// Parseamos el plan consolidado del body. Dos modos de fallo semantic:
 	//   - ErrAmbiguousPlan: body con múltiples headers "## Plan consolidado"
@@ -736,6 +766,9 @@ func filterValidatable(raw []PullRequest) []Candidate {
 	for _, p := range raw {
 		if p.HasLabel(labels.ValidatedApprove) {
 			continue
+		}
+		if p.HasLabel(labels.CheLocked) {
+			continue // otro flow lo tiene agarrado.
 		}
 		res = append(res, ToCandidate(p))
 	}
@@ -1483,6 +1516,9 @@ func filterPlanCandidates(raw []Issue) []PlanCandidate {
 	for _, i := range raw {
 		if i.HasLabel(labels.PlanValidatedApprove) {
 			continue
+		}
+		if i.HasLabel(labels.CheLocked) {
+			continue // otro flow lo tiene agarrado.
 		}
 		out = append(out, PlanCandidate{
 			Number: i.Number,

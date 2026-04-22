@@ -337,6 +337,50 @@ func TestExplore_GoldenPath(t *testing.T) {
 	inv.AssertNotCalled(t, "gemini")
 }
 
+// TestExplore_IssueCtPlanWithoutStatusIdea_EnsuresRemoveLabel: issue con
+// ct:plan aplicado a mano (p. ej. vía `/issue`) pero sin status:idea → el
+// repo puede no tener el label status:idea creado. `gh issue edit
+// --remove-label status:idea` falla con "not found" si el label no está
+// registrado en el repo (independiente de que el issue no lo tenga). El flow
+// debe llamar a `gh label create status:idea --force` antes del edit para que
+// la transición no explote.
+func TestExplore_IssueCtPlanWithoutStatusIdea_EnsuresRemoveLabel(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 115`).RespondStdoutFromFixture("explore/gh_issue_view_ctplan_no_status.json", 0)
+	env.ExpectAgent("claude").
+		WhenArgsMatch(`ingeniero senior`).
+		RespondStdoutFromFixture("explore/sonnet_explore_ok.json", 0)
+	env.ExpectGh(`^issue comment 115`).RespondStdout("https://github.com/acme/demo/issues/115#issuecomment-1\n", 0)
+	env.ExpectGh(`^issue edit 115 --body-file`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit 115 `).RespondStdout("ok\n", 0)
+
+	out := env.MustRun("explore", "115")
+	harness.AssertContains(t, out, "Explored")
+
+	inv := env.Invocations()
+	// El bug: si no Ensure-amos el label que vamos a --remove-label, gh
+	// falla con "not found" y la transición nunca ocurre. El fix garantiza
+	// que ambos extremos (Add y Remove) existan en el repo.
+	createIdea := inv.FindCalls("gh", "label", "create", "status:idea")
+	if len(createIdea) == 0 {
+		t.Fatalf("expected `gh label create status:idea` before transition; calls=%v", inv.For("gh"))
+	}
+	createPlan := inv.FindCalls("gh", "label", "create", "status:plan")
+	if len(createPlan) == 0 {
+		t.Fatalf("expected `gh label create status:plan` before transition; calls=%v", inv.For("gh"))
+	}
+	labelEdits := inv.FindCalls("gh", "issue", "edit", "115", "--remove-label")
+	if len(labelEdits) != 1 {
+		t.Fatalf("expected 1 label edit, got %d", len(labelEdits))
+	}
+	labelEdits[0].AssertArgsContain(t,
+		"--remove-label", "status:idea",
+		"--add-label", "status:plan")
+}
+
 // TestExplore_AgentCodex: --agent codex invoca el binario `codex`, no claude.
 func TestExplore_AgentCodex(t *testing.T) {
 	t.Parallel()
@@ -556,4 +600,5 @@ func TestExplore_MissingConsolidatedPlan_Exit3(t *testing.T) {
 func scriptExplorePrechecks(env *harness.Env) {
 	env.ExpectGit(`^remote get-url origin`).RespondStdout("https://github.com/acme/demo.git\n", 0)
 	env.ExpectGh(`^auth status`).RespondStdout("Logged in as acme\n", 0)
+	scriptCheLockDefault(env)
 }

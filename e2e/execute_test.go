@@ -368,11 +368,14 @@ func TestExecute_NoChanges_ExistingPR_Rollback(t *testing.T) {
 // git (dejamos el git real del sistema para que worktree y commits funcionen).
 // El env var CHE_EXEC_SKIP_FETCH=1 salta el `git fetch origin main` que
 // ahora es obligatorio — los tests usan bare remotes locales sin red.
+// CHE_BASE_BRANCH=main evita que DetectBaseBranch llame al fake gh para
+// resolver `gh repo view --json defaultBranchRef`; los tests asumen main.
 func setupExecuteEnv(t *testing.T) *harness.Env {
 	t.Helper()
 	env := harness.New(t)
 	env.RemoveFake("git")
 	env.SetEnv("CHE_EXEC_SKIP_FETCH", "1")
+	env.SetEnv("CHE_BASE_BRANCH", "main")
 
 	// init repo + commit inicial.
 	runIn(t, env.RepoDir, "git", "init", "-q", "-b", "main")
@@ -422,6 +425,7 @@ func scriptExecutePrechecks(env *harness.Env) {
 	// Segundo call: auth status -t. Incluye scopes válidos.
 	env.ExpectGh(`^auth status -t`).Consumable().RespondStdout(
 		"github.com\n  - Token: gho_xxx\n  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'\n", 0)
+	scriptCheLockDefault(env)
 }
 
 // TestExecute_PreviousPRMerged_CreatesNewPR: si hubo un PR previo para esta

@@ -25,6 +25,7 @@ import (
 	"github.com/chichex/che/internal/flow/idea"
 	"github.com/chichex/che/internal/flow/iterate"
 	"github.com/chichex/che/internal/flow/validate"
+	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
 )
 
@@ -52,6 +53,9 @@ const (
 	screenCloseLoading
 	screenCloseSelect
 	screenCloseRunning
+	screenLocksLoading
+	screenLocksSelect
+	screenLocksRunning
 	screenResult
 )
 
@@ -99,6 +103,67 @@ var menuItems = []menuItem{
 	{label: "Validar", key: "4", action: screenValidateLoading},
 	{label: "Iterar", key: "5", action: screenIterateLoading},
 	{label: "Cerrar", key: "6", action: screenCloseLoading},
+	{label: "Ver locks", key: "7", action: screenLocksLoading},
+}
+
+// suggestedNext mapea el último flow completado al próximo paso natural
+// en el pipeline idea → explore → validate(plan) → execute → validate(PR)
+// → close, con iterate re-entrando en validate. Para close no hay
+// sugerencia (el PR ya cerró, siguiente idea es decisión del humano).
+func suggestedNext(la *lastAction) (screen, bool) {
+	if la == nil {
+		return 0, false
+	}
+	switch la.Flow {
+	case "idea":
+		return screenExploreLoading, true
+	case "explore":
+		return screenValidateLoading, true
+	case "execute":
+		return screenValidateLoading, true
+	case "validate":
+		if la.IsPR {
+			return screenCloseLoading, true
+		}
+		return screenExecuteLoading, true
+	case "iterate":
+		return screenValidateLoading, true
+	}
+	return 0, false
+}
+
+// menuIndexForScreen busca la entrada del menú cuya action coincide con
+// la screen dada. Devuelve el índice y true si la encuentra, 0/false si
+// no (ej. si la sugerencia apunta a una screen que no tiene atajo en el
+// menú principal).
+func menuIndexForScreen(s screen) (int, bool) {
+	for i, it := range menuItems {
+		if it.action == s {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// recordFlowSuccess graba el flow recién completado como última acción
+// y, si hay sugerencia de próximo paso, mueve el cursor del menú para
+// que al volver el siguiente paso esté pre-seleccionado. Solo los
+// handlers de *DoneMsg deben llamar a esto, y solo con ok==true — no
+// queremos registrar errores ni cancelaciones.
+func (m Model) recordFlowSuccess(flow, ref, title string, isPR bool) Model {
+	m.lastAction = &lastAction{
+		Flow:  flow,
+		Ref:   ref,
+		Title: title,
+		IsPR:  isPR,
+		At:    time.Now(),
+	}
+	if next, ok := suggestedNext(m.lastAction); ok {
+		if idx, ok := menuIndexForScreen(next); ok {
+			m.cursor = idx
+		}
+	}
+	return m
 }
 
 const maxLogLines = 40
@@ -144,6 +209,7 @@ type Model struct {
 	// Agent → Running; no hay panel de validadores (explore ya no dispara
 	// validadores automáticamente).
 	exploreChosenRef   string
+	exploreChosenTitle string
 	exploreAgentIdx    int
 	exploreChosenAgent explore.Agent
 
@@ -153,6 +219,7 @@ type Model struct {
 	executeCandidates  []execute.Candidate
 	executeCursor      int
 	executeChosenRef   string
+	executeChosenTitle string
 	executeAgentIdx    int
 	executeChosenAgent execute.Agent
 
@@ -170,6 +237,8 @@ type Model struct {
 	validatePRsErr      error
 	validateChosenRef       string
 	validateChosenURL       string
+	validateChosenTitle     string
+	validateChosenIsPR      bool
 	validateValidatorCursor int
 	validateValidatorCount  map[validate.Agent]int
 
@@ -194,10 +263,39 @@ type Model struct {
 	iteratePRsErr      error
 	iterateChosenRef   string
 	iterateChosenURL   string
+	iterateChosenTitle string
+	iterateChosenIsPR  bool
+
+	// screen "Ver locks": lista issues + PRs con che:locked y permite
+	// desbloquear uno con Enter (unlock inline, sin pasar por el flow
+	// completo de un comando CLI).
+	locks       []labels.LockedRef
+	locksCursor int
+	locksErr    error
 
 	// resultado final
 	resultLines []string
 	resultKind  resultKind
+
+	// lastAction recuerda el último flow completado con éxito dentro de
+	// la sesión viva (no persiste entre invocaciones — un solo archivo
+	// global para todos los repos se pisaría con che corriendo en
+	// paralelo). El menú lo usa para mostrar "Última: <flow> #<ref> …"
+	// y pre-posicionar el cursor en el próximo paso sugerido.
+	lastAction *lastAction
+}
+
+// lastAction captura qué hizo el usuario por última vez en esta sesión.
+// Flow es el nombre canónico ("idea"/"explore"/"execute"/"validate"/
+// "iterate"/"close"). Ref/Title son el target (vacíos para idea, que no
+// sabe de antemano sobre qué issue). IsPR distingue plan vs PR para
+// validate/iterate — determina qué sugerimos a continuación.
+type lastAction struct {
+	Flow  string
+	Ref   string
+	Title string
+	IsPR  bool
+	At    time.Time
 }
 
 // resultKind distingue el tipo de pantalla final:
@@ -337,6 +435,22 @@ type iterateDoneMsg struct {
 // de salir, para que el cleanup local del flow corra síncrono.
 type shutdownMsg struct{}
 
+// locksLoadedMsg llega tras llamar a labels.ListLocked desde la pantalla
+// "Ver locks". Si err!=nil la TUI va a screenResult con el error; si la
+// lista está vacía muestra empty state.
+type locksLoadedMsg struct {
+	items []labels.LockedRef
+	err   error
+}
+
+// unlockDoneMsg llega tras haber ejecutado labels.Unlock sobre el ref
+// seleccionado en la pantalla de locks. err==nil => éxito, refrescamos la
+// lista; err!=nil => vamos a resultError.
+type unlockDoneMsg struct {
+	ref string
+	err error
+}
+
 type tickMsg time.Time
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -366,25 +480,43 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForMsg(m.progressCh)
 
 	case payloadMsg:
-		m.runLog = appendLog(m.runLog, logLineStyle.Render(msg.line))
+		m.runLog = appendLog(m.runLog, renderPayloadLine(msg.line))
 		return m, waitForMsg(m.progressCh)
 
 	case flowDoneMsg:
+		if msg.code == idea.ExitOK {
+			m = m.recordFlowSuccess("idea", "", "", false)
+		}
 		return m.afterDone(m.finishRun(int(msg.code), msg.code == idea.ExitOK, msg.stdout, msg.stderr))
 
 	case exploreDoneMsg:
+		if msg.code == explore.ExitOK {
+			m = m.recordFlowSuccess("explore", m.exploreChosenRef, m.exploreChosenTitle, false)
+		}
 		return m.afterDone(m.finishRun(int(msg.code), msg.code == explore.ExitOK, msg.stdout, msg.stderr))
 
 	case executeDoneMsg:
+		if msg.code == execute.ExitOK {
+			m = m.recordFlowSuccess("execute", m.executeChosenRef, m.executeChosenTitle, false)
+		}
 		return m.afterDone(m.finishRun(int(msg.code), msg.code == execute.ExitOK, msg.stdout, msg.stderr))
 
 	case validateDoneMsg:
+		if msg.code == validate.ExitOK {
+			m = m.recordFlowSuccess("validate", m.validateChosenRef, m.validateChosenTitle, m.validateChosenIsPR)
+		}
 		return m.afterDone(m.finishRun(int(msg.code), msg.code == validate.ExitOK, msg.stdout, msg.stderr))
 
 	case closeDoneMsg:
+		if msg.code == closing.ExitOK {
+			m = m.recordFlowSuccess("close", m.closeChosenRef, "", true)
+		}
 		return m.finishRun(int(msg.code), msg.code == closing.ExitOK, msg.stdout, msg.stderr), nil
 
 	case iterateDoneMsg:
+		if msg.code == iterate.ExitOK {
+			m = m.recordFlowSuccess("iterate", m.iterateChosenRef, m.iterateChosenTitle, m.iterateChosenIsPR)
+		}
 		return m.finishRun(int(msg.code), msg.code == iterate.ExitOK, msg.stdout, msg.stderr), nil
 
 	case iteratePlansLoadedMsg:
@@ -473,6 +605,42 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = screenExploreSelect
 		return m, nil
 
+	case locksLoadedMsg:
+		if msg.err != nil {
+			m.screen = screenResult
+			m.resultKind = resultError
+			m.resultLines = []string{"error: " + msg.err.Error()}
+			return m, nil
+		}
+		if len(msg.items) == 0 {
+			m.screen = screenResult
+			m.resultKind = resultInfo
+			m.resultLines = []string{
+				"No hay issues ni PRs con che:locked en este repo.",
+				"Nada que desbloquear.",
+			}
+			return m, nil
+		}
+		m.locks = msg.items
+		m.locksCursor = 0
+		m.screen = screenLocksSelect
+		return m, nil
+
+	case unlockDoneMsg:
+		if msg.err != nil {
+			m.screen = screenResult
+			m.resultKind = resultError
+			m.resultLines = []string{
+				fmt.Sprintf("error desbloqueando %s: %s", msg.ref, msg.err.Error()),
+			}
+			return m, nil
+		}
+		// Éxito: refrescamos la lista. Si queda vacía cae al empty state.
+		m.screen = screenLocksLoading
+		m.locks = nil
+		m.locksCursor = 0
+		return m, loadLocksCmd()
+
 	case tickMsg:
 		if m.screen == screenIdeaRunning || m.screen == screenExploreRunning ||
 			m.screen == screenExecuteRunning || m.screen == screenValidateRunning ||
@@ -526,7 +694,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleIdeaInputKey(msg)
 	case screenIdeaRunning, screenExploreRunning, screenExploreLoading, screenExecuteRunning, screenExecuteLoading,
 		screenValidateRunning, screenValidateLoading, screenCloseRunning, screenCloseLoading,
-		screenIterateRunning, screenIterateLoading:
+		screenIterateRunning, screenIterateLoading, screenLocksLoading, screenLocksRunning:
 		if msg.String() == "ctrl+c" {
 			// Si hay un run activo con cancel asociado (caso execute),
 			// cancelamos y esperamos al done msg para que el cleanup
@@ -556,6 +724,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleCloseSelectKey(msg)
 	case screenIterateSelect:
 		return m.handleIterateSelectKey(msg)
+	case screenLocksSelect:
+		return m.handleLocksSelectKey(msg)
 	case screenResult:
 		return m.handleResultKey(msg)
 	}
@@ -631,6 +801,73 @@ func (m Model) activateCurrent() (tea.Model, tea.Cmd) {
 		m.iteratePlansErr = nil
 		m.iteratePRsErr = nil
 		return m, tea.Batch(loadIteratePlansCmd(), loadIteratePRsCmd())
+	case screenLocksLoading:
+		m.screen = screenLocksLoading
+		m.locks = nil
+		m.locksCursor = 0
+		m.locksErr = nil
+		return m, loadLocksCmd()
+	}
+	return m, nil
+}
+
+// loadLocksCmd pide todos los issues + PRs con che:locked en el repo actual.
+func loadLocksCmd() tea.Cmd {
+	return func() tea.Msg {
+		items, err := labels.ListLocked()
+		return locksLoadedMsg{items: items, err: err}
+	}
+}
+
+// unlockRefCmd corre labels.Unlock síncrono sobre el ref. La TUI lo dispara
+// con Enter sobre un item de la lista y refresca la lista cuando vuelve.
+func unlockRefCmd(ref string) tea.Cmd {
+	return func() tea.Msg {
+		err := labels.Unlock(ref)
+		return unlockDoneMsg{ref: ref, err: err}
+	}
+}
+
+// handleLocksSelectKey maneja la navegación + unlock en la pantalla de locks.
+// Enter ejecuta labels.Unlock sobre el ítem actual; r refresca la lista
+// manualmente (por si el usuario corrió unlocks en otra terminal). Esc
+// vuelve al menú.
+func (m Model) handleLocksSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	k := msg.String()
+	total := len(m.locks)
+	switch k {
+	case "esc":
+		m.screen = screenMenu
+		m.locks = nil
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if total == 0 {
+			return m, nil
+		}
+		m.locksCursor = (m.locksCursor - 1 + total) % total
+		return m, nil
+	case "down", "j":
+		if total == 0 {
+			return m, nil
+		}
+		m.locksCursor = (m.locksCursor + 1) % total
+		return m, nil
+	case "r":
+		m.screen = screenLocksLoading
+		m.locks = nil
+		m.locksCursor = 0
+		m.locksErr = nil
+		return m, loadLocksCmd()
+	case "enter":
+		if total == 0 {
+			return m, nil
+		}
+		chosen := m.locks[m.locksCursor]
+		ref := fmt.Sprint(chosen.Number)
+		m.screen = screenLocksRunning
+		return m, unlockRefCmd(ref)
 	}
 	return m, nil
 }
@@ -670,6 +907,7 @@ func (m Model) handleExecuteSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		chosen := m.executeCandidates[m.executeCursor]
 		m.executeChosenRef = fmt.Sprint(chosen.Number)
+		m.executeChosenTitle = chosen.Title
 		m.executeAgentIdx = 0
 		m.screen = screenExecuteAgent
 		return m, nil
@@ -771,14 +1009,14 @@ func (m Model) maybeAdvanceValidate() (tea.Model, tea.Cmd) {
 
 // validateItemAt devuelve el item seleccionado según el cursor unificado.
 // Si idx < len(plans), es un plan (isPR=false); si >= len(plans), es un PR.
-// Devuelve (number, url, isPR).
-func (m Model) validateItemAt(idx int) (int, string, bool) {
+// Devuelve (number, url, title, isPR).
+func (m Model) validateItemAt(idx int) (int, string, string, bool) {
 	if idx < len(m.validatePlans) {
 		p := m.validatePlans[idx]
-		return p.Number, p.URL, false
+		return p.Number, p.URL, p.Title, false
 	}
 	c := m.validatePRs[idx-len(m.validatePlans)]
-	return c.Number, c.URL, true
+	return c.Number, c.URL, c.Title, true
 }
 
 func (m Model) handleValidateSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -808,9 +1046,11 @@ func (m Model) handleValidateSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if total == 0 {
 			return m, nil
 		}
-		num, url, _ := m.validateItemAt(m.validateCursor)
+		num, url, title, isPR := m.validateItemAt(m.validateCursor)
 		m.validateChosenRef = fmt.Sprint(num)
 		m.validateChosenURL = url
+		m.validateChosenTitle = title
+		m.validateChosenIsPR = isPR
 		// Default: opus=1 (coherente con flag default).
 		m.validateValidatorCount = map[validate.Agent]int{validate.AgentOpus: 1}
 		m.validateValidatorCursor = 0
@@ -948,14 +1188,14 @@ func (m Model) maybeAdvanceIterate() (tea.Model, tea.Cmd) {
 
 // iterateItemAt devuelve el item seleccionado según el cursor unificado.
 // Si idx < len(plans), es un plan; si >= len(plans), es un PR. Devuelve
-// (number, url, isPR).
-func (m Model) iterateItemAt(idx int) (int, string, bool) {
+// (number, url, title, isPR).
+func (m Model) iterateItemAt(idx int) (int, string, string, bool) {
 	if idx < len(m.iteratePlans) {
 		p := m.iteratePlans[idx]
-		return p.Number, p.URL, false
+		return p.Number, p.URL, p.Title, false
 	}
 	c := m.iteratePRs[idx-len(m.iteratePlans)]
-	return c.Number, c.URL, true
+	return c.Number, c.URL, c.Title, true
 }
 
 func (m Model) handleIterateSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -985,9 +1225,11 @@ func (m Model) handleIterateSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if total == 0 {
 			return m, nil
 		}
-		num, url, _ := m.iterateItemAt(m.iterateCursor)
+		num, url, title, isPR := m.iterateItemAt(m.iterateCursor)
 		m.iterateChosenRef = fmt.Sprint(num)
 		m.iterateChosenURL = url
+		m.iterateChosenTitle = title
+		m.iterateChosenIsPR = isPR
 		return m.startIterateFlow(m.iterateChosenRef)
 	}
 	return m, nil
@@ -1175,6 +1417,7 @@ func (m Model) handleExploreSelectKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		chosen := m.exploreNew[m.exploreCursor]
 		m.exploreChosenRef = fmt.Sprint(chosen.Number)
+		m.exploreChosenTitle = chosen.Title
 		m.exploreAgentIdx = 0
 		m.screen = screenExploreAgent
 		return m, nil
@@ -1337,7 +1580,7 @@ func (m Model) View() string {
 	case screenIdeaInput:
 		return renderIdeaInput(m)
 	case screenIdeaRunning:
-		return renderRunning(m, "Procesando idea…", "Ctrl+C cancela")
+		return renderRunning(m, "Procesando idea…", "", "Ctrl+C cancela")
 	case screenExploreLoading:
 		return renderExploreLoading(m)
 	case screenExploreSelect:
@@ -1345,7 +1588,9 @@ func (m Model) View() string {
 	case screenExploreAgent:
 		return renderExploreAgent(m)
 	case screenExploreRunning:
-		return renderRunning(m, "Explorando issue…", "Ctrl+C cancela")
+		return renderRunning(m, "Explorando issue…",
+			renderRunSubject(m.exploreChosenRef, m.exploreChosenTitle),
+			"Ctrl+C cancela")
 	case screenExecuteLoading:
 		return renderExecuteLoading(m)
 	case screenExecuteSelect:
@@ -1353,7 +1598,9 @@ func (m Model) View() string {
 	case screenExecuteAgent:
 		return renderExecuteAgent(m)
 	case screenExecuteRunning:
-		return renderRunning(m, "Ejecutando issue…", "Ctrl+C cancela")
+		return renderRunning(m, "Ejecutando issue…",
+			renderRunSubject(m.executeChosenRef, m.executeChosenTitle),
+			"Ctrl+C cancela")
 	case screenValidateLoading:
 		return renderValidateLoading(m)
 	case screenValidateSelect:
@@ -1361,23 +1608,91 @@ func (m Model) View() string {
 	case screenValidateValidators:
 		return renderValidateValidators(m)
 	case screenValidateRunning:
-		return renderRunning(m, "Validando PR…", "Ctrl+C cancela")
+		validateTitle := "Validando PR…"
+		if !m.validateChosenIsPR {
+			validateTitle = "Validando plan…"
+		}
+		return renderRunning(m, validateTitle,
+			renderRunSubject(m.validateChosenRef, m.validateChosenTitle),
+			"Ctrl+C cancela")
 	case screenCloseLoading:
 		return renderCloseLoading(m)
 	case screenCloseSelect:
 		return renderCloseSelect(m)
 	case screenCloseRunning:
-		return renderRunning(m, "Cerrando PR…", "Ctrl+C cancela")
+		return renderRunning(m, "Cerrando PR…", "", "Ctrl+C cancela")
 	case screenIterateLoading:
 		return renderIterateLoading(m)
 	case screenIterateSelect:
 		return renderIterateSelect(m)
 	case screenIterateRunning:
-		return renderRunning(m, "Iterando sobre findings…", "Ctrl+C cancela")
+		iterateTitle := "Iterando sobre PR…"
+		if !m.iterateChosenIsPR {
+			iterateTitle = "Iterando sobre plan…"
+		}
+		return renderRunning(m, iterateTitle,
+			renderRunSubject(m.iterateChosenRef, m.iterateChosenTitle),
+			"Ctrl+C cancela")
+	case screenLocksLoading:
+		return renderLocksLoading(m)
+	case screenLocksSelect:
+		return renderLocksSelect(m)
+	case screenLocksRunning:
+		return renderLocksRunning(m)
 	case screenResult:
 		return renderResult(m)
 	}
 	return ""
+}
+
+// ---- locks renders ----
+
+func renderLocksLoading(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Ver locks"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render("Buscando issues y PRs con che:locked…"))
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("Ctrl+C cancela"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func renderLocksSelect(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Ver locks"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("%d ref(s) con che:locked — Enter desbloquea el elegido", len(m.locks))))
+	sb.WriteString("\n\n")
+
+	for i, item := range m.locks {
+		prefix := "  "
+		style := menuItemStyle
+		if i == m.locksCursor {
+			prefix = "▸ "
+			style = menuSelectedStyle
+		}
+		kind := "issue"
+		if item.IsPR {
+			kind = "PR"
+		}
+		line := fmt.Sprintf("%s%s #%d — %s", prefix, kind, item.Number, item.Title)
+		sb.WriteString(style.Render(line) + "\n")
+	}
+
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("↑/↓ navega · Enter desbloquea · r refresca · Esc vuelve · Ctrl+C sale"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+func renderLocksRunning(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("Desbloqueando…"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render("Quitando che:locked del ref elegido"))
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 // ---- validate renders ----
@@ -1634,8 +1949,19 @@ func renderMenu(m Model) string {
 	sb.WriteString("\n")
 	sb.WriteString(contextLineStyle.Render(formatContext(m)))
 	sb.WriteString("\n")
+	if line := formatLastAction(m.lastAction); line != "" {
+		sb.WriteString(contextLineStyle.Render(line))
+		sb.WriteString("\n")
+	}
 	sb.WriteString(subtitleStyle.Render("¿Qué querés hacer?"))
 	sb.WriteString("\n\n")
+
+	suggestedIdx := -1
+	if next, ok := suggestedNext(m.lastAction); ok {
+		if idx, ok := menuIndexForScreen(next); ok {
+			suggestedIdx = idx
+		}
+	}
 
 	for i, item := range menuItems {
 		prefix := "  "
@@ -1649,14 +1975,90 @@ func renderMenu(m Model) string {
 		if item.disabled {
 			line += " " + comingSoonStyle.Render("(coming soon)")
 		}
+		if i == suggestedIdx {
+			line += " " + suggestedBadgeStyle.Render("(sugerido)")
+		}
 		sb.WriteString(style.Render(line) + "\n")
 	}
 
 	sb.WriteString("\n")
-	sb.WriteString(hintStyle.Render("↑/↓ navega · 1-6 atajo · Enter elige · q sale"))
+	sb.WriteString(hintStyle.Render("↑/↓ navega · 1-7 atajo · Enter elige · q sale"))
 	sb.WriteString("\n")
 	return sb.String()
 }
+
+// formatLastAction arma la línea informativa "Última: exploraste #42
+// «título» · hace 3m". Devuelve "" si no hay lastAction (primer menú).
+// El verbo conjugado se elige según el flow (idea/explore/execute/etc.);
+// para flows que no tienen ref (idea) omite el "#N".
+func formatLastAction(la *lastAction) string {
+	if la == nil {
+		return ""
+	}
+	verb := lastActionVerb(la.Flow, la.IsPR)
+	if verb == "" {
+		return ""
+	}
+	parts := []string{"Última: " + verb}
+	if la.Ref != "" {
+		ref := "#" + la.Ref
+		if la.Title != "" {
+			ref += " «" + truncateRunes(la.Title, 40) + "»"
+		}
+		parts[0] += " " + ref
+	}
+	if !la.At.IsZero() {
+		parts = append(parts, "hace "+humanDuration(time.Since(la.At)))
+	}
+	return strings.Join(parts, " · ")
+}
+
+// lastActionVerb devuelve el verbo conjugado en pretérito para mostrar
+// en la línea de última acción ("exploraste", "validaste plan", etc.).
+// Para validate/iterate distingue plan vs PR porque el próximo paso
+// lógico es distinto y la UX del texto pierde claridad sin el
+// calificador.
+func lastActionVerb(flow string, isPR bool) string {
+	switch flow {
+	case "idea":
+		return "anotaste una idea"
+	case "explore":
+		return "exploraste"
+	case "execute":
+		return "ejecutaste"
+	case "validate":
+		if isPR {
+			return "validaste PR"
+		}
+		return "validaste plan"
+	case "iterate":
+		if isPR {
+			return "iteraste PR"
+		}
+		return "iteraste plan"
+	case "close":
+		return "cerraste"
+	}
+	return ""
+}
+
+// humanDuration formatea una duración en estilo compacto "3m" / "45s" /
+// "2h". Para el menú es un dato de orientación, no métrica exacta —
+// resolución al segundo alcanza para < 1m, al minuto para < 1h, etc.
+func humanDuration(d time.Duration) string {
+	if d < time.Minute {
+		s := int(d.Seconds())
+		if s < 1 {
+			s = 1
+		}
+		return fmt.Sprintf("%ds", s)
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%dh", int(d.Hours()))
+}
+
 
 // formatContext arma la línea "v0.0.8 · chichex/demo · main". Omite partes
 // vacías (ej. si estás fuera de un repo git).
@@ -1690,11 +2092,18 @@ func renderIdeaInput(m Model) string {
 }
 
 // renderRunning es el render compartido para flows en ejecución (idea +
-// explore): título + elapsed + log de progreso + hint.
-func renderRunning(m Model, title, hint string) string {
+// explore): título + (opcional) línea de contexto "#N — título" + elapsed
+// + log de progreso + hint. subject viene ya formateado con colores
+// (usar renderRunSubject); vacío oculta la línea.
+func renderRunning(m Model, title, subject, hint string) string {
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render(title))
 	sb.WriteString("\n")
+
+	if subject != "" {
+		sb.WriteString(subject)
+		sb.WriteString("\n")
+	}
 
 	elapsed := time.Since(m.runStart).Round(time.Second)
 	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("⏱  %s transcurridos", elapsed)))
