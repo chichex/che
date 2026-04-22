@@ -274,3 +274,39 @@ func TestParseResponse_SurroundingText(t *testing.T) {
 func minimalResponseJSON() string {
 	return `{"summary":"s","questions":[],"risks":[{"risk":"r","likelihood":"low","impact":"low","mitigation":"m"}],"paths":[{"title":"A","sketch":"x","pros":["p"],"cons":["c"],"effort":"S","recommended":true},{"title":"B","sketch":"x","pros":["p"],"cons":["c"],"effort":"M","recommended":false}],"next_step":"paso","consolidated_plan":{"summary":"s","goal":"g","acceptance_criteria":["c"],"approach":"a","steps":["p1"]}}`
 }
+
+// TestFilterCandidates cubre los dos buckets que la TUI muestra como "ideas
+// sin explorar": (a) issues creados por che idea (ct:plan) que todavía no
+// pasaron por explore, y (b) issues "crudos" sin ningún label ct:* que
+// explore va a reclassificar antes de explorar. che:locked excluye siempre.
+func TestFilterCandidates(t *testing.T) {
+	in := []Issue{
+		{Number: 1, Title: "idea clasica", Labels: []Label{{Name: "ct:plan"}, {Name: "status:idea"}}},
+		{Number: 2, Title: "ya explorada", Labels: []Label{{Name: "ct:plan"}, {Name: "status:plan"}}},
+		{Number: 3, Title: "ejecutandose", Labels: []Label{{Name: "ct:plan"}, {Name: "status:executing"}}},
+		{Number: 4, Title: "ejecutada", Labels: []Label{{Name: "ct:plan"}, {Name: "status:executed"}}},
+		{Number: 5, Title: "locked con ct:plan", Labels: []Label{{Name: "ct:plan"}, {Name: "status:idea"}, {Name: "che:locked"}}},
+		{Number: 6, Title: "raw sin labels", Labels: nil},
+		{Number: 7, Title: "raw con type y size", Labels: []Label{{Name: "type:feature"}, {Name: "size:m"}}},
+		{Number: 8, Title: "raw con status preexistente", Labels: []Label{{Name: "status:plan"}}},
+		{Number: 9, Title: "raw locked", Labels: []Label{{Name: "che:locked"}}},
+	}
+	got := filterCandidates(in)
+	// Orden esperado: primero ideas de che (Raw=false), después los crudos
+	// (Raw=true). La TUI depende de este orden para separar las dos
+	// secciones con un solo índice de cursor.
+	want := []Candidate{
+		{Number: 1, Title: "idea clasica", Raw: false},
+		{Number: 6, Title: "raw sin labels", Raw: true},
+		{Number: 7, Title: "raw con type y size", Raw: true},
+		{Number: 8, Title: "raw con status preexistente", Raw: true},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len(got)=%d want=%d; got=%+v", len(got), len(want), got)
+	}
+	for i, c := range want {
+		if got[i] != c {
+			t.Errorf("[%d] got=%+v want=%+v", i, got[i], c)
+		}
+	}
+}

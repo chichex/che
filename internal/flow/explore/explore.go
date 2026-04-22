@@ -424,41 +424,84 @@ func precheckGhAuth() error {
 	return nil
 }
 
-// Candidate es un issue candidato a explorar: tiene ct:plan, está abierto,
-// y todavía no fue explorado (sin status:plan). Es el subset de Issue que
-// la TUI necesita para mostrar la lista de selección.
+// Candidate es un issue candidato a explorar. Cubre dos buckets que la TUI
+// separa visualmente:
+//   - ideas de che (ct:plan sin status:plan/executing/executed): Raw=false.
+//   - issues "crudos" abiertos a mano sin ningún ct:*: Raw=true. explore
+//     los reclassifica antes de explorar.
 type Candidate struct {
 	Number int
 	Title  string
+	// Raw es true para issues sin ningún label ct:* — los muestra la TUI
+	// bajo la sección "Issues sin clasificar".
+	Raw bool
 }
 
-// ListCandidates devuelve los issues abiertos con label ct:plan que
-// todavía no fueron explorados (sin status:plan). Excluye los que pasaron
-// por execute (status:executing | status:executed). Limita a 50.
+// ListCandidates devuelve los issues abiertos que la TUI muestra como
+// "ideas sin explorar". Cubre dos buckets:
+//  1. issues creados por che idea (ct:plan) que todavía no fueron
+//     explorados (sin status:plan) y que no pasaron por execute (sin
+//     status:executing | status:executed);
+//  2. issues "crudos" abiertos a mano en GitHub — sin ningún label ct:* —
+//     que explore reclassifica antes de explorar.
+//
+// Excluye los bloqueados por otro flow (che:locked). Limita a 50.
 func ListCandidates() ([]Candidate, error) {
-	raw, err := listIssuesWithCtPlan()
+	raw, err := listOpenIssues()
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Candidate, 0, len(raw))
-	for _, i := range raw {
-		if i.HasLabel(labels.StatusPlan) ||
-			i.HasLabel(labels.StatusExecuting) || i.HasLabel(labels.StatusExecuted) {
-			continue
-		}
+	return filterCandidates(raw), nil
+}
+
+// filterCandidates es la lógica pura detrás de ListCandidates — separada
+// para poder testearla sin shell-out a gh. Ver doc de ListCandidates.
+//
+// El orden de salida es estable: primero las ideas de che (Raw=false) y
+// después los issues crudos (Raw=true). La TUI lo aprovecha para inyectar
+// un separador "Issues sin clasificar" antes del primer Raw.
+func filterCandidates(issues []Issue) []Candidate {
+	cheIdeas := make([]Candidate, 0, len(issues))
+	raw := make([]Candidate, 0, len(issues))
+	for _, i := range issues {
 		if i.HasLabel(labels.CheLocked) {
 			continue // otro flow lo tiene agarrado.
 		}
-		out = append(out, Candidate{Number: i.Number, Title: i.Title})
+		if i.HasLabel(labels.CtPlan) {
+			if i.HasLabel(labels.StatusPlan) ||
+				i.HasLabel(labels.StatusExecuting) ||
+				i.HasLabel(labels.StatusExecuted) {
+				continue
+			}
+			cheIdeas = append(cheIdeas, Candidate{Number: i.Number, Title: i.Title})
+			continue
+		}
+		// Sin ct:plan: solo aceptamos issues "crudos". Un ct:* distinto
+		// de ct:plan indicaría otra familia del pipeline (hoy no existe
+		// ninguno; el check queda como guard para cuando se agreguen).
+		if hasCtLabel(i.Labels) {
+			continue
+		}
+		raw = append(raw, Candidate{Number: i.Number, Title: i.Title, Raw: true})
 	}
-	return out, nil
+	return append(cheIdeas, raw...)
 }
 
-// listIssuesWithCtPlan es el fetch compartido: trae todos los issues open
-// con ct:plan y deja el filtrado a los callers específicos.
-func listIssuesWithCtPlan() ([]Issue, error) {
+// hasCtLabel reporta si el issue tiene algún label con prefijo ct:*.
+func hasCtLabel(lbls []Label) bool {
+	for _, l := range lbls {
+		if strings.HasPrefix(l.Name, "ct:") {
+			return true
+		}
+	}
+	return false
+}
+
+// listOpenIssues trae todos los issues open del repo — sin filtro de
+// label, para poder surface tanto las ideas de che como las abiertas a
+// mano. El filtrado queda del lado de filterCandidates.
+func listOpenIssues() ([]Issue, error) {
 	cmd := exec.Command("gh", "issue", "list",
-		"--label", labels.CtPlan,
 		"--state", "open",
 		"--json", "number,title,labels",
 		"--limit", "50")

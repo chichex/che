@@ -2252,7 +2252,19 @@ func renderExploreSelect(m Model) string {
 	if total == 0 {
 		sb.WriteString("  " + mutedBadge("(ninguna)") + "\n")
 	} else {
+		// filterCandidates garantiza orden: primero las ideas de che
+		// (Raw=false), después los crudos (Raw=true). Inyectamos el
+		// header de la segunda sección en la transición. rawStarted
+		// evita repetir el header si hay varios raw seguidos.
+		rawStarted := false
 		for i, c := range m.exploreNew {
+			if c.Raw && !rawStarted {
+				if i > 0 {
+					sb.WriteString("\n")
+				}
+				sb.WriteString("  " + mutedBadge("— Issues sin clasificar —") + "\n")
+				rawStarted = true
+			}
 			sb.WriteString(exploreCandidateLine(c, i == m.exploreCursor))
 		}
 	}
