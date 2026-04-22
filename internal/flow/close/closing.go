@@ -52,7 +52,7 @@ const MaxFixAttempts = 3
 const AgentBinary = "claude"
 
 // AgentTimeout acota cada invocación individual del agente. Configurable con
-// CHE_CLOSE_AGENT_TIMEOUT_SECS para entornos lentos. Default 30 min (igual
+// CHE_CLOSE_AGENT_TIMEOUT_SECS para entornos lentos. Default 60 min (igual
 // que execute): arreglar conflictos + correr tests localmente puede tardar.
 var AgentTimeout = func() time.Duration {
 	if s := strings.TrimSpace(os.Getenv("CHE_CLOSE_AGENT_TIMEOUT_SECS")); s != "" {
@@ -60,7 +60,7 @@ var AgentTimeout = func() time.Duration {
 			return n
 		}
 	}
-	return 30 * time.Minute
+	return 60 * time.Minute
 }()
 
 // CIPollTimeout es cuánto esperamos post-push a que CI termine (pass o fail)

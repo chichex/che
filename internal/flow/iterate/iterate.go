@@ -55,14 +55,14 @@ const (
 const AgentBinary = "claude"
 
 // AgentTimeout acota la invocación del agente. Configurable con
-// CHE_ITERATE_AGENT_TIMEOUT_SECS. Default 30 min (igual que close).
+// CHE_ITERATE_AGENT_TIMEOUT_SECS. Default 60 min (igual que close).
 var AgentTimeout = func() time.Duration {
 	if s := strings.TrimSpace(os.Getenv("CHE_ITERATE_AGENT_TIMEOUT_SECS")); s != "" {
 		if n, err := time.ParseDuration(s + "s"); err == nil && n > 0 {
 			return n
 		}
 	}
-	return 30 * time.Minute
+	return 60 * time.Minute
 }()
 
 // Opts agrupa el writer de stdout (payload: "Iterated PR ...", "Done.")

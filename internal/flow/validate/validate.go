@@ -84,7 +84,7 @@ var ValidAgents = agent.ValidAgents
 func ParseAgent(s string) (Agent, error) { return agent.ParseAgent(s) }
 
 // AgentTimeout es el tiempo máximo de espera para cada validador individual.
-// Configurable con CHE_VALIDATE_AGENT_TIMEOUT_SECS. Default 30min: el diff de
+// Configurable con CHE_VALIDATE_AGENT_TIMEOUT_SECS. Default 60min: el diff de
 // un PR + review profunda puede tardar más que un explore.
 var AgentTimeout = func() time.Duration {
 	if s := strings.TrimSpace(os.Getenv("CHE_VALIDATE_AGENT_TIMEOUT_SECS")); s != "" {
@@ -92,7 +92,7 @@ var AgentTimeout = func() time.Duration {
 			return n
 		}
 	}
-	return 30 * time.Minute
+	return 60 * time.Minute
 }()
 
 // Validator es un alias del struct centralizado.

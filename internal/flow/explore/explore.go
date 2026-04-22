@@ -56,7 +56,7 @@ func ParseAgent(s string) (Agent, error) { return agent.ParseAgent(s) }
 
 // AgentTimeout es el tiempo máximo que esperamos a que un agente responda
 // antes de cancelarlo. Configurable vía env CHE_AGENT_TIMEOUT_SECS. Default
-// 30 minutos: holgado para un call a claude/codex/gemini sin dejar flows
+// 60 minutos: holgado para un call a claude/codex/gemini sin dejar flows
 // colgados para siempre.
 var AgentTimeout = func() time.Duration {
 	if s := strings.TrimSpace(os.Getenv("CHE_AGENT_TIMEOUT_SECS")); s != "" {
@@ -64,7 +64,7 @@ var AgentTimeout = func() time.Duration {
 			return n
 		}
 	}
-	return 30 * time.Minute
+	return 60 * time.Minute
 }()
 
 // runAgentCmd es el adapter local sobre agent.Run que preserva el contrato

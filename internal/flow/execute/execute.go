@@ -64,7 +64,7 @@ func ParseAgent(s string) (Agent, error) { return agent.ParseAgent(s) }
 
 // AgentTimeout para llamadas al CLI del agente. execute tiene un default
 // mayor que explore porque generar diff + tool use es típicamente más largo
-// que devolver un JSON de análisis. 30 min da margen para issues que tocan
+// que devolver un JSON de análisis. 60 min da margen para issues que tocan
 // varios archivos + corren tests; con stream-json el operador ve si el
 // agente se colgó mucho antes de que expire y puede cancelar con Ctrl+C.
 var AgentTimeout = func() time.Duration {
@@ -73,7 +73,7 @@ var AgentTimeout = func() time.Duration {
 			return n
 		}
 	}
-	return 30 * time.Minute
+	return 60 * time.Minute
 }()
 
 // Opts agrupa el writer de stdout (payload: "Executed ...", "PR: ..."),
