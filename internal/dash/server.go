@@ -688,9 +688,16 @@ func (s *Server) runCmdWithLogs(cmd *exec.Cmd, id int, banner string) error {
 	// Wait en goroutine: al terminar, liberamos la reserva local y
 	// cerramos el run en el LogStore (EOF dispara `event: done` en los
 	// clientes SSE conectados).
+	//
+	// Orden crítico: drenar los pipes ANTES de cmd.Wait(). Per Go docs de
+	// StdoutPipe/StderrPipe: "Wait will close the pipe after seeing the
+	// command exit... it is thus incorrect to call Wait before all reads
+	// from the pipe have completed." Flakeaba TestRunCmdWithLogs_
+	// TeeIntegration en Linux CI con "file already closed" cuando el
+	// scheduler ejecutaba Wait antes que los readers drenaran.
 	go func() {
-		waitErr := cmd.Wait()
 		wg.Wait()
+		waitErr := cmd.Wait()
 		exitMsg := "--- flow terminó OK ---"
 		if waitErr != nil {
 			exitMsg = fmt.Sprintf("--- flow terminó con error: %v ---", waitErr)
