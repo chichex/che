@@ -6,11 +6,14 @@
 // ciclo humano → IA sin intervención manual.
 //
 // Reglas (5):
-//   1. Status=plan sin PlanVerdict            → che validate <IssueNumber>
-//   2. Status=plan + PlanVerdict=changes-req  → che iterate  <IssueNumber>
-//   3. Status=executed sin PRVerdict          → che validate <PRNumber>
-//   4. Status=executed + PRVerdict=changes-req→ che iterate  <PRNumber>
-//   5. Status=validated + PlanVerdict=approve → che execute  <IssueNumber>
+//   1. Status=plan sin PlanVerdict                 → che validate <IssueNumber>
+//   2. Status=validated + PlanVerdict=changes-req  → che iterate  <IssueNumber>
+//      (post-v0.0.49: validate transiciona plan→validated; el verdict
+//       "changes-requested" queda como label plan-validated:* sobre un
+//       issue en che:validated.)
+//   3. Status=executed sin PRVerdict               → che validate <PRNumber>
+//   4. Status=executed + PRVerdict=changes-req     → che iterate  <PRNumber>
+//   5. Status=validated + PlanVerdict=approve      → che execute  <IssueNumber>
 //      (issue-only; sin PR previo. Cierra el gap post-validate plan:
 //       un plan aprobado automáticamente pasa a ejecución.)
 //
@@ -68,7 +71,11 @@ type LoopRule string
 const (
 	// RuleValidatePlan: entity en Status=plan sin PlanVerdict → validate.
 	RuleValidatePlan LoopRule = "validate-plan"
-	// RuleIteratePlan: entity en Status=plan con PlanVerdict=changes-requested → iterate.
+	// RuleIteratePlan: entity en Status=validated con PlanVerdict=
+	// changes-requested → iterate. Post-v0.0.49 validate transiciona
+	// plan→validated; el verdict vive en plan-validated:* sobre un issue
+	// ya en che:validated. `che iterate` también lee el issue desde
+	// che:validated, así que el match cierra el loop validate↔iterate.
 	RuleIteratePlan LoopRule = "iterate-plan"
 	// RuleExecutePlan: entity en Status=validated (issue-only) con
 	// PlanVerdict=approve → execute. Cierra el tramo post-validate plan:
@@ -214,7 +221,7 @@ func ruleLabel(r LoopRule) string {
 	case RuleValidatePlan:
 		return "validate plan (plan sin verdict → validate)"
 	case RuleIteratePlan:
-		return "iterate plan (plan con changes-requested → iterate)"
+		return "iterate plan (validated con changes-requested → iterate)"
 	case RuleExecutePlan:
 		return "execute plan (validated + approve → execute)"
 	case RuleValidatePR:
@@ -274,18 +281,19 @@ func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, t
 		if e.PlanVerdict == "needs-human" {
 			return "", 0, "plan-needs-human"
 		}
-		// Sin verdict → rule1 (validate).
+		// Sin verdict → rule1 (validate). Nota: Status=plan +
+		// PlanVerdict=changes-requested ya no existe en la práctica —
+		// validate transiciona plan→validated antes de setear el verdict
+		// (ver project_validation_model.md). El matching de iterate-plan
+		// vive en el case "validated".
 		if e.PlanVerdict == "" && rules[RuleValidatePlan] {
 			return "validate", e.IssueNumber, "rule:validate-plan"
 		}
-		if e.PlanVerdict == "changes-requested" && rules[RuleIteratePlan] {
-			return "iterate", e.IssueNumber, "rule:iterate-plan"
-		}
 		return "", 0, "no-rule-match"
 	case "validated":
-		// RuleExecutePlan solo aplica a issue-only: un fused en "validated"
-		// implica PR abierto, donde execute no corre. El humano sigue con
-		// close (fused) o iterate (si verdict PR dice changes-requested).
+		// Solo aplica a issue-only: un fused en "validated" implica PR
+		// abierto, donde execute no corre y el verdict relevante es PRVerdict
+		// (no PlanVerdict). El humano sigue con close (fused) o iterate PR.
 		if e.Kind != KindIssue {
 			return "", 0, "validated-not-issue-only"
 		}
@@ -293,17 +301,17 @@ func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, t
 		if e.PlanVerdict == "needs-human" {
 			return "", 0, "plan-needs-human"
 		}
-		// changes-requested → stop para execute; el usuario tiene que
-		// iterar primero (execute.gate rechaza ese verdict). Esta regla
-		// NO cubre iterate desde validated; si en el futuro se agrega
-		// una RuleIteratePlan-from-validated, va acá.
-		if e.PlanVerdict == "changes-requested" {
-			return "", 0, "plan-changes-requested"
+		// changes-requested → iterate (rule2). Cierra el loop
+		// validate↔iterate post-v0.0.49: validate dejó el issue en
+		// che:validated con plan-validated:changes-requested; iterate corre
+		// desde che:validated.
+		if e.PlanVerdict == "changes-requested" && rules[RuleIteratePlan] {
+			return "iterate", e.IssueNumber, "rule:iterate-plan"
 		}
-		// approve explícito (el único path que habilita execute via loop).
-		// No disparamos sin verdict: un issue en che:validated SIN label
-		// plan-validated:* es un estado raro (snapshot stale, o humano
-		// aplicó che:validated a mano). Preferimos no ejecutar speculativo.
+		// approve explícito → execute (rule5). No disparamos sin verdict:
+		// un issue en che:validated SIN label plan-validated:* es un estado
+		// raro (snapshot stale, o humano aplicó che:validated a mano).
+		// Preferimos no ejecutar speculativo.
 		if e.PlanVerdict == "approve" && rules[RuleExecutePlan] {
 			return "execute", e.IssueNumber, "rule:execute-plan"
 		}

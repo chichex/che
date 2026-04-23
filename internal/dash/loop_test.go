@@ -42,12 +42,34 @@ func TestNextDispatch_RuleTable(t *testing.T) {
 			wantSubstr: "no-rule-match",
 		},
 		{
-			name:       "rule2: plan + changes-requested + rule ON → iterate",
-			e:          Entity{Kind: KindIssue, IssueNumber: 42, Status: "plan", PlanVerdict: "changes-requested"},
+			// Post-v0.0.49: validate transiciona plan→validated antes de
+			// setear el verdict. El estado real post-validate con
+			// changes-requested es Status=validated, no Status=plan.
+			name:       "rule2: validated + changes-requested + rule ON → iterate",
+			e:          Entity{Kind: KindIssue, IssueNumber: 42, Status: "validated", PlanVerdict: "changes-requested"},
 			rules:      map[LoopRule]bool{RuleIteratePlan: true},
 			wantFlow:   "iterate",
 			wantRef:    42,
 			wantSubstr: "iterate-plan",
+		},
+		{
+			name:       "rule2 OFF: validated + changes-requested sin regla → no-rule-match",
+			e:          Entity{Kind: KindIssue, IssueNumber: 42, Status: "validated", PlanVerdict: "changes-requested"},
+			rules:      map[LoopRule]bool{},
+			wantFlow:   "",
+			wantSubstr: "no-rule-match",
+		},
+		{
+			// Fused en validated con changes-requested: el verdict aplica al
+			// plan, pero execute no corre sobre PRs. El flow de iterate PR
+			// (rule4) dispara solo en Status=executed + PRVerdict, así que
+			// este caso no tiene regla aplicable — cae en validated-not-
+			// issue-only.
+			name:       "rule2: fused en validated + changes-requested → skip (no issue-only)",
+			e:          Entity{Kind: KindFused, IssueNumber: 42, PRNumber: 77, Status: "validated", PlanVerdict: "changes-requested"},
+			rules:      map[LoopRule]bool{RuleIteratePlan: true},
+			wantFlow:   "",
+			wantSubstr: "validated-not-issue-only",
 		},
 		{
 			name:       "plan + approve → stop (no dispatch)",
@@ -138,11 +160,13 @@ func TestNextDispatch_RuleTable(t *testing.T) {
 			wantSubstr: "no-rule-match",
 		},
 		{
-			name:       "rule5: validated + changes-requested → stop (necesita iterate)",
+			// Solo RuleExecutePlan ON: changes-requested no matchea (execute
+			// pide approve); iterate-plan OFF, así que no hay dispatch.
+			name:       "rule5: validated + changes-requested + solo execute-plan ON → no match",
 			e:          Entity{Kind: KindIssue, IssueNumber: 122, Status: "validated", PlanVerdict: "changes-requested"},
 			rules:      map[LoopRule]bool{RuleExecutePlan: true},
 			wantFlow:   "",
-			wantSubstr: "plan-changes-requested",
+			wantSubstr: "no-rule-match",
 		},
 		{
 			name:       "rule5: validated + needs-human → stop (humano)",
