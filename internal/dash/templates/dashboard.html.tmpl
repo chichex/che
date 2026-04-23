@@ -740,16 +740,18 @@
   <div class="dash-workspace">
 
     <!-- ==== BOARD ==== -->
-    {{/* El wrapper persiste; HTMX hace polling cada PollInterval segundos y
-         swappea solo el innerHTML con la respuesta de /board (que trae el
-         status-chip via hx-swap-oob + las columnas). El trigger "load
-         delay:200ms" pide /board apenas la página carga (no esperar el
-         primer ticker de PollInterval segundos para reemplazar el spinner
-         inicial). */}}
-    <div class="dash-board"
+    {{/* Primer render: el wrapper se swappea por outerHTML en el primer poll
+         (ver board-partial). El trigger "load delay:200ms" fuerza ese poll a
+         dispararse 200ms después de cargar la página (sin esperar al tick
+         baseline de NextPollSec). A partir de ahí el partial rige su propio
+         hx-trigger — el load no vuelve a correr porque el elemento nuevo
+         (con id=dash-board del partial) tiene solo "every NextPollSec s".
+         El polling es adaptivo: idle → PollInterval, hot (hay flows locales
+         en curso) → hotPollSec. Ver buildData.NextPollSec. */}}
+    <div id="dash-board" class="dash-board"
          hx-get="/board"
-         hx-trigger="load delay:200ms, every {{.PollInterval}}s"
-         hx-swap="innerHTML">
+         hx-trigger="load delay:200ms, every {{.NextPollSec}}s"
+         hx-swap="outerHTML">
       {{template "board-columns" .}}
     </div>
 

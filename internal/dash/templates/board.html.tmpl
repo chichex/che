@@ -97,7 +97,20 @@
 {{end}}
 
 {{define "board-partial"}}
+{{/* El wrapper .dash-board vive en el partial (no en el main template):
+     swap "outerHTML" reemplaza el wrapper entero en cada poll, lo cual nos
+     permite actualizar el propio hx-trigger con NextPollSec (adaptive
+     polling: baseline en idle, hotPollSec cuando hay flows locales).
+     HTMX identifica el elemento por id="dash-board" entre swaps y
+     reinstala el trigger con el valor nuevo. El status-chip y el pill de
+     auto-loop salen como OOB swaps — HTMX los aplica aunque el target
+     principal sea outerHTML. */}}
 {{template "status-chip" .}}
 {{template "auto-loop-toggle" .Loop}}
-{{template "board-columns" .}}
+<div id="dash-board" class="dash-board"
+     hx-get="/board"
+     hx-trigger="every {{.NextPollSec}}s"
+     hx-swap="outerHTML">
+  {{template "board-columns" .}}
+</div>
 {{end}}

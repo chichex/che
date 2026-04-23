@@ -55,6 +55,16 @@ type GhSource struct {
 	// del board solo muestra los más recientes.
 	ClosedCap int
 
+	// bump es un canal 1-buffered para forzar un refresh entre ticks (ver
+	// Bump). Capacidad 1 → múltiples Bump() consecutivos se coalescen a
+	// uno solo; nunca bloquea al caller. El loop lo drena en Run.
+	bump chan struct{}
+
+	// refreshFn es el helper que Run dispara en cada tick/bump. Default
+	// g.refresh; se sobreescribe en tests para ejercer la lógica del select
+	// (canal bump + ticker + minGap) sin spawnear procesos `gh` reales.
+	refreshFn func(context.Context) error
+
 	mu   sync.RWMutex
 	snap Snapshot
 }
@@ -107,8 +117,17 @@ func NewGhSource(repoDir string, interval time.Duration) (*GhSource, error) {
 		nwo:       probe.NameWithOwner,
 		interval:  interval,
 		ClosedCap: defaultClosedCap,
+		// cap 1: un solo bump pendiente alcanza; llamadas extra se dropean.
+		bump: make(chan struct{}, 1),
 	}, nil
 }
+
+// Compile-time check: GhSource implementa Source + Bumper. MockSource solo
+// implementa Source (sus datos son estáticos, no necesita bump).
+var (
+	_ Source = (*GhSource)(nil)
+	_ Bumper = (*GhSource)(nil)
+)
 
 // Snapshot devuelve el último snapshot conocido. Concurrency-safe.
 func (g *GhSource) Snapshot() Snapshot {
@@ -117,15 +136,63 @@ func (g *GhSource) Snapshot() Snapshot {
 	return g.snap
 }
 
+// Bump pide un refresh ASAP — implementa la interface Bumper. Se llama
+// desde el server cuando hay una transición local (ej: termina un subproceso
+// che, o el handler POST /action acaba de disparar uno) para que el board
+// refleje el cambio de label sin esperar al próximo tick del ticker.
+//
+// El canal tiene capacidad 1 → si ya hay un bump pendiente, el segundo se
+// dropea silenciosamente. Es una coalescencia deliberada: no queremos 10
+// refreshes en fila por 10 clicks seguidos.
+func (g *GhSource) Bump() {
+	select {
+	case g.bump <- struct{}{}:
+	default:
+	}
+}
+
+// bumpMinGap es el intervalo mínimo entre dos refreshes disparados por el
+// loop de Run. Protege contra tormentas de refreshes si un Bump cae justo
+// después de un tick del ticker (o viceversa). 2s es arbitrario — suficiente
+// para dejar que el subproceso `che` escriba su label y el próximo refresh
+// lo vea, sin congestionar `gh` con calls redundantes.
+const bumpMinGap = 2 * time.Second
+
 // Run corre el loop del poller hasta que ctx se cancele. El primer poll se
 // dispara inmediatamente para que el dashboard tenga datos sin esperar un
-// intervalo completo.
+// intervalo completo. Además del ticker baseline, el loop escucha el canal
+// `bump` para poder refrescar ASAP después de una acción local (ver Bump).
 func (g *GhSource) Run(ctx context.Context) {
-	// Primer poll inmediato. No cancelamos por el ctx antes de intentar —
-	// si falla, se loggea y se sigue con el ticker.
-	if err := g.refresh(ctx); err != nil {
+	refresh := g.refreshFn
+	if refresh == nil {
+		refresh = g.refresh
+	}
+
+	// lastRefresh trackea el último refresh exitoso (o intentado) para
+	// aplicar el minGap del canal bump. Se setea acá (no en el field del
+	// struct) porque solo el loop lo toca y no hace falta sincronizar.
+	var lastRefresh time.Time
+
+	doRefresh := func(src string) {
+		if !lastRefresh.IsZero() && time.Since(lastRefresh) < bumpMinGap {
+			// Dentro del minGap — el refresh previo es suficientemente
+			// reciente como para que el cambio de label ya esté en el
+			// snapshot (o llegue en el próximo tick). Evita hammering.
+			return
+		}
+		lastRefresh = time.Now()
+		if err := refresh(ctx); err != nil {
+			log.Printf("dash: %s poll failed: %v", src, err)
+		}
+	}
+
+	// Primer poll inmediato. Setea lastRefresh para que un Bump() que llegue
+	// en los próximos bumpMinGap no re-dispare (la data ya está fresca).
+	lastRefresh = time.Now()
+	if err := refresh(ctx); err != nil {
 		log.Printf("dash: initial poll failed: %v", err)
 	}
+
 	tick := time.NewTicker(g.interval)
 	defer tick.Stop()
 	for {
@@ -133,9 +200,9 @@ func (g *GhSource) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			if err := g.refresh(ctx); err != nil {
-				log.Printf("dash: poll failed: %v", err)
-			}
+			doRefresh("tick")
+		case <-g.bump:
+			doRefresh("bump")
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -422,10 +423,19 @@ func TestBoardHandler_MockSource(t *testing.T) {
 	if !strings.Contains(got, `data-status="closed"`) {
 		t.Errorf("/board missing column data-status=closed")
 	}
-	// El partial NO debería incluir el wrapper <div class="dash-board">,
-	// solo su contenido (chip + columnas). Ese wrapper es persistente.
-	if strings.Contains(got, `class="dash-board"`) {
-		t.Errorf("/board should not include the .dash-board wrapper; got: %s", got)
+	// Adaptive polling PR: el partial AHORA incluye el wrapper <div
+	// id="dash-board" class="dash-board"> con su propio hx-trigger y
+	// hx-swap="outerHTML". Cada poll reemplaza el wrapper entero — así
+	// el hx-trigger puede usar NextPollSec (adaptivo: 15s idle, 3s hot).
+	if !strings.Contains(got, `id="dash-board"`) {
+		t.Errorf("/board should include the .dash-board wrapper with id=\"dash-board\" (adaptive polling swaps outerHTML)")
+	}
+	if !strings.Contains(got, `hx-swap="outerHTML"`) {
+		t.Errorf("/board wrapper should use hx-swap=\"outerHTML\" (adaptive polling requires replacing the wrapper to update hx-trigger)")
+	}
+	// MockSource sin flows locales → NextPollSec == PollInterval (15).
+	if !strings.Contains(got, `hx-trigger="every 15s"`) {
+		t.Errorf("/board (idle) should emit hx-trigger=\"every 15s\"; body: %s", got)
 	}
 }
 
@@ -1092,4 +1102,165 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ==================================================================
+// Adaptive polling (NextPollSec + Bump hooks)
+// ==================================================================
+
+// bumpableSource es una Source que implementa Bumper contando calls.
+// Alrededor de fixedSource — embebe el snapshot y agrega el counter.
+type bumpableSource struct {
+	snap     Snapshot
+	bumpCalls atomic.Int64
+}
+
+func (b *bumpableSource) Snapshot() Snapshot { return b.snap }
+func (b *bumpableSource) Bump()                { b.bumpCalls.Add(1) }
+
+// TestBuildData_NextPollSecIsBaselineWhenIdle: sin flows locales corriendo,
+// NextPollSec == PollInterval (tick regular).
+func TestBuildData_NextPollSecIsBaselineWhenIdle(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{LastOK: time.Now()}}
+	s := NewServer(src, "repo", 15)
+	data := s.buildData()
+	if data.NextPollSec != 15 {
+		t.Errorf("idle NextPollSec: got %d want 15", data.NextPollSec)
+	}
+}
+
+// TestBuildData_NextPollSecIsHotWhenRunning: con al menos un flow local
+// en s.running, NextPollSec baja a hotPollSec para que las transiciones
+// de label se vean casi inmediatamente.
+func TestBuildData_NextPollSecIsHotWhenRunning(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{LastOK: time.Now()}}
+	s := NewServer(src, "repo", 15)
+	// Simular dispatch pendiente — mismo estado que deja POST /action
+	// después de markRunning exitoso.
+	s.mu.Lock()
+	s.running[42] = "execute"
+	s.mu.Unlock()
+
+	data := s.buildData()
+	if data.NextPollSec != hotPollSec {
+		t.Errorf("hot NextPollSec: got %d want %d (hotPollSec)", data.NextPollSec, hotPollSec)
+	}
+}
+
+// TestBuildData_NextPollSecCappedByBaseline: si PollInterval ya es menor
+// que hotPollSec (ej: operador configuró --poll=1), no subir a hotPollSec
+// por "estar hot" — sería un downgrade. El baseline manda.
+func TestBuildData_NextPollSecCappedByBaseline(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{LastOK: time.Now()}}
+	s := NewServer(src, "repo", 1) // baseline agresivo.
+	s.mu.Lock()
+	s.running[42] = "execute"
+	s.mu.Unlock()
+	data := s.buildData()
+	if data.NextPollSec != 1 {
+		t.Errorf("baseline < hotPollSec should win: got %d want 1", data.NextPollSec)
+	}
+}
+
+// TestClearRunning_CallsBump: cuando termina un subproceso che (el flujo
+// interno llama clearRunning), la Source recibe un Bump para que el poller
+// refresque ASAP y el board refleje la transición de label che:executing →
+// che:executed sin esperar al tick regular.
+func TestClearRunning_CallsBump(t *testing.T) {
+	src := &bumpableSource{snap: Snapshot{LastOK: time.Now()}}
+	s := NewServer(src, "repo", 15)
+	// markRunning + clearRunning: el setup exacto que hace runCmdWithLogs
+	// cuando termina un subproceso (clearRunning en el goroutine de Wait).
+	if _, ok := s.markRunning(42, "execute"); !ok {
+		t.Fatalf("markRunning should succeed on first call")
+	}
+	s.clearRunning(42)
+
+	if got := src.bumpCalls.Load(); got != 1 {
+		t.Errorf("clearRunning should call Bump exactly once; got %d", got)
+	}
+}
+
+// TestActionHandler_CallsBumpAfterSpawn: el handler POST /action dispara
+// un Bump después de spawn exitoso — el subcomando che típicamente aplica
+// un label transient al inicio (che execute → che:executing) y queremos
+// verlo rápido en el board. Separado del Bump de clearRunning (que cubre
+// la transición de salida).
+func TestActionHandler_CallsBumpAfterSpawn(t *testing.T) {
+	src := &bumpableSource{snap: Snapshot{
+		NWO:    "demo/che",
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, IssueTitle: "plan ready", Status: "plan"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	// Runner fake que no falla — mismo shape que otros tests de action.
+	fr := &fakeRunner{}
+	s.runAction = fr.run
+	s.repoPath = "/tmp/r"
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/execute/42", "", nil)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	if fr.count() != 1 {
+		t.Fatalf("runner calls: got %d want 1", fr.count())
+	}
+	if got := src.bumpCalls.Load(); got != 1 {
+		t.Errorf("action handler should call Bump once after successful spawn; got %d", got)
+	}
+}
+
+// TestBoardPartial_HxTriggerIsAdaptive: el partial devuelve el wrapper
+// .dash-board con hx-trigger = NextPollSec. Idle → "every 15s"; hot →
+// "every 3s". Cubre el cambio de template y la integración con NextPollSec.
+func TestBoardPartial_HxTriggerIsAdaptive(t *testing.T) {
+	t.Run("idle → every 15s", func(t *testing.T) {
+		srv := newTestServer(t, "repo")
+		resp, err := http.Get(srv.URL + "/board")
+		if err != nil {
+			t.Fatalf("GET /board: %v", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		got := string(body)
+		if !strings.Contains(got, `hx-trigger="every 15s"`) {
+			t.Errorf("idle /board: missing hx-trigger=\"every 15s\" in body")
+		}
+		if !strings.Contains(got, `id="dash-board"`) {
+			t.Errorf("/board missing id=\"dash-board\" (required for HTMX outerHTML identity)")
+		}
+	})
+
+	t.Run("hot → every 3s", func(t *testing.T) {
+		src := &fixedSource{snap: Snapshot{
+			LastOK: time.Now(),
+			Entities: []Entity{
+				{Kind: KindIssue, IssueNumber: 42, IssueTitle: "x", Status: "plan"},
+			},
+		}}
+		s := NewServer(src, "repo", 15)
+		s.mu.Lock()
+		s.running[42] = "execute"
+		s.mu.Unlock()
+		ts := httptest.NewServer(s)
+		defer ts.Close()
+		resp, err := http.Get(ts.URL + "/board")
+		if err != nil {
+			t.Fatalf("GET /board: %v", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		got := string(body)
+		if !strings.Contains(got, `hx-trigger="every 3s"`) {
+			t.Errorf("hot /board: missing hx-trigger=\"every 3s\"; body: %s", got)
+		}
+	})
 }

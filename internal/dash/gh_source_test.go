@@ -1,8 +1,10 @@
 package dash
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -584,7 +586,177 @@ func TestCombineEntities_ClosedIssuesIncluded(t *testing.T) {
 	}
 }
 
-// TestCombineEntities_FusedClosedIssueAndPR garantiza que un issue
+// ==================================================================
+// Bump / adaptive polling (GhSource.Bump, Run select loop)
+// ==================================================================
+
+// newBumpableSource construye un GhSource "desconectado" de gh — sin pasar
+// por NewGhSource (que valida `gh` en PATH). Setea los campos mínimos para
+// que Run pueda correr con un refreshFn inyectado. Evita shells stubs y
+// deja los tests ejerciendo solo la lógica del canal + ticker + minGap.
+func newBumpableSource(interval time.Duration, fn func(context.Context) error) *GhSource {
+	return &GhSource{
+		interval:  interval,
+		ClosedCap: defaultClosedCap,
+		bump:      make(chan struct{}, 1),
+		refreshFn: fn,
+	}
+}
+
+// waitCount espera hasta que el counter atómico alcance `want` o se agote
+// el timeout. Devuelve el último valor observado — los callers chequean
+// igualdad exacta.
+func waitCount(t *testing.T, c *atomic.Int64, want int64, timeout time.Duration) int64 {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if got := c.Load(); got >= want {
+			return got
+		}
+		if time.Now().After(deadline) {
+			return c.Load()
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestBump_TriggersRefreshOutsideTicker: con interval=1h (ticker
+// inefectivo en el test), un Bump() dispara un refresh extra sin esperar
+// al tick baseline.
+func TestBump_TriggersRefreshOutsideTicker(t *testing.T) {
+	var count atomic.Int64
+	fn := func(_ context.Context) error {
+		count.Add(1)
+		return nil
+	}
+	g := newBumpableSource(1*time.Hour, fn)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		g.Run(ctx)
+		close(done)
+	}()
+
+	// Primer poll inmediato → count==1.
+	if got := waitCount(t, &count, 1, 1*time.Second); got != 1 {
+		t.Fatalf("initial poll: got count=%d want 1", got)
+	}
+
+	// Bump sin esperar minGap — debería NO disparar (el doRefresh guardea).
+	g.Bump()
+	time.Sleep(200 * time.Millisecond)
+	if got := count.Load(); got != 1 {
+		t.Errorf("bump within minGap: count=%d want 1 (should be suppressed by minGap)", got)
+	}
+
+	// Esperar que pase minGap y volver a bumpear → count==2.
+	time.Sleep(bumpMinGap + 100*time.Millisecond)
+	g.Bump()
+	if got := waitCount(t, &count, 2, 1*time.Second); got != 2 {
+		t.Errorf("bump after minGap: got count=%d want 2", got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Run did not exit after ctx cancel")
+	}
+}
+
+// TestBump_RespectsMinGap: múltiples Bump() dentro del minGap solo
+// disparan un refresh. Después del minGap el siguiente Bump sí pasa.
+func TestBump_RespectsMinGap(t *testing.T) {
+	var count atomic.Int64
+	fn := func(_ context.Context) error {
+		count.Add(1)
+		return nil
+	}
+	g := newBumpableSource(1*time.Hour, fn)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		g.Run(ctx)
+		close(done)
+	}()
+
+	// Primer poll → 1.
+	waitCount(t, &count, 1, 1*time.Second)
+
+	// 3 bumps en fila dentro del minGap → ningún refresh extra.
+	g.Bump()
+	g.Bump()
+	g.Bump()
+	time.Sleep(300 * time.Millisecond)
+	if got := count.Load(); got != 1 {
+		t.Errorf("bumps within minGap: count=%d want 1", got)
+	}
+
+	// Pasado el minGap, un solo bump dispara.
+	time.Sleep(bumpMinGap + 100*time.Millisecond)
+	g.Bump()
+	if got := waitCount(t, &count, 2, 1*time.Second); got != 2 {
+		t.Errorf("bump after minGap: count=%d want 2", got)
+	}
+
+	cancel()
+	<-done
+}
+
+// TestBump_CoalescesMultipleCalls: el canal tiene capacidad 1, así que N
+// bumps rápidos se colapsan a lo sumo a 1 refresh extra (el primero que
+// cabe en el buffer; los demás se dropean en el `default` del select de
+// Bump).
+func TestBump_CoalescesMultipleCalls(t *testing.T) {
+	var count atomic.Int64
+	// Bloqueamos el primer refresh con un canal para que los Bump() lleguen
+	// mientras el loop todavía no consumió el buffer — garantiza el test
+	// de coalescencia.
+	release := make(chan struct{})
+	releasedOnce := false
+	fn := func(_ context.Context) error {
+		count.Add(1)
+		if !releasedOnce {
+			releasedOnce = true
+			<-release
+		}
+		return nil
+	}
+	g := newBumpableSource(1*time.Hour, fn)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		g.Run(ctx)
+		close(done)
+	}()
+
+	// Esperar hasta que el primer poll empiece (está bloqueado en fn).
+	waitCount(t, &count, 1, 1*time.Second)
+	// Con el loop trabado en fn, 50 Bump() consecutivos → como máximo 1
+	// cabe en el canal (buffer=1), el resto se dropea en el `default`.
+	for i := 0; i < 50; i++ {
+		g.Bump()
+	}
+	// Liberar el primer refresh; el loop va a consumir el bump pendiente.
+	close(release)
+	// El minGap entra en juego: el bump coalesced llega "justo después"
+	// del primer refresh. Como count ya es 1 y el primer refresh seteó
+	// lastRefresh, el doRefresh del bump va a encontrar time.Since(...)
+	// < minGap y suprimirlo. Aceptamos 1 o 2 refreshes totales — el
+	// contrato del test es "los 50 bumps NO generan 50 refreshes".
+	time.Sleep(300 * time.Millisecond)
+	if got := count.Load(); got > 2 {
+		t.Errorf("coalescing failed: got count=%d, 50 bumps should collapse to ≤2 refreshes", got)
+	}
+
+	cancel()
+	<-done
+}
 // cerrado (che:closed) + su PR mergeado (con closingIssuesReferences
 // apuntándolo) se fusionen en una entidad KindFused. Antes se renderaba
 // como KindIssue (single ref) porque fetchPRs solo traía --state open;

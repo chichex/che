@@ -265,15 +265,28 @@ type pageData struct {
 	Columns      []columnData
 	Snapshot     Snapshot
 	PollInterval int
-	ActiveLoops  int    // entidades con RunningFlow != "" (loops o flows en curso)
-	NWO          string // nameWithOwner — usado por los templates para armar URLs a github.com
-	Version      string // versión del binario che — útil para validar que el dash corre el build esperado
+	// NextPollSec es el intervalo que el partial board-partial va a pasar
+	// al hx-trigger del wrapper. Adaptivo: cuando hay flows locales en curso
+	// (s.running no vacío) bajamos a hotPollSec; en idle usamos PollInterval.
+	// El objetivo es que las transiciones de label (che:executing →
+	// che:executed) se reflejen en el board rápido sin hammering durante
+	// horas de inactividad.
+	NextPollSec int
+	ActiveLoops int    // entidades con RunningFlow != "" (loops o flows en curso)
+	NWO         string // nameWithOwner — usado por los templates para armar URLs a github.com
+	Version     string // versión del binario che — útil para validar que el dash corre el build esperado
 	// Loop es el estado del auto-loop engine (step 6). Se pasa al
 	// partial "auto-loop-toggle" para renderear el pill con el label
 	// correcto ("auto-loop OFF" / "auto-loop ON (3/4)"). El popover en
 	// sí se renderea sobre /loop (lazy) — acá solo el pill.
 	Loop loopPopoverData
 }
+
+// hotPollSec es el intervalo de polling adaptivo cuando hay flows locales
+// corriendo (s.running no vacío). 3s es suficientemente rápido para ver las
+// transiciones de label casi al toque (y para el minGap del GhSource no
+// duplicarse con un tick inmediato) sin saturar `gh`.
+const hotPollSec = 3
 
 // drawerData embebe la Entity y agrega el NWO del snapshot para que el
 // template del drawer pueda construir links a github.com sin depender de
@@ -517,11 +530,26 @@ func (s *Server) buildData() pageData {
 			active++
 		}
 	}
+	// Adaptive polling: si hay flows locales corriendo bajamos a hotPollSec
+	// para ver las transiciones de label rápido. overlayRunning ya corrió,
+	// pero el map s.running que mide "hay algo disparado desde el dash" es
+	// source of truth local — lo leemos bajo lock. NO basta con ActiveLoops
+	// porque ese incluye flows disparados por CLI que el poller ya tiene
+	// indexados; esos no necesitan aceleración (el humano no está mirando
+	// el board pidiendo resultado inmediato).
+	s.mu.Lock()
+	hot := len(s.running) > 0
+	s.mu.Unlock()
+	next := s.pollInterval
+	if hot && next > hotPollSec {
+		next = hotPollSec
+	}
 	return pageData{
 		Repo:         s.repoName,
 		Columns:      groupByColumn(snap.Entities),
 		Snapshot:     snap,
 		PollInterval: s.pollInterval,
+		NextPollSec:  next,
 		ActiveLoops:  active,
 		Version:      s.version,
 		NWO:          snap.NWO,
@@ -602,11 +630,27 @@ func (s *Server) markRunning(id int, flow string) (string, bool) {
 // snapshot "ya lo refleja" y limpia el map en el próximo buildData.
 // También limpia el flag autoRunning (step 6) — la entity deja de ser
 // "auto" cuando el subproceso termina, independiente de quién la disparó.
+//
+// Después de liberar el lock, pedimos un Bump a la Source (si la soporta):
+// el subproceso que terminó probablemente dejó labels transient → terminal
+// (che:executing → che:executed, etc.) y queremos verlos en el board sin
+// esperar al próximo tick. Fuera del lock para no retener el mutex durante
+// el type-assert / el envío al canal.
 func (s *Server) clearRunning(id int) {
 	s.mu.Lock()
 	delete(s.running, id)
 	delete(s.autoRunning, id)
 	s.mu.Unlock()
+	s.bumpSource()
+}
+
+// bumpSource envía una señal de refresh a la Source si implementa Bumper.
+// Type-assert opcional: MockSource no lo implementa (sus datos son
+// estáticos); GhSource sí. No bloquea — Bump() es non-blocking por diseño.
+func (s *Server) bumpSource() {
+	if b, ok := s.source.(Bumper); ok {
+		b.Bump()
+	}
 }
 
 // spawnChe es el default de s.runAction. Lanza `che <flow> <targetRef>` en
@@ -961,6 +1005,14 @@ func (s *Server) buildMux() *http.ServeMux {
 			http.Error(w, "spawn failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		// El subcomando che recién arrancado suele aplicar un label transient
+		// al inicio (ej: che execute → che:executing). Con un Bump acá, el
+		// poller vuelve antes del próximo tick regular y el board puede
+		// reflejar esa transición en segundos en vez de esperar hasta 15s.
+		// No importa si el label todavía no está escrito — bumpMinGap del
+		// poller limita el costo y el próximo bump (via clearRunning) cubre
+		// la transición de salida.
+		s.bumpSource()
 		// Re-render del drawer con el estado actualizado (ya refleja el
 		// flow via overlay local). El browser ve el chip ⟳ instantáneo
 		// y los botones disabled sin esperar al próximo poll. Auto=false

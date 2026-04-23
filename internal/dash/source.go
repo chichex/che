@@ -18,6 +18,15 @@ type Source interface {
 	Snapshot() Snapshot
 }
 
+// Bumper es una capability opcional que una Source puede implementar para
+// recibir hints de "refrescate ASAP" desde el server. El server hace type-
+// assert para descubrirla — no todas las Sources la implementan (MockSource
+// no necesita, sus datos son estáticos). GhSource sí la implementa para
+// que las acciones locales se vean en el board sin esperar el próximo tick.
+type Bumper interface {
+	Bump()
+}
+
 // Snapshot es un corte instantáneo del estado del repo. Se regenera cada
 // vez que el poller hace un refresh exitoso; entre refreshes se devuelve el
 // último snapshot conocido (stale si el último refresh falló).
