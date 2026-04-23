@@ -581,10 +581,29 @@ func (s *Server) findEntity(id int) (Entity, bool) {
 // locales stale (el snapshot ya confirma RunningFlow != "" para esa entidad
 // → ya no necesitamos overlay, la Source es source of truth).
 func (s *Server) overlayRunning(in []Entity) []Entity {
+	// Tomamos el snapshot de rounds ANTES del lock del server para mantener
+	// el orden consistente (l.mu → s.mu no aplica acá; ver nota de locks en
+	// runTick). Las entities con RunningFlow != "" (sea del snapshot o del
+	// overlay local) reciben RunIter/RunMax para que el chip del board
+	// muestre "⟳ <flow> N/5" en vez de "0/0".
+	rounds := s.loop.roundsSnapshot()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.running) == 0 {
-		return in
+	hasOverlay := len(s.running) > 0
+	// Fast path: si no hay overlay Y ninguna entity del snapshot tiene
+	// RunningFlow, no hay nada que mutar. Evita la alocación del out[]
+	// en el caso común idle.
+	if !hasOverlay {
+		anyRunning := false
+		for _, e := range in {
+			if e.RunningFlow != "" {
+				anyRunning = true
+				break
+			}
+		}
+		if !anyRunning {
+			return in
+		}
 	}
 	out := make([]Entity, len(in))
 	for i, e := range in {
@@ -596,6 +615,14 @@ func (s *Server) overlayRunning(in []Entity) []Entity {
 			delete(s.running, e.IssueNumber)
 		} else if flow, ok := s.running[e.IssueNumber]; ok {
 			e.RunningFlow = flow
+		}
+		// Inyectar counter de rounds al chip magenta del card. RunMax es
+		// el cap compartido; si nunca se disparó un flow para este id,
+		// rounds[id]=0 → RunIter=0, lo cual es el estado correcto (el cap
+		// va al renderer igual, para que se vea "⟳ execute 0/5").
+		if e.RunningFlow != "" {
+			e.RunIter = rounds[e.IssueNumber]
+			e.RunMax = LoopCap
 		}
 		out[i] = e
 	}

@@ -209,6 +209,19 @@ func (l *loopState) roundsFor(id int) int {
 	return l.rounds[id]
 }
 
+// roundsSnapshot devuelve una copia del map de rounds. Bajo lock. Usado
+// por overlayRunning para inyectar RunIter en las entities sin tomar
+// l.mu N veces en el loop.
+func (l *loopState) roundsSnapshot() map[int]int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	out := make(map[int]int, len(l.rounds))
+	for k, v := range l.rounds {
+		out[k] = v
+	}
+	return out
+}
+
 // markCapNotified setea capNotified[id]=true si no estaba, y devuelve si
 // ya estaba antes (para que el caller solo loguee la primera vez).
 func (l *loopState) markCapNotified(id int) bool {

@@ -1264,3 +1264,75 @@ func TestBoardPartial_HxTriggerIsAdaptive(t *testing.T) {
 		}
 	})
 }
+
+// TestOverlayRunning_InjectsRoundsCounter: el chip magenta del card muestra
+// ⟳ <flow> <RunIter>/<RunMax>. Esos campos nunca se asignaban, siempre
+// mostraba "0/0". Ahora overlayRunning lee el counter del loopState y el
+// cap (LoopCap) y los copia al Entity cuando RunningFlow != "".
+func TestOverlayRunning_InjectsRoundsCounter(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{LastOK: time.Now()}}
+	s := NewServer(src, "repo", 15)
+	// 2 rounds ya consumidos para el issue 42.
+	s.loop.incRounds(42)
+	s.loop.incRounds(42)
+	// Overlay local: el POST /action marcó 42 con "execute" antes del tick.
+	s.mu.Lock()
+	s.running[42] = "execute"
+	s.mu.Unlock()
+
+	in := []Entity{
+		{Kind: KindIssue, IssueNumber: 42, Status: "validated", PlanVerdict: "approve"},
+		{Kind: KindIssue, IssueNumber: 99, Status: "plan"}, // sin flow, no debe inyectar
+	}
+	out := s.overlayRunning(in)
+	if out[0].RunningFlow != "execute" {
+		t.Errorf("out[0].RunningFlow: got %q want %q", out[0].RunningFlow, "execute")
+	}
+	if out[0].RunIter != 2 {
+		t.Errorf("out[0].RunIter: got %d want 2 (incRounds x2)", out[0].RunIter)
+	}
+	if out[0].RunMax != LoopCap {
+		t.Errorf("out[0].RunMax: got %d want %d (LoopCap)", out[0].RunMax, LoopCap)
+	}
+	// Entity sin flow corriendo no debe tener RunIter/RunMax seteados.
+	if out[1].RunIter != 0 || out[1].RunMax != 0 {
+		t.Errorf("out[1] idle: got RunIter=%d RunMax=%d, want 0/0", out[1].RunIter, out[1].RunMax)
+	}
+}
+
+// TestOverlayRunning_InjectsRoundsForSnapshotFlow: incluso cuando el
+// RunningFlow viene del snapshot (label che:executing transient aplicado
+// por el subproceso real) y no hay overlay local, los campos RunIter/
+// RunMax se inyectan desde el loopState.
+func TestOverlayRunning_InjectsRoundsForSnapshotFlow(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{LastOK: time.Now()}}
+	s := NewServer(src, "repo", 15)
+	s.loop.incRounds(42) // 1 round.
+
+	in := []Entity{
+		{Kind: KindIssue, IssueNumber: 42, Status: "executing", RunningFlow: "execute"},
+	}
+	out := s.overlayRunning(in)
+	if out[0].RunIter != 1 {
+		t.Errorf("out[0].RunIter: got %d want 1", out[0].RunIter)
+	}
+	if out[0].RunMax != LoopCap {
+		t.Errorf("out[0].RunMax: got %d want %d", out[0].RunMax, LoopCap)
+	}
+}
+
+// TestOverlayRunning_IdleNoOp: si no hay running local ni entities con
+// RunningFlow del snapshot, overlayRunning devuelve el slice sin alocar.
+// Fast path importante porque buildData se llama en cada /board.
+func TestOverlayRunning_IdleNoOp(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{LastOK: time.Now()}}
+	s := NewServer(src, "repo", 15)
+	in := []Entity{
+		{Kind: KindIssue, IssueNumber: 42, Status: "plan"},
+	}
+	out := s.overlayRunning(in)
+	// Identidad del slice (fast path retorna in directamente).
+	if &out[0] != &in[0] {
+		t.Errorf("idle overlay: expected identity return (no copy), got new slice")
+	}
+}
