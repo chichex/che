@@ -50,7 +50,7 @@
               title="master switch">
         {{if .Enabled}}☑{{else}}☐{{end}}
       </button>
-      <span class="loop-row-label"><b>master</b> ({{.ActiveRules}}/4 reglas activas)</span>
+      <span class="loop-row-label"><b>master</b> ({{.ActiveRules}}/{{len .Rules}} reglas activas)</span>
     </div>
     <hr class="loop-sep"/>
     {{range .Rules}}

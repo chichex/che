@@ -555,6 +555,13 @@ func TestLoopEndpoints_GET(t *testing.T) {
 	if !strings.Contains(got, `hx-post="/loop/toggle"`) {
 		t.Errorf("popover missing hx-post to /loop/toggle")
 	}
+	// Denominador del label "N/M reglas activas" es dinámico: len(allLoopRules).
+	// Hardcoded "/4" era un bug cuando se agregó execute-plan — el pill ya lo
+	// arregló con len(allLoopRules), acá validamos el mismo contrato.
+	wantDenom := fmt.Sprintf("/%d reglas activas", len(allLoopRules))
+	if !strings.Contains(got, wantDenom) {
+		t.Errorf("popover missing dynamic denominator %q — got: %s", wantDenom, got[:min(len(got), 1000)])
+	}
 }
 
 // TestLoopEndpoints_Toggle flipea el master y verifica OOB del pill.
