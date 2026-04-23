@@ -7,7 +7,7 @@
       {"name": "ct:plan"},
       {"name": "type:feature"},
       {"name": "size:l"},
-      {"name": "status:idea"}
+      {"name": "che:idea"}
     ]
   },
   {
@@ -18,7 +18,7 @@
       {"name": "ct:plan"},
       {"name": "type:feature"},
       {"name": "size:m"},
-      {"name": "status:plan"},
+      {"name": "che:plan"},
       {"name": "plan-validated:approve"}
     ]
   },
@@ -30,7 +30,7 @@
       {"name": "ct:plan"},
       {"name": "type:feature"},
       {"name": "size:m"},
-      {"name": "status:idea"}
+      {"name": "che:idea"}
     ]
   },
   {
@@ -41,7 +41,7 @@
       {"name": "ct:plan"},
       {"name": "type:mejora"},
       {"name": "size:l"},
-      {"name": "status:executing"},
+      {"name": "che:executing"},
       {"name": "che:locked"}
     ]
   },
@@ -54,7 +54,7 @@
       {"name": "ct:plan"},
       {"name": "type:feature"},
       {"name": "size:l"},
-      {"name": "status:executed"}
+      {"name": "che:executed"}
     ]
   },
   {
@@ -65,7 +65,7 @@
       {"name": "ct:plan"},
       {"name": "type:feature"},
       {"name": "size:s"},
-      {"name": "status:executed"}
+      {"name": "che:validated"}
     ]
   },
   {

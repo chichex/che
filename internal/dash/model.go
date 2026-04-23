@@ -1,9 +1,8 @@
 // Package dash — modelo de datos del dashboard. Define los tipos `Entity`,
 // `LogRun`, `LogEntry` que representan lo que se muestra en una card / drawer,
 // junto con el dispatcher `Column` que decide en qué columna del board cae una
-// entidad según sus labels reales (ct:plan, status:*, plan-validated:*,
-// validated:*, che:locked) más el estado efímero de los flows en curso
-// (RunningFlow, RunIter, RunMax).
+// entidad según su `Status` (mapeo 1-a-1 con los 9 estados che:* + default
+// "idea" para issues sin estado raro).
 //
 // Step 2: estos tipos los popula `mock.go` con datos hardcodeados; en pasos
 // posteriores los completará un poller que lea labels de gh api.
@@ -11,17 +10,19 @@ package dash
 
 // EntityKind distingue una entidad "issue suelto" (sin PR aún) de una
 // "fusionada" issue+PR (vinculados via close-keywords). El dispatcher de
-// columna usa esto para separar lo que está en el funnel pre-execute de lo
-// que ya tiene PR abierto.
+// columna ya NO usa Kind (solo Status decide la columna), pero el render
+// sigue diferenciándolo: KindFused muestra ref dual #issue → !PR, KindIssue
+// muestra solo #issue.
 type EntityKind int
 
 const (
 	// KindIssue: solo hay un issue, todavía no se abrió el PR. Cubre las
-	// columnas backlog / exploring / plan.
+	// columnas idea / planning / plan (pre-execute).
 	KindIssue EntityKind = iota
 	// KindFused: issue + PR vinculados (close-keywords). El render usa el
 	// número del PR como ref principal y deja el del issue en breadcrumb.
-	// Cubre executing / validating / approved.
+	// Cubre executing / executed / validating / validated / closing / closed.
+	// Validating y validated también pueden contener issues (validate de plan).
 	KindFused
 )
 
@@ -43,14 +44,18 @@ type Entity struct {
 	Branch      string // ej "feat/dash-fusion"
 	SHA         string // short SHA
 
-	Type        string // "feature" | "fix" | "mejora" | "ux" — vacío = desconocido
-	Size        string // "xs" | "s" | "m" | "l" | "xl" — vacío = desconocido
-	Status      string // "idea" | "plan" | "executing" | "executed" | "closed"
+	Type string // "feature" | "fix" | "mejora" | "ux" — vacío = desconocido
+	Size string // "xs" | "s" | "m" | "l" | "xl" — vacío = desconocido
+	// Status es el sufijo del label che:* (sin prefijo). Valores válidos:
+	// "idea", "planning", "plan", "executing", "executed", "validating",
+	// "validated", "closing", "closed". Vacío o desconocido cae a "idea"
+	// (default defensivo en Column()).
+	Status      string
 	PlanVerdict string // "approve" | "changes-requested" | "needs-human" — vacío = no validado
 	PRVerdict   string // idem, solo aplica si KindFused
 	Locked      bool   // che:locked
 
-	RunningFlow string // "explore" | "execute" | "iterate" | "validate" — vacío = idle
+	RunningFlow string // "explore" | "execute" | "iterate" | "validate" | "close" — vacío = idle
 	RunIter     int    // iteración actual (1-based)
 	RunMax      int    // max iteraciones del loop
 
@@ -85,40 +90,38 @@ type LogEntry struct {
 	Text  string
 }
 
-// Column resuelve a qué columna del Kanban va la entidad. Las reglas siguen
-// el funnel real de che: lo no fusionado vive en backlog/exploring/plan según
-// status + flow corriendo; lo fusionado vive en executing/validating/approved
-// según el verdict del PR.
+// Column resuelve a qué columna del Kanban va la entidad. Mapeo 1-a-1 con
+// `Status`: cada estado che:* tiene su propia columna. La diferencia entre
+// transient y terminal (planning/validating/closing vs plan/validated/closed)
+// se refleja a nivel UI vía el badge "hot" (animación pulsante) que se calcula
+// en groupByColumn al ver RunningFlow != "".
 //
-// Reglas en orden (la primera que matchea gana):
-//  1. Fusionada con PRVerdict=approve → "approved".
-//  2. Fusionada (cualquier otro o sin verdict) → "validating".
-//     Excepción: si Status=="executing", cae a "executing" (todavía no llegó al primer validate).
-//  3. Status=="executing" → "executing" (aplica a fused y a issue-only por defensa).
-//  4. Status=="plan" → "plan".
-//  5. Status=="idea" + RunningFlow=="explore" → "exploring".
-//  6. Default (incluye Status=="idea" idle, status vacío, status raro) → "backlog".
+// Default: "idea" (cualquier issue sin status raro o vacío). Antes era
+// "backlog" pero en el modelo de 9 estados ya no hay backlog separado de
+// idea — todo issue gestionado por che arranca como idea.
 func (e Entity) Column() string {
-	if e.Kind == KindFused {
-		if e.Status == "executing" {
-			return "executing"
-		}
-		if e.PRVerdict == "approve" {
-			return "approved"
-		}
-		return "validating"
-	}
 	switch e.Status {
-	case "executing":
-		return "executing"
+	case "idea":
+		return "idea"
+	case "planning":
+		return "planning"
 	case "plan":
 		return "plan"
-	case "idea":
-		if e.RunningFlow == "explore" {
-			return "exploring"
-		}
-		return "backlog"
+	case "executing":
+		return "executing"
+	case "executed":
+		return "executed"
+	case "validating":
+		return "validating"
+	case "validated":
+		return "validated"
+	case "closing":
+		return "closing"
+	case "closed":
+		return "closed"
 	default:
-		return "backlog"
+		// Status vacío o desconocido → idea (defensa, evita que entidades
+		// huérfanas desaparezcan del board).
+		return "idea"
 	}
 }

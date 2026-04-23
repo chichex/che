@@ -4,9 +4,10 @@
        - "board-partial": respuesta del endpoint /board. Incluye el chip
          de status (con hx-swap-oob="outerHTML" para que se actualice fuera
          del target del swap principal) + las columnas.
-       - "board-columns": las 6 columnas. Invocable desde dashboard.html.tmpl
-         en el render inicial (para no depender de un primer poll antes de
-         ver algo en la UI).
+       - "board-columns": las 9 columnas (idea, planning, plan, executing,
+         executed, validating, validated, closing, closed) reflejando los 9
+         estados che:* (PR3). Invocable desde dashboard.html.tmpl en el render
+         inicial (para no depender de un primer poll antes de ver algo en la UI).
 
      Recibe pageData: .Columns, .Snapshot, .PollInterval, .Repo. */}}
 

@@ -140,20 +140,33 @@
   /* drawer-slot vacío no debe ocupar ancho ni huecos visuales. */
   #drawer-slot:empty { display: none; }
 
-  /* ==================== Board ==================== */
+  /* ==================== Board ====================
+     9 columnas (idea, planning, plan, executing, executed, validating,
+     validated, closing, closed) reflejando los 9 estados che:* (PR2/PR3).
+     Las 4 transient (planning/executing/validating/closing) se pintan en
+     orange; validated en green; closed muted. min-width fuerza scroll
+     horizontal en pantallas chicas — con 9 columnas el board no entra en
+     viewports angostos sin que las cards queden ilegibles. */
   .dash-board {
     display: grid;
-    grid-template-columns: repeat(6, 1fr);
+    grid-template-columns: repeat(9, 1fr);
     gap: 8px;
-    overflow: hidden;
+    overflow-x: auto;
+    overflow-y: hidden;
     min-width: 0;
+    /* min-width del contenido: 9 columnas con un piso razonable (~110px)
+       más gaps. Si el viewport es más chico, scrolleamos en X en vez de
+       comprimir las cards. */
+    /* Aplicado al contenedor interno via grid items: usamos min-width: 0
+       en .col + el grid template arriba; el scroll horizontal aparece en
+       .dash-board cuando los grid items no entran. */
   }
   .col {
     background: var(--panel);
     border-radius: 6px;
     display: flex;
     flex-direction: column;
-    min-width: 0;
+    min-width: 110px;
   }
   .col-hdr {
     padding: 8px 10px;
@@ -177,10 +190,13 @@
     animation: pulse 1.4s infinite;
   }
   @keyframes pulse { 50% { opacity: 0.55; } }
-  .col[data-status="exploring"] .col-hdr b,
+  /* Transient (los 4 *ing) en orange; validated en green; closed en muted. */
+  .col[data-status="planning"] .col-hdr b,
   .col[data-status="executing"] .col-hdr b,
-  .col[data-status="validating"] .col-hdr b { color: var(--orange); }
-  .col[data-status="approved"] .col-hdr b { color: var(--green); }
+  .col[data-status="validating"] .col-hdr b,
+  .col[data-status="closing"] .col-hdr b { color: var(--orange); }
+  .col[data-status="validated"] .col-hdr b { color: var(--green); }
+  .col[data-status="closed"] .col-hdr b { color: var(--muted); }
 
   .cards {
     padding: 6px;
