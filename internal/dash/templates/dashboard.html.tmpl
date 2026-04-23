@@ -48,6 +48,14 @@
   /* ==================== Topbar ==================== */
   .dash-top { display: flex; gap: 10px; align-items: center; }
   .dash-top .repo { color: var(--cyan); font-weight: bold; margin-right: 6px; font-size: 13px; }
+  .dash-top .version {
+    color: var(--muted);
+    font-size: 10px;
+    padding: 2px 6px;
+    border: 1px solid var(--border-muted);
+    border-radius: 3px;
+    letter-spacing: 0.3px;
+  }
   .dash-top .filter {
     background: var(--panel);
     border: 1px solid var(--elevated);
@@ -658,6 +666,7 @@
   <!-- Topbar -->
   <div class="dash-top">
     <span class="repo">{{.Repo}}</span>
+    {{if .Version}}<span class="version" title="versión del binario che que está sirviendo este dash">{{.Version}}</span>{{end}}
     <input class="filter" placeholder="filter: type:feature, author:@me, label:urgent" value="">
     {{template "auto-loop-toggle" .}}
     {{template "status-chip" .}}

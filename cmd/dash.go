@@ -42,11 +42,12 @@ Flags:
 		// sentido imprimir el Usage de cobra.
 		cmd.SilenceUsage = true
 		return dash.Run(ctx, dash.Options{
-			Port:   dashPort,
-			Repo:   dashRepo,
-			NoOpen: dashNoOpen,
-			Poll:   dashPoll,
-			Mock:   dashMock,
+			Port:    dashPort,
+			Repo:    dashRepo,
+			NoOpen:  dashNoOpen,
+			Poll:    dashPoll,
+			Mock:    dashMock,
+			Version: Version,
 		}, cmd.OutOrStdout(), cmd.ErrOrStderr())
 	},
 }

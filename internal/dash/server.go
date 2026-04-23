@@ -50,11 +50,12 @@ var staticFS embed.FS
 
 // Options son los flags que toma `che dash`.
 type Options struct {
-	Port   int
-	Repo   string // "" => cwd
-	NoOpen bool
-	Poll   int  // segundos entre polls del GhSource; también usado como hx-trigger
-	Mock   bool // true => MockSource en vez de GhSource
+	Port    int
+	Repo    string // "" => cwd
+	NoOpen  bool
+	Poll    int    // segundos entre polls del GhSource; también usado como hx-trigger
+	Mock    bool   // true => MockSource en vez de GhSource
+	Version string // versión del binario che que arrancó el dash; se muestra en el topbar
 }
 
 // Run arranca el server y bloquea hasta que ctx se cancele o haya un error
@@ -86,6 +87,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 
 	srv := NewServer(source, repoName, opts.Poll)
 	srv.repoPath = opts.Repo
+	srv.version = opts.Version
 
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(opts.Port))
 	httpSrv := &http.Server{
@@ -139,6 +141,7 @@ type Server struct {
 	repoName     string
 	repoPath     string // cwd del subproceso che <flow>; "" => heredar del server
 	pollInterval int    // segundos
+	version      string // versión del binario (ej "v0.0.58"); "" en dev
 
 	tmpl *template.Template
 	mux  *http.ServeMux
@@ -216,6 +219,7 @@ type pageData struct {
 	PollInterval int
 	ActiveLoops  int    // entidades con RunningFlow != "" (loops o flows en curso)
 	NWO          string // nameWithOwner — usado por los templates para armar URLs a github.com
+	Version      string // versión del binario che — útil para validar que el dash corre el build esperado
 }
 
 // drawerData embebe la Entity y agrega el NWO del snapshot para que el
@@ -458,6 +462,7 @@ func (s *Server) buildData() pageData {
 		Snapshot:     snap,
 		PollInterval: s.pollInterval,
 		ActiveLoops:  active,
+		Version:      s.version,
 		NWO:          snap.NWO,
 	}
 }
