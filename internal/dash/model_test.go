@@ -2,10 +2,9 @@ package dash
 
 import "testing"
 
-// TestColumn cubre el dispatcher de columna del board. Cada caso refleja una
-// transición típica del funnel (idea idle → exploring → plan → executing →
-// validating → approved) más algunos edge cases (status raro, fused sin
-// verdict, fused con executing).
+// TestColumn cubre el dispatcher de columna del board. Mapeo 1-a-1 con
+// `Status` (PR3): cada estado che:* tiene su propia columna; status raro o
+// vacío cae a "idea" (default defensivo).
 func TestColumn(t *testing.T) {
 	cases := []struct {
 		name string
@@ -13,19 +12,19 @@ func TestColumn(t *testing.T) {
 		want string
 	}{
 		{
-			name: "issue idle, status idea → backlog",
+			name: "issue idle, status idea → idea",
 			in:   Entity{Kind: KindIssue, Status: "idea"},
-			want: "backlog",
+			want: "idea",
 		},
 		{
-			name: "issue idle, status vacío → backlog",
+			name: "issue idle, status vacío → idea (default)",
 			in:   Entity{Kind: KindIssue},
-			want: "backlog",
+			want: "idea",
 		},
 		{
-			name: "issue con explore corriendo → exploring",
-			in:   Entity{Kind: KindIssue, Status: "idea", RunningFlow: "explore", RunIter: 1, RunMax: 3},
-			want: "exploring",
+			name: "issue con explore corriendo, status planning → planning",
+			in:   Entity{Kind: KindIssue, Status: "planning", RunningFlow: "explore", RunIter: 1, RunMax: 3},
+			want: "planning",
 		},
 		{
 			name: "issue status plan → plan",
@@ -33,7 +32,7 @@ func TestColumn(t *testing.T) {
 			want: "plan",
 		},
 		{
-			name: "issue status plan + plan-validated:approve → plan",
+			name: "issue status plan + plan-validated:approve → plan (verdict no afecta columna)",
 			in:   Entity{Kind: KindIssue, Status: "plan", PlanVerdict: "approve"},
 			want: "plan",
 		},
@@ -43,29 +42,44 @@ func TestColumn(t *testing.T) {
 			want: "executing",
 		},
 		{
-			name: "fused executed sin verdict → validating",
+			name: "fused status executed → executed (no auto-validating)",
 			in:   Entity{Kind: KindFused, Status: "executed"},
+			want: "executed",
+		},
+		{
+			name: "fused status validating → validating",
+			in:   Entity{Kind: KindFused, Status: "validating"},
 			want: "validating",
 		},
 		{
-			name: "fused executed + verdict changes-requested → validating",
-			in:   Entity{Kind: KindFused, Status: "executed", PRVerdict: "changes-requested"},
-			want: "validating",
+			name: "fused status validated + verdict approve → validated",
+			in:   Entity{Kind: KindFused, Status: "validated", PRVerdict: "approve"},
+			want: "validated",
 		},
 		{
-			name: "fused executed + verdict needs-human → validating",
-			in:   Entity{Kind: KindFused, Status: "executed", PRVerdict: "needs-human"},
-			want: "validating",
+			name: "fused status validated + verdict changes-requested → validated (mismo bucket)",
+			in:   Entity{Kind: KindFused, Status: "validated", PRVerdict: "changes-requested"},
+			want: "validated",
 		},
 		{
-			name: "fused executed + verdict approve → approved",
-			in:   Entity{Kind: KindFused, Status: "executed", PRVerdict: "approve"},
-			want: "approved",
+			name: "fused status validated + verdict needs-human → validated",
+			in:   Entity{Kind: KindFused, Status: "validated", PRVerdict: "needs-human"},
+			want: "validated",
 		},
 		{
-			name: "issue con status raro → backlog (default)",
+			name: "fused status closing → closing",
+			in:   Entity{Kind: KindFused, Status: "closing"},
+			want: "closing",
+		},
+		{
+			name: "fused status closed → closed",
+			in:   Entity{Kind: KindFused, Status: "closed"},
+			want: "closed",
+		},
+		{
+			name: "issue con status raro → idea (default defensivo)",
 			in:   Entity{Kind: KindIssue, Status: "frob"},
-			want: "backlog",
+			want: "idea",
 		},
 	}
 	for _, tc := range cases {

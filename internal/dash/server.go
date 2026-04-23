@@ -175,24 +175,41 @@ type drawerData struct {
 
 // columnData representa una columna del Kanban con sus entidades ya
 // filtradas. Hot dispara el badge pulsante (animación rosa) cuando hay
-// trabajo activo (RunningFlow != "" en alguna de las entidades).
+// trabajo activo en una columna transient (RunningFlow != "" en alguna
+// entidad de planning, executing, validating o closing).
 type columnData struct {
-	Key      string // "backlog" | "exploring" | "plan" | "executing" | "validating" | "approved"
+	Key      string // 1 de los 9: idea | planning | plan | executing | executed | validating | validated | closing | closed
 	Title    string
 	Hot      bool
 	Entities []Entity
 }
 
-// columnsOrder fija el orden left-to-right del board.
+// columnsOrder fija el orden left-to-right del board. 9 columnas reflejando
+// los 9 estados che:* (PR2). Las 4 transient (planning, executing,
+// validating, closing) se intercalan entre sus pares terminales. closed es
+// terminal y queda capada en el poller (ver ClosedCap en gh_source.go).
 var columnsOrder = []struct {
 	Key, Title string
 }{
-	{"backlog", "backlog"},
-	{"exploring", "exploring"},
+	{"idea", "idea"},
+	{"planning", "planning"},
 	{"plan", "plan"},
 	{"executing", "executing"},
+	{"executed", "executed"},
 	{"validating", "validating"},
-	{"approved", "approved"},
+	{"validated", "validated"},
+	{"closing", "closing"},
+	{"closed", "closed"},
+}
+
+// hotColumns es el set de columnas que pueden mostrar el badge hot (animación
+// pulsante). Son las 4 transient: cuando hay un flow corriendo sobre una
+// entidad en esa columna, el badge late para indicar trabajo en curso.
+var hotColumns = map[string]bool{
+	"planning":   true,
+	"executing":  true,
+	"validating": true,
+	"closing":    true,
 }
 
 // groupByColumn distribuye un slice de entidades en columnas según
@@ -203,7 +220,7 @@ func groupByColumn(entities []Entity) []columnData {
 	for _, e := range entities {
 		col := e.Column()
 		buckets[col] = append(buckets[col], e)
-		if e.RunningFlow != "" && (col == "exploring" || col == "executing" || col == "validating") {
+		if e.RunningFlow != "" && hotColumns[col] {
 			hot[col] = true
 		}
 	}
@@ -387,7 +404,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	})
 
 	// Board partial para HTMX polling. Devuelve el chip de status (oob) + las
-	// 6 columnas. El wrapper `.dash-board` queda en el DOM y su innerHTML se
+	// 9 columnas. El wrapper `.dash-board` queda en el DOM y su innerHTML se
 	// swappea con el contenido de esta respuesta.
 	mux.HandleFunc("GET /board", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")

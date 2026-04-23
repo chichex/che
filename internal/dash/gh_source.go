@@ -34,12 +34,26 @@ import (
 	"github.com/chichex/che/internal/labels"
 )
 
+// defaultClosedCap es el cap default de issues closed que el poller trae al
+// snapshot. Se elige 20 como compromiso: suficiente para mostrar continuidad
+// histórica reciente sin inflar el board (la columna closed scrollea
+// internamente). Configurable via GhSource.ClosedCap si en el futuro se
+// expone como flag de `che dash`.
+//
+// TODO: confirmar — si el repo tiene mucho throughput puede que 20 quede
+// corto; por ahora es lo más conservador para evitar payloads grandes.
+const defaultClosedCap = 20
+
 // GhSource es un poller que refleja el estado del repo via `gh`. Se refresca
 // cada `interval`; entre refreshes Snapshot() devuelve el último corte bueno.
 type GhSource struct {
 	repoDir  string
 	nwo      string // owner/name — informativo, no se usa en las queries
 	interval time.Duration
+	// ClosedCap es el límite de issues closed (con label che:closed) que el
+	// poller trae al snapshot. Default defaultClosedCap. La columna "closed"
+	// del board solo muestra los más recientes.
+	ClosedCap int
 
 	mu   sync.RWMutex
 	snap Snapshot
@@ -89,9 +103,10 @@ func NewGhSource(repoDir string, interval time.Duration) (*GhSource, error) {
 		return nil, errors.New("gh repo view: nameWithOwner vacío")
 	}
 	return &GhSource{
-		repoDir:  repoDir,
-		nwo:      probe.NameWithOwner,
-		interval: interval,
+		repoDir:   repoDir,
+		nwo:       probe.NameWithOwner,
+		interval:  interval,
+		ClosedCap: defaultClosedCap,
 	}, nil
 }
 
@@ -166,9 +181,10 @@ type ghPR struct {
 	StatusCheckRollup       []ghCheck    `json:"statusCheckRollup"`
 }
 
-// refresh es un poll único. Lanza las dos queries en paralelo y combina los
-// resultados; si cualquiera falla, marcamos el snapshot stale y salimos sin
-// pisar los datos anteriores.
+// refresh es un poll único. Lanza tres queries en paralelo (issues open,
+// PRs open, issues closed con label che:closed) y combina los resultados;
+// si cualquiera falla, marcamos el snapshot stale y salimos sin pisar los
+// datos anteriores.
 func (g *GhSource) refresh(ctx context.Context) error {
 	type issuesRes struct {
 		data []ghIssue
@@ -179,6 +195,7 @@ func (g *GhSource) refresh(ctx context.Context) error {
 		err  error
 	}
 	issuesCh := make(chan issuesRes, 1)
+	closedCh := make(chan issuesRes, 1)
 	prsCh := make(chan prsRes, 1)
 
 	go func() {
@@ -186,14 +203,22 @@ func (g *GhSource) refresh(ctx context.Context) error {
 		issuesCh <- issuesRes{data, err}
 	}()
 	go func() {
+		data, err := g.fetchClosedIssues(ctx)
+		closedCh <- issuesRes{data, err}
+	}()
+	go func() {
 		data, err := g.fetchPRs(ctx)
 		prsCh <- prsRes{data, err}
 	}()
 
 	ir := <-issuesCh
+	cr := <-closedCh
 	pr := <-prsCh
-	if ir.err != nil || pr.err != nil {
+	if ir.err != nil || cr.err != nil || pr.err != nil {
 		err := ir.err
+		if err == nil {
+			err = cr.err
+		}
 		if err == nil {
 			err = pr.err
 		}
@@ -204,7 +229,13 @@ func (g *GhSource) refresh(ctx context.Context) error {
 		return err
 	}
 
-	entities := combineEntities(ir.data, pr.data)
+	// Mezclar issues open + closed antes de combinar con PRs. combineEntities
+	// no distingue open/closed — el filtro real ocurre via labels (los closed
+	// que vienen del query ya tienen che:closed, así que caen en su columna).
+	allIssues := make([]ghIssue, 0, len(ir.data)+len(cr.data))
+	allIssues = append(allIssues, ir.data...)
+	allIssues = append(allIssues, cr.data...)
+	entities := combineEntities(allIssues, pr.data)
 	g.mu.Lock()
 	g.snap = Snapshot{
 		Entities: entities,
@@ -235,6 +266,37 @@ func (g *GhSource) fetchIssues(ctx context.Context) ([]ghIssue, error) {
 			return nil, fmt.Errorf("gh issue list: %s", strings.TrimSpace(string(ee.Stderr)))
 		}
 		return nil, fmt.Errorf("gh issue list: %w", err)
+	}
+	return parseIssues(out)
+}
+
+// fetchClosedIssues corre `gh issue list --state closed --label che:closed`
+// con el cap del poller. Permite que la columna closed muestre los últimos
+// N issues completados sin traer todo el histórico del repo (que en un
+// proyecto activo puede ser miles).
+//
+// Si el repo no usa el label che:closed (proyecto recién migrado), gh
+// devuelve [] y este path es no-op.
+func (g *GhSource) fetchClosedIssues(ctx context.Context) ([]ghIssue, error) {
+	limit := g.ClosedCap
+	if limit <= 0 {
+		limit = defaultClosedCap
+	}
+	cmd := exec.CommandContext(ctx, "gh", "issue", "list",
+		"--state", "closed",
+		"--label", labels.CheClosed,
+		"--limit", fmt.Sprintf("%d", limit),
+		"--json", "number,title,labels,state,body",
+	)
+	if g.repoDir != "" {
+		cmd.Dir = g.repoDir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("gh issue list (closed): %s", strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, fmt.Errorf("gh issue list (closed): %w", err)
 	}
 	return parseIssues(out)
 }
@@ -355,6 +417,12 @@ func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 // applyLabels rellena los campos de Entity derivados de labels: Type, Size,
 // Status, PlanVerdict, PRVerdict, Locked. Es aditivo — se puede llamar dos
 // veces (issue + PR) y los labels más recientes ganan.
+//
+// Status se deriva del prefijo `che:` (post-PR1/PR2): che:idea → "idea",
+// che:planning → "planning", etc. El label `che:locked` es la única
+// excepción — es un marker, no un estado, y prende e.Locked en vez de
+// pisar Status. plan-validated:* / validated:* son los verdicts de los
+// validadores (no son estados).
 func applyLabels(e *Entity, ls []ghLabel) {
 	for _, l := range ls {
 		name := l.Name
@@ -365,12 +433,18 @@ func applyLabels(e *Entity, ls []ghLabel) {
 			e.Type = strings.TrimPrefix(name, "type:")
 		case strings.HasPrefix(name, "size:"):
 			e.Size = strings.TrimPrefix(name, "size:")
-		case strings.HasPrefix(name, "status:"):
-			e.Status = strings.TrimPrefix(name, "status:")
 		case strings.HasPrefix(name, "plan-validated:"):
+			// Chequear plan-validated antes de validated: (más específico
+			// gana — sino el case validated: matchearía a plan-validated:X).
 			e.PlanVerdict = strings.TrimPrefix(name, "plan-validated:")
 		case strings.HasPrefix(name, "validated:"):
 			e.PRVerdict = strings.TrimPrefix(name, "validated:")
+		case strings.HasPrefix(name, "che:"):
+			// che:idea / che:planning / che:plan / che:executing /
+			// che:executed / che:validating / che:validated / che:closing /
+			// che:closed → sufijo va a Status. che:locked se intercepta
+			// arriba (no llega acá).
+			e.Status = strings.TrimPrefix(name, "che:")
 		}
 	}
 }

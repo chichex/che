@@ -57,8 +57,20 @@ func TestDashboardHandler_Index(t *testing.T) {
 		t.Errorf("body missing Dracula bg hex")
 	}
 	// Step 2: rename mergeable → approved.
-	if !strings.Contains(got, ">approved<") {
-		t.Errorf("body missing column header 'approved'")
+	// PR3: 9 columnas (idea, planning, plan, executing, executed, validating,
+	// validated, closing, closed). "approved" desapareció como columna —
+	// ahora la columna es "validated".
+	if !strings.Contains(got, ">validated<") {
+		t.Errorf("body missing column header 'validated'")
+	}
+	if !strings.Contains(got, ">closed<") {
+		t.Errorf("body missing column header 'closed'")
+	}
+	if !strings.Contains(got, ">planning<") {
+		t.Errorf("body missing column header 'planning'")
+	}
+	if strings.Contains(got, ">approved<") {
+		t.Errorf("body still contains legacy column 'approved' (PR3 lo sustituye por 'validated')")
 	}
 	if strings.Contains(got, ">mergeable<") {
 		t.Errorf("body still contains old column 'mergeable'")
@@ -312,6 +324,55 @@ type fixedSource struct{ snap Snapshot }
 
 func (f *fixedSource) Snapshot() Snapshot { return f.snap }
 
+// TestColumnsOrder fija el contrato del orden left-to-right del board: 9
+// columnas reflejando los 9 estados che:* (PR3). Si alguien reordena el
+// slice o suma/quita una columna, el test rompe.
+func TestColumnsOrder(t *testing.T) {
+	want := []string{"idea", "planning", "plan", "executing", "executed", "validating", "validated", "closing", "closed"}
+	if len(columnsOrder) != len(want) {
+		t.Fatalf("columnsOrder len: got %d want %d", len(columnsOrder), len(want))
+	}
+	for i, c := range columnsOrder {
+		if c.Key != want[i] {
+			t.Errorf("columnsOrder[%d].Key: got %q want %q", i, c.Key, want[i])
+		}
+	}
+}
+
+// TestGroupByColumn_HotSemantics chequea que el badge "hot" prende para las
+// 4 columnas transient (planning/executing/validating/closing) cuando hay
+// una entidad con RunningFlow != "", y NO prende para las terminales (idea,
+// plan, executed, validated, closed).
+func TestGroupByColumn_HotSemantics(t *testing.T) {
+	entities := []Entity{
+		{Status: "planning", RunningFlow: "explore"},
+		{Status: "executing", RunningFlow: "execute"},
+		{Status: "validating", RunningFlow: "validate"},
+		{Status: "closing", RunningFlow: "close"},
+		// No-hot: status terminal aunque haya RunningFlow seteado (caso raro).
+		{Status: "validated", RunningFlow: "iterate"},
+		// No-hot: planning sin flow (transient pero idle).
+		{Status: "plan"},
+	}
+	got := groupByColumn(entities)
+	hotByKey := map[string]bool{}
+	for _, c := range got {
+		hotByKey[c.Key] = c.Hot
+	}
+	wantHot := []string{"planning", "executing", "validating", "closing"}
+	for _, k := range wantHot {
+		if !hotByKey[k] {
+			t.Errorf("columna %q debería estar hot", k)
+		}
+	}
+	wantNotHot := []string{"idea", "plan", "executed", "validated", "closed"}
+	for _, k := range wantNotHot {
+		if hotByKey[k] {
+			t.Errorf("columna %q NO debería estar hot", k)
+		}
+	}
+}
+
 // TestBoardHandler_MockSource: el endpoint /board devuelve status-chip (oob)
 // + columnas, listo para que HTMX swappee el innerHTML del wrapper.
 func TestBoardHandler_MockSource(t *testing.T) {
@@ -342,12 +403,17 @@ func TestBoardHandler_MockSource(t *testing.T) {
 	if !strings.Contains(got, "mock mode") {
 		t.Errorf("/board missing 'mock mode' chip text (MockSource)")
 	}
-	// Columnas presentes.
-	if !strings.Contains(got, `data-status="backlog"`) {
-		t.Errorf("/board missing column data-status=backlog")
+	// Columnas presentes (sample: idea, validated, closed). PR3 reemplaza
+	// las 6 columnas viejas (incluyendo "backlog" y "approved") por las 9
+	// che:* — chequeamos extremos + una del medio.
+	if !strings.Contains(got, `data-status="idea"`) {
+		t.Errorf("/board missing column data-status=idea")
 	}
-	if !strings.Contains(got, `data-status="approved"`) {
-		t.Errorf("/board missing column data-status=approved")
+	if !strings.Contains(got, `data-status="validated"`) {
+		t.Errorf("/board missing column data-status=validated")
+	}
+	if !strings.Contains(got, `data-status="closed"`) {
+		t.Errorf("/board missing column data-status=closed")
 	}
 	// El partial NO debería incluir el wrapper <div class="dash-board">,
 	// solo su contenido (chip + columnas). Ese wrapper es persistente.

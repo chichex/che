@@ -63,8 +63,9 @@ func TestParseIssues(t *testing.T) {
 			if !hasLabel(i.Labels, "ct:plan") {
 				t.Errorf("issue #7 should have ct:plan label")
 			}
-			if !hasLabel(i.Labels, "status:idea") {
-				t.Errorf("issue #7 should have status:idea label")
+			// PR3: labels migrados de status:* a che:*.
+			if !hasLabel(i.Labels, "che:idea") {
+				t.Errorf("issue #7 should have che:idea label")
 			}
 		}
 	}
@@ -232,8 +233,10 @@ func TestCombineEntities_PRVerdictFromLabels(t *testing.T) {
 	if pr40.PRVerdict != "approve" {
 		t.Errorf("PR #40 verdict: got %q want approve", pr40.PRVerdict)
 	}
-	if pr40.Column() != "approved" {
-		t.Errorf("PR #40 with approve verdict should land in 'approved' column; got %q", pr40.Column())
+	// PR3: columnas 1-a-1 con Status. Issue #22 (fused con PR #40) tiene
+	// che:validated en el fixture → cae en "validated", no "approved".
+	if pr40.Column() != "validated" {
+		t.Errorf("PR #40 (status=validated) should land in 'validated' column; got %q", pr40.Column())
 	}
 }
 
@@ -282,8 +285,8 @@ func TestCombineEntities_IssueOnlyPreserved(t *testing.T) {
 // shapes (CheckRun + StatusContext) y estados intermedios.
 func TestCountChecks(t *testing.T) {
 	cases := []struct {
-		name                  string
-		checks                []ghCheck
+		name                       string
+		checks                     []ghCheck
 		wantOK, wantPend, wantFail int
 	}{
 		{
@@ -354,7 +357,7 @@ func TestCountChecks(t *testing.T) {
 			wantPend: 1,
 		},
 		{
-			name: "Empty → zero",
+			name:   "Empty → zero",
 			checks: nil,
 		},
 		{
@@ -402,9 +405,9 @@ func TestHumanAgo(t *testing.T) {
 	// Solo chequeamos el prefijo / forma; los valores exactos dependen del
 	// tiempo de corrida.
 	cases := []struct {
-		name     string
-		seconds  int
-		wantHas  string
+		name    string
+		seconds int
+		wantHas string
 	}{
 		{"3s", 3, "hace 3s"},
 		{"59s", 59, "hace 59s"},
@@ -437,5 +440,108 @@ func TestErrShort(t *testing.T) {
 	got := errShort(long)
 	if len(got) != 40 {
 		t.Errorf("errShort(long) len: got %d want 40 (got=%q)", len(got), got)
+	}
+}
+
+// TestApplyLabels_Che cubre el parsing de labels che:* (PR3): cada sufijo
+// del prefijo debe terminar en e.Status. che:locked es la excepción —
+// prende e.Locked y NO toca Status.
+func TestApplyLabels_Che(t *testing.T) {
+	cases := []struct {
+		name       string
+		ls         []ghLabel
+		wantStatus string
+		wantLocked bool
+	}{
+		{
+			name:       "che:idea → status idea",
+			ls:         []ghLabel{{Name: "che:idea"}},
+			wantStatus: "idea",
+		},
+		{
+			name:       "che:planning → status planning",
+			ls:         []ghLabel{{Name: "che:planning"}},
+			wantStatus: "planning",
+		},
+		{
+			name:       "che:closed → status closed",
+			ls:         []ghLabel{{Name: "che:closed"}},
+			wantStatus: "closed",
+		},
+		{
+			name:       "che:locked → Locked=true, Status vacío",
+			ls:         []ghLabel{{Name: "che:locked"}},
+			wantLocked: true,
+		},
+		{
+			name:       "che:executing + che:locked → status executing + locked",
+			ls:         []ghLabel{{Name: "che:executing"}, {Name: "che:locked"}},
+			wantStatus: "executing",
+			wantLocked: true,
+		},
+		{
+			name: "status:* legacy ya no impacta Status (post-PR1/PR2)",
+			ls:   []ghLabel{{Name: "status:plan"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var e Entity
+			applyLabels(&e, tc.ls)
+			if e.Status != tc.wantStatus {
+				t.Errorf("Status: got %q want %q", e.Status, tc.wantStatus)
+			}
+			if e.Locked != tc.wantLocked {
+				t.Errorf("Locked: got %v want %v", e.Locked, tc.wantLocked)
+			}
+		})
+	}
+}
+
+// TestApplyLabels_PlanValidatedNotShadowedByValidated: el switch debe
+// chequear plan-validated:* antes que validated:* — caso contrario un label
+// "plan-validated:approve" matchearía el case "validated:" y dejaría
+// PRVerdict="approve" / PlanVerdict="" (bug invertido). Es defensa contra
+// reordenar los cases del switch sin querer.
+func TestApplyLabels_PlanValidatedNotShadowedByValidated(t *testing.T) {
+	var e Entity
+	applyLabels(&e, []ghLabel{{Name: "plan-validated:approve"}})
+	if e.PlanVerdict != "approve" {
+		t.Errorf("PlanVerdict: got %q want approve", e.PlanVerdict)
+	}
+	if e.PRVerdict != "" {
+		t.Errorf("PRVerdict debería quedar vacío con label plan-validated:approve; got %q", e.PRVerdict)
+	}
+}
+
+// TestCombineEntities_ClosedIssuesIncluded simula el merge de issues open +
+// closed que hace refresh(). El caller real (refresh()) hace `append(open,
+// closed...)` antes de llamar a combineEntities — replicamos eso acá.
+func TestCombineEntities_ClosedIssuesIncluded(t *testing.T) {
+	openIssues := []ghIssue{
+		{Number: 7, Title: "open idea", Labels: []ghLabel{{Name: "ct:plan"}, {Name: "che:idea"}}},
+	}
+	closedIssues := []ghIssue{
+		{Number: 5, Title: "old done", State: "CLOSED", Labels: []ghLabel{{Name: "ct:plan"}, {Name: "che:closed"}}},
+	}
+	all := append([]ghIssue{}, openIssues...)
+	all = append(all, closedIssues...)
+
+	entities := combineEntities(all, nil)
+
+	var got5 *Entity
+	for i := range entities {
+		if entities[i].IssueNumber == 5 {
+			got5 = &entities[i]
+		}
+	}
+	if got5 == nil {
+		t.Fatalf("issue #5 closed no quedó en entities; got=%+v", entities)
+	}
+	if got5.Status != "closed" {
+		t.Errorf("issue #5 status: got %q want closed", got5.Status)
+	}
+	if got5.Column() != "closed" {
+		t.Errorf("issue #5 columna: got %q want closed", got5.Column())
 	}
 }
