@@ -6,9 +6,12 @@
          issue original como contexto histórico.
        - Issue-only: vista única con el contenido actual + body al pie si lo hay.
 
-     Setea data-entity y data-tab en el root para que dash.js pueda sincronizar
-     body[data-selected] + togglear tabs delegando el click. */}}
-<div class="drawer" data-entity="{{.IssueNumber}}" data-tab="pr">
+     Wrapper externo: .modal-backdrop > .modal (overlay sobre el board, no
+     sidebar). Las clases internas mantienen prefix drawer-* para minimizar
+     churn — solo cambia el envoltorio. data-entity y data-tab viven en .modal
+     para que dash.js pueda togglear tabs delegando el click. */}}
+<div class="modal-backdrop">
+<div class="modal" data-entity="{{.IssueNumber}}" data-tab="pr">
 
   {{if eq .Kind 1}}
     {{/* ============= FUSED: tabs PR | Issue ============= */}}
@@ -27,7 +30,7 @@
           </div>
           <button class="drawer-close"
                   hx-get="/drawer/close"
-                  hx-target="#drawer-slot"
+                  hx-target="#modal-slot"
                   hx-swap="innerHTML"
                   title="cerrar (Esc)">×</button>
         </div>
@@ -111,7 +114,7 @@
           </div>
           <button class="drawer-close"
                   hx-get="/drawer/close"
-                  hx-target="#drawer-slot"
+                  hx-target="#modal-slot"
                   hx-swap="innerHTML"
                   title="cerrar (Esc)">×</button>
         </div>
@@ -137,7 +140,7 @@
         </div>
         <button class="drawer-close"
                 hx-get="/drawer/close"
-                hx-target="#drawer-slot"
+                hx-target="#modal-slot"
                 hx-swap="innerHTML"
                 title="cerrar (Esc)">×</button>
       </div>
@@ -206,4 +209,5 @@
     {{end}}
   {{end}}
 
+</div>
 </div>

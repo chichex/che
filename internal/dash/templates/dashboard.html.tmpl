@@ -123,10 +123,9 @@
   .status-chip.connecting { color: var(--muted); }
 
   /* ==================== Workspace layout ====================
-     Sin drawer abierto: una sola columna (board ocupa todo el ancho).
-     Con drawer: 1fr | 520px.
-     :has() está soportado por Safari/Chrome/Firefox modernos; el board sirve
-     como mockup local así que no nos preocupa IE/legacy. */
+     El board ocupa siempre todo el ancho; el detalle se muestra como modal
+     overlay sobre el board (ver bloque "Modal" más abajo) en vez de comprimir
+     la grilla con un sidebar. */
   .dash-workspace {
     flex: 1;
     display: grid;
@@ -134,11 +133,6 @@
     gap: 12px;
     min-height: 0;
   }
-  .dash-workspace:has(#drawer-slot .drawer) {
-    grid-template-columns: 1fr 520px;
-  }
-  /* drawer-slot vacío no debe ocupar ancho ni huecos visuales. */
-  #drawer-slot:empty { display: none; }
 
   /* ==================== Board ====================
      9 columnas (idea, planning, plan, executing, executed, validating,
@@ -219,9 +213,6 @@
     line-height: 1.4;
   }
   .card:hover { border-color: var(--border-muted); }
-  /* Highlight de la card seleccionada. body[data-selected] lo setea dash.js
-     después de que htmx swappea el drawer; el CSS hace el resto. */
-  body[data-selected] .card[data-entity] { /* placeholder para selectores específicos abajo */ }
 
   .card-breadcrumb {
     color: var(--muted);
@@ -281,24 +272,45 @@
   .card-breadcrumb .bc-size { color: var(--muted); }
   .card-breadcrumb .bc-sep  { color: var(--border-muted); margin: 0 2px; }
 
-  /* ==================== Drawer ==================== */
-  /* El drawer ahora puede tener tabs (fused) o ir directo al contenido
-     (issue-only). Usamos flex column en vez de grid fijo a 4 filas — el
-     pane-pr tiene su propio grid interno si hace falta, y el pane-issue
-     es una vista de body que puede scrollear. */
-  .drawer {
+  /* ==================== Modal ====================
+     El detalle de la entidad se muestra como modal overlay sobre el board
+     (no comprime la grilla). El backdrop semi-transparente cubre todo el
+     viewport; el modal queda centrado y tiene 90vw × 90vh con un tope de
+     1600px para no quedar gigantesco en monitores ultra wide. Cierre via
+     ESC o click sobre el backdrop (ver dash.js). */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 24px;
+  }
+  .modal {
+    width: 90vw;
+    height: 90vh;
+    max-width: 1600px;
     background: var(--panel);
-    border-radius: 6px;
+    border-radius: 8px;
     border: 1px solid var(--elevated);
     display: flex;
     flex-direction: column;
     overflow: hidden;
-    min-height: 0;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
   }
-  /* Un pane del drawer ocupa todo el espacio restante y es su propio
+
+  /* ==================== Drawer ==================== */
+  /* "Drawer" hoy es el contenido interno del modal — el wrapper exterior es
+     .modal/.modal-backdrop pero las clases internas mantienen prefix
+     `drawer-` (drawer-hdr, drawer-meta, drawer-tabs, etc.) para minimizar
+     churn respecto a la versión sidebar. Puede tener tabs (fused) o ir
+     directo al contenido (issue-only). */
+  /* Un pane del modal ocupa todo el espacio restante y es su propio
      contenedor flex column para que el header quede fijo y los logs/body
      puedan scrollear. */
-  .drawer .pane {
+  .modal .pane {
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -454,9 +466,10 @@
   }
 
   /* ==================== Drawer tabs (fused: PR | Issue) ====================
-     El toggle es via atributo data-tab en .drawer (pr|issue). Sin JS activo
-     el drawer arranca en "pr" (default en el template) — los selectores de
-     abajo ocultan el pane que no corresponde. */
+     El toggle es via atributo data-tab en .modal (pr|issue). Sin JS activo
+     el modal arranca en "pr" (default en el template) — los selectores de
+     abajo ocultan el pane que no corresponde. Las clases internas siguen
+     con prefix drawer-* para no churnear el resto del CSS. */
   .drawer-tabs {
     display: flex;
     gap: 4px;
@@ -475,13 +488,13 @@
     margin-bottom: -1px;
   }
   .drawer-tabs .tab:hover { color: var(--text); }
-  .drawer[data-tab="pr"] .tab-pr,
-  .drawer[data-tab="issue"] .tab-issue {
+  .modal[data-tab="pr"] .tab-pr,
+  .modal[data-tab="issue"] .tab-issue {
     color: var(--cyan);
     border-bottom-color: var(--cyan);
   }
-  .drawer[data-tab="pr"] .pane-issue { display: none; }
-  .drawer[data-tab="issue"] .pane-pr { display: none; }
+  .modal[data-tab="pr"] .pane-issue { display: none; }
+  .modal[data-tab="issue"] .pane-pr { display: none; }
 
   /* Cuerpo del tab Issue (y body al pie del issue-only). Scroll interno
      para que el body largo no rompa el alto del drawer. */
@@ -528,49 +541,18 @@
       {{template "board-columns" .}}
     </div>
 
-    <!-- ==== DRAWER (slot vacío al cargar; htmx lo llena al clickear una card) ==== -->
-    <div id="drawer-slot"></div>
+    <!-- ==== MODAL slot (vacío al cargar; htmx lo llena al clickear una card) ==== -->
+    {{/* El slot vive dentro del workspace por simplicidad, pero el modal
+         renderizado adentro tiene `position: fixed`, así que se posiciona
+         relativo al viewport (no al workspace). El slot vacío no ocupa
+         espacio porque su contenido es nada hasta que entra el partial. */}}
+    <div id="modal-slot"></div>
 
   </div>
 </div>
 
-<style>
-  /* Highlight de la card abierta. Generado dinámicamente por id no es
-     posible en CSS estático, así que usamos un selector de atributo
-     suficientemente específico. data-selected en body es seteado por
-     dash.js al recibir el htmx:afterSwap del drawer. */
-  body[data-selected] .card[data-entity] { /* base no-op, overridden vía JS abajo */ }
-</style>
-
 <script src="/static/htmx.min.js"></script>
 <script src="/static/dash.js"></script>
-<script>
-  // Highlight dinámico vía hoja de estilos inyectada cada vez que cambia
-  // body[data-selected]. Más simple que mantener una clase en la card.
-  (function () {
-    var styleEl = document.createElement("style");
-    document.head.appendChild(styleEl);
-    function syncHighlight() {
-      var sel = document.body.dataset.selected;
-      if (!sel) {
-        styleEl.textContent = "";
-        return;
-      }
-      // Escape básico — sel viene de un IssueNumber numérico, pero blindamos.
-      var safe = sel.replace(/[^0-9a-zA-Z_-]/g, "");
-      styleEl.textContent =
-        '.card[data-entity="' + safe + '"] {' +
-        '  border-color: var(--cyan);' +
-        '  box-shadow: 0 0 0 1px var(--cyan);' +
-        '}';
-    }
-    // MutationObserver sobre body[data-selected]. Más limpio que escuchar
-    // cada htmx:afterSwap y mantener dos handlers en sync.
-    var mo = new MutationObserver(syncHighlight);
-    mo.observe(document.body, { attributes: true, attributeFilter: ["data-selected"] });
-    syncHighlight();
-  })();
-</script>
 
 </body>
 </html>

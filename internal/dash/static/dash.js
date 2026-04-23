@@ -1,33 +1,34 @@
 // dash.js — interacciones del dashboard que NO maneja htmx por sí solo.
-// Específicamente: sincronizar el atributo body[data-selected] con la card
-// activa (para el highlight CSS), y cerrar el drawer con Esc o click afuera.
+// Específicamente: cerrar el modal con Esc o click sobre el backdrop, y el
+// switcher de tabs (PR | Issue) del modal fused.
 //
-// El swap del drawer en sí lo hace htmx (hx-get="/drawer/{id}" sobre cada
-// card). Acá solo escuchamos eventos del body para mantener data-selected
-// alineado con lo que esté swappeado en #drawer-slot.
+// El swap del modal en sí lo hace htmx (hx-get="/drawer/{id}" sobre cada
+// card). Acá solo escuchamos eventos del body para reaccionar al modal
+// montado en #modal-slot.
 
 (function () {
   "use strict";
 
-  // closeDrawer vacía el slot y limpia el atributo de selección. Idempotente:
-  // si ya estaba cerrado no hace nada raro.
-  function closeDrawer() {
-    var slot = document.getElementById("drawer-slot");
+  // closeModal vacía el slot. Idempotente: si ya estaba cerrado no hace
+  // nada raro. El nombre conserva la semántica del flujo aunque el wrapper
+  // exterior pasó de "drawer" a "modal".
+  function closeModal() {
+    var slot = document.getElementById("modal-slot");
     if (slot) slot.innerHTML = "";
-    document.body.removeAttribute("data-selected");
   }
 
-  // Esc cierra el drawer. Listener global; barato.
+  // Esc cierra el modal. Listener global; barato.
   // "/" focusea el input de filter (si no estamos ya escribiendo en un input).
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape") {
-      // Si el foco está en un input (ej: filter), Escape lo blurrea; si no, cierra drawer.
+      // Si el foco está en un input (ej: filter), Escape lo blurrea; si no,
+      // cierra el modal.
       var t = e.target;
       if (t instanceof HTMLInputElement || t instanceof HTMLTextAreaElement) {
         t.blur();
         return;
       }
-      closeDrawer();
+      closeModal();
       return;
     }
     if (e.key === "/") {
@@ -42,39 +43,35 @@
     }
   });
 
-  // Tab switcher del drawer (PR / Issue). Delegado en body porque el drawer
-  // se swappea dinámicamente con htmx — no podemos bindear al botón directo
-  // sin re-bindear después de cada swap. stopPropagation evita que el click
-  // bubblee al handler de "click afuera" que cierra el drawer.
+  // Tab switcher del modal (PR / Issue). Delegado en body porque el modal se
+  // swappea dinámicamente con htmx — no podemos bindear al botón directo sin
+  // re-bindear después de cada swap. stopPropagation evita que el click
+  // bubblee al handler de "click backdrop" que cierra el modal.
   document.body.addEventListener("click", function (e) {
     var t = e.target;
     if (!(t instanceof Element)) return;
     var tabBtn = t.closest(".drawer-tabs .tab");
     if (!tabBtn) return;
     e.stopPropagation();
-    var drawer = tabBtn.closest(".drawer");
-    if (!drawer) return;
-    drawer.dataset.tab = tabBtn.dataset.tab || "pr";
+    // El wrapper con data-tab ahora es .modal (no .drawer); las clases
+    // internas drawer-* siguen igual.
+    var modal = tabBtn.closest(".modal");
+    if (!modal) return;
+    modal.dataset.tab = tabBtn.dataset.tab || "pr";
   });
 
-  // Click afuera cierra. Consideramos "afuera" todo lo que NO sea:
-  //   - una card (.card) — el click sobre otra card abre esa otra,
-  //     no debe cerrar primero.
-  //   - el drawer mismo (#drawer-slot) — clicks dentro del drawer
-  //     (botones, scroll, etc.) no deben cerrar.
-  //   - la topbar (.dash-top) — interacciones con filtros/toggle no
-  //     deben cerrar el drawer.
-  //
-  // Usamos `capture: false` (default) y dejamos que htmx procese sus
-  // hx-* primero; el handler de cierre solo dispara cuando el target no
-  // está dentro de las zonas "vivas".
-  document.addEventListener("click", function (e) {
+  // Click sobre el backdrop cierra el modal. Solo dispara si el target del
+  // click es directamente .modal-backdrop — clicks adentro de .modal (sobre
+  // el modal o cualquier hijo) no llegan acá porque el target es el hijo,
+  // no el backdrop. Esto es justo lo que queremos: solo el backdrop "vacío"
+  // cierra. No hace falta excluir explícitamente .card / .dash-top porque
+  // ninguno de esos coincide con .modal-backdrop como target.
+  document.body.addEventListener("click", function (e) {
     var t = e.target;
     if (!(t instanceof Element)) return;
-    if (t.closest(".card")) return;
-    if (t.closest("#drawer-slot")) return;
-    if (t.closest(".dash-top")) return;
-    closeDrawer();
+    if (t.classList && t.classList.contains("modal-backdrop")) {
+      closeModal();
+    }
   });
 
   // Countdown al próximo poll en el status-chip. El chip tiene data-last-ok-ms
@@ -98,23 +95,15 @@
     textEl.textContent = remaining > 0 ? "next in " + remaining + "s" : "polling…";
   }, 1000);
 
-  // Cuando htmx termina de swappear el drawer, sincronizamos data-selected
-  // con el id que vino del hx-trigger. Lo hacemos vía evento custom de htmx
-  // en vez de hx-on::after-request inline para que cards futuras (cuando el
-  // poller las re-renderice) no necesiten repetir el handler en cada tag.
+  // htmx:afterSwap — antes acá sincronizábamos body[data-selected] para
+  // pintar la card abierta. Sin highlight (con backdrop la selección visual
+  // sobra), el handler queda muy minimalista; lo dejamos por si en el futuro
+  // queremos engancharnos al swap del modal. Solo nos interesa cuando el
+  // target es #modal-slot.
   document.body.addEventListener("htmx:afterSwap", function (e) {
     if (!e.detail || !e.detail.target) return;
-    if (e.detail.target.id !== "drawer-slot") return;
-    var slot = e.detail.target;
-    // Si el swap dejó el slot vacío (caso /drawer/close) limpiamos selección.
-    if (!slot.innerHTML.trim()) {
-      document.body.removeAttribute("data-selected");
-      return;
-    }
-    // El partial de drawer setea data-entity en su root; lo levantamos.
-    var root = slot.querySelector("[data-entity]");
-    if (root && root.dataset.entity) {
-      document.body.dataset.selected = root.dataset.entity;
-    }
+    if (e.detail.target.id !== "modal-slot") return;
+    // No-op por ahora. Hook reservado para futuras integraciones (por
+    // ejemplo, focus management o analytics).
   });
 })();

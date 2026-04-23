@@ -6,7 +6,14 @@
 // `GET /board` devuelve las columnas + un chip de status via `hx-swap-oob` para
 // que el topbar refleje "OK / stale / connecting" sin recargar toda la página.
 //
-// Pasos siguientes: acciones reales en los botones del drawer y stream SSE de
+// Endpoints del detalle: `/drawer/{id}` y `/drawer/close` mantienen el path
+// `/drawer/*` por compat con tests/htmx attrs aunque ahora el partial
+// renderea un modal overlay (.modal-backdrop > .modal) en vez del sidebar
+// original. El filename del template también queda como drawer.html.tmpl —
+// solo cambia el wrapper exterior; las clases internas siguen con prefix
+// drawer-* (drawer-hdr, drawer-tabs, etc.).
+//
+// Pasos siguientes: acciones reales en los botones del modal y stream SSE de
 // logs en vivo.
 package dash
 
@@ -439,7 +446,9 @@ func (s *Server) buildMux() *http.ServeMux {
 		}
 	})
 
-	// Cierre del drawer. Body vacío deja #drawer-slot vacío y colapsa el grid.
+	// Cierre del modal. Body vacío deja #modal-slot vacío y desmonta el
+	// overlay. Path mantiene el prefijo /drawer/* por compat con tests y
+	// con los hx-get de los botones de cierre del partial.
 	mux.HandleFunc("GET /drawer/close", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
