@@ -60,16 +60,55 @@ func TestNextDispatch_RuleTable(t *testing.T) {
 			wantSubstr: "no-rule-match",
 		},
 		{
-			// Fused en validated con changes-requested: el verdict aplica al
-			// plan, pero execute no corre sobre PRs. El flow de iterate PR
-			// (rule4) dispara solo en Status=executed + PRVerdict, así que
-			// este caso no tiene regla aplicable — cae en validated-not-
-			// issue-only.
-			name:       "rule2: fused en validated + changes-requested → skip (no issue-only)",
+			// Fused en validated con PlanVerdict=changes-requested y
+			// PRVerdict vacío: iterate-plan es issue-only (PlanVerdict). El
+			// case fused mira PRVerdict; sin verdict no dispara nada.
+			name:       "rule2: fused en validated con PlanVerdict (no PRVerdict) → no-rule-match",
 			e:          Entity{Kind: KindFused, IssueNumber: 42, PRNumber: 77, Status: "validated", PlanVerdict: "changes-requested"},
 			rules:      map[LoopRule]bool{RuleIteratePlan: true},
 			wantFlow:   "",
-			wantSubstr: "validated-not-issue-only",
+			wantSubstr: "no-rule-match",
+		},
+		{
+			// Post-fix del iterate-pr: validate-pr transiciona executed→
+			// validated y deja el verdict. iterate-pr debe matchear en ese
+			// estado también.
+			name:       "rule4: fused validated + PRVerdict=changes-requested + rule ON → iterate PR",
+			e:          Entity{Kind: KindFused, IssueNumber: 42, PRNumber: 77, Status: "validated", PRVerdict: "changes-requested"},
+			rules:      map[LoopRule]bool{RuleIteratePR: true},
+			wantFlow:   "iterate",
+			wantRef:    77,
+			wantSubstr: "iterate-pr",
+		},
+		{
+			name:       "rule4 OFF: fused validated + changes-requested sin regla → no-rule-match",
+			e:          Entity{Kind: KindFused, IssueNumber: 42, PRNumber: 77, Status: "validated", PRVerdict: "changes-requested"},
+			rules:      map[LoopRule]bool{},
+			wantFlow:   "",
+			wantSubstr: "no-rule-match",
+		},
+		{
+			name:       "fused validated + PRVerdict=approve → pr-approved (stop)",
+			e:          Entity{Kind: KindFused, IssueNumber: 42, PRNumber: 77, Status: "validated", PRVerdict: "approve"},
+			rules:      map[LoopRule]bool{RuleIteratePR: true},
+			wantFlow:   "",
+			wantSubstr: "pr-approved",
+		},
+		{
+			name:       "fused validated + PRVerdict=needs-human → pr-needs-human",
+			e:          Entity{Kind: KindFused, IssueNumber: 42, PRNumber: 77, Status: "validated", PRVerdict: "needs-human"},
+			rules:      map[LoopRule]bool{RuleIteratePR: true},
+			wantFlow:   "",
+			wantSubstr: "pr-needs-human",
+		},
+		{
+			// Defensivo: fused sin PRNumber (raro, pero posible en snapshots
+			// corruptos). No dispatchamos — iterate-pr necesita PR number.
+			name:       "fused validated + changes-requested pero PR=0 → no-rule-match",
+			e:          Entity{Kind: KindFused, IssueNumber: 42, PRNumber: 0, Status: "validated", PRVerdict: "changes-requested"},
+			rules:      map[LoopRule]bool{RuleIteratePR: true},
+			wantFlow:   "",
+			wantSubstr: "no-rule-match",
 		},
 		{
 			name:       "plan + approve → stop (no dispatch)",
@@ -176,11 +215,15 @@ func TestNextDispatch_RuleTable(t *testing.T) {
 			wantSubstr: "plan-needs-human",
 		},
 		{
-			name:       "rule5: validated + approve pero fused → skip (execute no corre sobre fused)",
+			// Execute-plan no corre sobre fused: el case fused mira PRVerdict,
+			// no PlanVerdict. Con PRVerdict vacío cae en no-rule-match
+			// (ya no devuelve "validated-not-issue-only" — el case por Kind
+			// se bifurca antes del early return viejo).
+			name:       "rule5: fused validated + PlanVerdict=approve (sin PRVerdict) → no-rule-match",
 			e:          Entity{Kind: KindFused, IssueNumber: 122, PRNumber: 140, Status: "validated", PlanVerdict: "approve"},
 			rules:      map[LoopRule]bool{RuleExecutePlan: true},
 			wantFlow:   "",
-			wantSubstr: "validated-not-issue-only",
+			wantSubstr: "no-rule-match",
 		},
 	}
 	for _, tc := range tests {

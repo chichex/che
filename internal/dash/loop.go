@@ -85,7 +85,11 @@ const (
 	RuleExecutePlan LoopRule = "execute-plan"
 	// RuleValidatePR: entity en Status=executed sin PRVerdict → validate.
 	RuleValidatePR LoopRule = "validate-pr"
-	// RuleIteratePR: entity en Status=executed con PRVerdict=changes-requested → iterate.
+	// RuleIteratePR: entity con PRVerdict=changes-requested → iterate.
+	// Matchea en dos estados: Status=executed (validate-pr todavía no corrió)
+	// y Status=validated (validate-pr ya transicionó executed→validated y
+	// dejó el verdict en validated:*). Post-validate PR es el caso común:
+	// el flow natural deja al fused en validated con verdict.
 	RuleIteratePR LoopRule = "iterate-pr"
 )
 
@@ -291,12 +295,26 @@ func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, t
 		}
 		return "", 0, "no-rule-match"
 	case "validated":
-		// Solo aplica a issue-only: un fused en "validated" implica PR
-		// abierto, donde execute no corre y el verdict relevante es PRVerdict
-		// (no PlanVerdict). El humano sigue con close (fused) o iterate PR.
-		if e.Kind != KindIssue {
-			return "", 0, "validated-not-issue-only"
+		// Fused en "validated" = post validate-pr: el flow transicionó
+		// executed→validated y dejó el verdict en PRVerdict (validated:*).
+		// Para issue-only, el verdict vive en PlanVerdict. El case se
+		// bifurca por Kind porque el flow natural es distinto.
+		if e.Kind == KindFused {
+			if e.PRVerdict == "needs-human" {
+				return "", 0, "pr-needs-human"
+			}
+			if e.PRVerdict == "approve" {
+				return "", 0, "pr-approved"
+			}
+			// changes-requested → iterate (rule4). Cierra el loop
+			// validate↔iterate del lado PR: análogo al fix iterate-plan
+			// para el lado issue (v0.0.67).
+			if e.PRVerdict == "changes-requested" && rules[RuleIteratePR] && e.PRNumber > 0 {
+				return "iterate", e.PRNumber, "rule:iterate-pr"
+			}
+			return "", 0, "no-rule-match"
 		}
+		// Issue-only:
 		// PlanVerdict=needs-human → stop (humano debe resolver).
 		if e.PlanVerdict == "needs-human" {
 			return "", 0, "plan-needs-human"
