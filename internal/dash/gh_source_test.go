@@ -545,3 +545,40 @@ func TestCombineEntities_ClosedIssuesIncluded(t *testing.T) {
 		t.Errorf("issue #5 columna: got %q want closed", got5.Column())
 	}
 }
+
+// TestCombineEntities_FusedClosedIssueAndPR garantiza que un issue
+// cerrado (che:closed) + su PR mergeado (con closingIssuesReferences
+// apuntándolo) se fusionen en una entidad KindFused. Antes se renderaba
+// como KindIssue (single ref) porque fetchPRs solo traía --state open;
+// fetchClosedPRs cerró ese hueco.
+func TestCombineEntities_FusedClosedIssueAndPR(t *testing.T) {
+	closedIssues := []ghIssue{
+		{Number: 121, Title: "Provider Web App", State: "CLOSED",
+			Labels: []ghLabel{{Name: "ct:plan"}, {Name: "che:closed"}}},
+	}
+	closedPRs := []ghPR{
+		{Number: 130, Title: "feat: provider web app", State: "MERGED",
+			ClosingIssuesReferences: []ghCloseRef{{Number: 121}}},
+	}
+
+	entities := combineEntities(closedIssues, closedPRs)
+
+	var got *Entity
+	for i := range entities {
+		if entities[i].IssueNumber == 121 {
+			got = &entities[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("issue #121 no quedó en entities; got=%+v", entities)
+	}
+	if got.Kind != KindFused {
+		t.Errorf("issue #121 Kind: got %v want KindFused (debería fusionarse con !130)", got.Kind)
+	}
+	if got.PRNumber != 130 {
+		t.Errorf("issue #121 PRNumber: got %d want 130", got.PRNumber)
+	}
+	if got.Column() != "closed" {
+		t.Errorf("issue #121 columna: got %q want closed", got.Column())
+	}
+}

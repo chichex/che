@@ -181,10 +181,13 @@ type ghPR struct {
 	StatusCheckRollup       []ghCheck    `json:"statusCheckRollup"`
 }
 
-// refresh es un poll único. Lanza tres queries en paralelo (issues open,
-// PRs open, issues closed con label che:closed) y combina los resultados;
-// si cualquiera falla, marcamos el snapshot stale y salimos sin pisar los
-// datos anteriores.
+// refresh es un poll único. Lanza cuatro queries en paralelo (issues open,
+// issues closed con label che:closed, PRs open, PRs closed con cap) y
+// combina los resultados; si cualquiera falla, marcamos el snapshot stale
+// y salimos sin pisar los datos anteriores. Los closed PRs son necesarios
+// para que la columna `closed` muestre cards fused (#issue → !PR) — sin
+// ellos el merge issue↔PR no encuentra match y el closed cae como
+// issue-only.
 func (g *GhSource) refresh(ctx context.Context) error {
 	type issuesRes struct {
 		data []ghIssue
@@ -197,6 +200,7 @@ func (g *GhSource) refresh(ctx context.Context) error {
 	issuesCh := make(chan issuesRes, 1)
 	closedCh := make(chan issuesRes, 1)
 	prsCh := make(chan prsRes, 1)
+	closedPRsCh := make(chan prsRes, 1)
 
 	go func() {
 		data, err := g.fetchIssues(ctx)
@@ -210,17 +214,25 @@ func (g *GhSource) refresh(ctx context.Context) error {
 		data, err := g.fetchPRs(ctx)
 		prsCh <- prsRes{data, err}
 	}()
+	go func() {
+		data, err := g.fetchClosedPRs(ctx)
+		closedPRsCh <- prsRes{data, err}
+	}()
 
 	ir := <-issuesCh
 	cr := <-closedCh
 	pr := <-prsCh
-	if ir.err != nil || cr.err != nil || pr.err != nil {
+	cpr := <-closedPRsCh
+	if ir.err != nil || cr.err != nil || pr.err != nil || cpr.err != nil {
 		err := ir.err
 		if err == nil {
 			err = cr.err
 		}
 		if err == nil {
 			err = pr.err
+		}
+		if err == nil {
+			err = cpr.err
 		}
 		g.mu.Lock()
 		g.snap.LastErr = err
@@ -235,7 +247,13 @@ func (g *GhSource) refresh(ctx context.Context) error {
 	allIssues := make([]ghIssue, 0, len(ir.data)+len(cr.data))
 	allIssues = append(allIssues, ir.data...)
 	allIssues = append(allIssues, cr.data...)
-	entities := combineEntities(allIssues, pr.data)
+	// Idem para PRs: mergeamos open + closed antes de combinar. Los closed
+	// PRs mantienen closingIssuesReferences, así que se fusionan correctamente
+	// con el issue cerrado correspondiente.
+	allPRs := make([]ghPR, 0, len(pr.data)+len(cpr.data))
+	allPRs = append(allPRs, pr.data...)
+	allPRs = append(allPRs, cpr.data...)
+	entities := combineEntities(allIssues, allPRs)
 	g.mu.Lock()
 	g.snap = Snapshot{
 		Entities: entities,
@@ -317,6 +335,36 @@ func (g *GhSource) fetchPRs(ctx context.Context) ([]ghPR, error) {
 			return nil, fmt.Errorf("gh pr list: %s", strings.TrimSpace(string(ee.Stderr)))
 		}
 		return nil, fmt.Errorf("gh pr list: %w", err)
+	}
+	return parsePRs(out)
+}
+
+// fetchClosedPRs corre `gh pr list --state closed` con el cap del poller.
+// Necesario para que la columna `closed` muestre cards fused (#issue → !PR)
+// en vez de issue-only: el merge issue↔PR de combineEntities requiere que
+// el PR esté en el snapshot, y los PRs mergeados no aparecen en
+// `--state open`. `--state closed` incluye tanto mergeados como cerrados
+// sin merge (ambos casos válidos para fusión: el closingIssuesReferences
+// del PR sigue apuntando al issue cerrado).
+func (g *GhSource) fetchClosedPRs(ctx context.Context) ([]ghPR, error) {
+	limit := g.ClosedCap
+	if limit <= 0 {
+		limit = defaultClosedCap
+	}
+	cmd := exec.CommandContext(ctx, "gh", "pr", "list",
+		"--state", "closed",
+		"--limit", fmt.Sprintf("%d", limit),
+		"--json", "number,title,labels,state,headRefName,headRefOid,closingIssuesReferences,statusCheckRollup",
+	)
+	if g.repoDir != "" {
+		cmd.Dir = g.repoDir
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("gh pr list (closed): %s", strings.TrimSpace(string(ee.Stderr)))
+		}
+		return nil, fmt.Errorf("gh pr list (closed): %w", err)
 	}
 	return parsePRs(out)
 }
