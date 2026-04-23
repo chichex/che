@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // newTestServer es el helper de todos los tests: MockSource + repo ficticio +
@@ -107,8 +108,8 @@ func TestDashboardHandler_Index(t *testing.T) {
 	if !strings.Contains(got, `hx-get="/board"`) {
 		t.Errorf("body missing hx-get=\"/board\" on the dash-board wrapper")
 	}
-	if !strings.Contains(got, `hx-trigger="every 15s"`) {
-		t.Errorf("body missing hx-trigger for 15s default poll")
+	if !strings.Contains(got, `hx-trigger="load delay:200ms, every 15s"`) {
+		t.Errorf("body missing hx-trigger 'load delay:200ms, every 15s' (primer poll inmediato + ticker)")
 	}
 }
 
@@ -424,5 +425,62 @@ func TestBoardHandler_MockSource(t *testing.T) {
 	// solo su contenido (chip + columnas). Ese wrapper es persistente.
 	if strings.Contains(got, `class="dash-board"`) {
 		t.Errorf("/board should not include the .dash-board wrapper; got: %s", got)
+	}
+}
+
+// TestBoardLoading_FirstPollPending chequea que cuando el snapshot todavía
+// no tuvo primer poll exitoso (LastOK zero) y NO estamos en mock, el render
+// del board incluye el spinner de "loading" en lugar de las 9 columnas
+// vacías. Evita el bug visual donde el board parece "no hay nada en el
+// repo" durante los primeros segundos antes del primer gh poll.
+func TestBoardLoading_FirstPollPending(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		// LastOK zero (sin primer poll), Mock false, Stale false.
+	}}
+	srv := httptest.NewServer(NewServer(src, "owner/repo", 15))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	got := string(body)
+
+	if !strings.Contains(got, `class="board-loading"`) {
+		t.Errorf("/ missing board-loading wrapper while LastOK is zero")
+	}
+	if !strings.Contains(got, `class="spinner"`) {
+		t.Errorf("/ missing spinner while LastOK is zero")
+	}
+	// Las columnas NO deberían renderizarse mientras se muestra el spinner.
+	if strings.Contains(got, `data-status="idea"`) {
+		t.Errorf("/ should not render columns while LastOK is zero (got data-status=idea)")
+	}
+}
+
+// TestBoardLoading_AfterFirstPoll chequea que una vez que LastOK ya no es
+// zero (primer poll OK), el render muestra las 9 columnas y NO el spinner.
+func TestBoardLoading_AfterFirstPoll(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+	}}
+	srv := httptest.NewServer(NewServer(src, "owner/repo", 15))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	got := string(body)
+
+	if strings.Contains(got, `class="board-loading"`) {
+		t.Errorf("/ should NOT include board-loading after first poll OK")
+	}
+	if !strings.Contains(got, `data-status="idea"`) {
+		t.Errorf("/ should render columns after first poll OK")
 	}
 }
