@@ -28,12 +28,16 @@ import (
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
+	"github.com/chichex/che/internal/startup"
 )
 
 type screen int
 
 const (
 	screenMenu screen = iota
+	screenStartupChecksLoading
+	screenStartupChecks
+	screenStartupChecksRunning
 	screenIdeaInput
 	screenIdeaRunning
 	screenExploreLoading
@@ -289,6 +293,19 @@ type Model struct {
 	// paralelo). El menú lo usa para mostrar "Última: <flow> #<ref> …"
 	// y pre-posicionar el cursor en el próximo paso sugerido.
 	lastAction *lastAction
+
+	// startupChecks guarda el subset de Results que triggerearon en el
+	// arranque. La pantalla screenStartupChecks itera sobre ellos uno
+	// por uno (startupCursor avanza con cada respuesta del usuario).
+	// Una vez vacío o consumido, la TUI transiciona a screenMenu.
+	//
+	// repoRoot es el path absoluto del cwd al arranque — lo usamos
+	// para MarkSkipped sin re-detectar (evita inconsistencias si el
+	// usuario cambia de directorio en otra terminal mientras la TUI
+	// está abierta).
+	startupChecks   []startup.Result
+	startupCursor   int
+	startupRepoRoot string
 }
 
 // lastAction captura qué hizo el usuario por última vez en esta sesión.
@@ -321,7 +338,27 @@ const (
 // el binario (ej. "0.0.8"). El repo y la branch se detectan en el momento.
 // ctx es el context raíz (cancelable por señal); si es nil, se usa
 // context.Background() — los tests de snapshot del model no lo necesitan.
+//
+// Equivalente a NewWithOptions con runStartupChecks=true. Mantenemos la
+// firma para callers viejos / tests; el toggle real vive en NewWithOptions.
 func New(version string, ctx context.Context) Model {
+	return NewWithOptions(version, ctx, Options{RunStartupChecks: true})
+}
+
+// Options agrupa los toggles del arranque del modelo. Se introduce para
+// soportar el flag --no-checks de root.go sin romper la firma de New.
+type Options struct {
+	// RunStartupChecks=true arranca la TUI corriendo los chequeos
+	// secundarios (labels viejos / versión / locks colgados) antes de
+	// mostrar el menú. En false va directo al menú — usado por tests y
+	// por el flag --no-checks.
+	RunStartupChecks bool
+}
+
+// NewWithOptions construye el modelo inicial respetando los toggles
+// del arranque. El comportamiento por defecto (sin opts) es equivalente
+// a New: arranca corriendo los chequeos.
+func NewWithOptions(version string, ctx context.Context, opts Options) Model {
 	ta := textarea.New()
 	ta.Placeholder = "Contame la idea — puede ser multilínea. Ctrl+D para enviar, Esc para cancelar."
 	ta.CharLimit = 5000
@@ -331,15 +368,33 @@ func New(version string, ctx context.Context) Model {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return Model{
-		screen:   screenMenu,
-		cursor:   0,
-		textarea: ta,
-		version:  version,
-		repo:     detectRepo(),
-		branch:   detectBranch(),
-		ctx:      ctx,
+	repoRoot := detectRepoRoot()
+	initial := screenMenu
+	if opts.RunStartupChecks && startup.HasGitDir(repoRoot) {
+		initial = screenStartupChecksLoading
 	}
+	return Model{
+		screen:          initial,
+		cursor:          0,
+		textarea:        ta,
+		version:         version,
+		repo:            detectRepo(),
+		branch:          detectBranch(),
+		ctx:             ctx,
+		startupRepoRoot: repoRoot,
+	}
+}
+
+// detectRepoRoot devuelve el path absoluto del root del repo git
+// activo (la salida de `git rev-parse --show-toplevel`). Si no estamos
+// en un repo o git no está, devuelve "" — el caller usa eso como
+// guard para skipear los chequeos.
+func detectRepoRoot() string {
+	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func detectRepo() string {
@@ -366,7 +421,17 @@ func detectBranch() string {
 	return strings.TrimSpace(string(out))
 }
 
-func (m Model) Init() tea.Cmd { return nil }
+// Init dispara el comando de arranque correspondiente. Si la TUI
+// arranca en screenStartupChecksLoading, lanzamos los chequeos en
+// background y esperamos su respuesta. En cualquier otra screen
+// (incluyendo screenMenu cuando RunStartupChecks=false), no hacemos
+// nada — la TUI espera la primera tecla del usuario.
+func (m Model) Init() tea.Cmd {
+	if m.screen == screenStartupChecksLoading {
+		return runStartupChecksCmd(m.ctx, m.version, m.startupRepoRoot)
+	}
+	return nil
+}
 
 // ---- mensajes que fluyen desde el flow hacia el Update ----
 
@@ -458,6 +523,23 @@ type locksLoadedMsg struct {
 type unlockDoneMsg struct {
 	ref string
 	err error
+}
+
+// startupChecksLoadedMsg llega tras correr startup.RunChecks en
+// background. results es la lista cruda (incluye entries no
+// triggereadas) — el handler filtra y decide si mostrar la pantalla de
+// checks o saltar directo al menú.
+type startupChecksLoadedMsg struct {
+	results []startup.Result
+}
+
+// startupActionDoneMsg llega tras ejecutar la acción "sí" de un check
+// (correr `che migrate-labels` o `che upgrade`). out es el output
+// combinado a mostrar al usuario; err es nil si todo OK.
+type startupActionDoneMsg struct {
+	checkName string
+	out       string
+	err       error
 }
 
 type tickMsg time.Time
@@ -639,6 +721,46 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.screen = screenLocksSelect
 		return m, nil
 
+	case startupChecksLoadedMsg:
+		// Filtramos solo los triggered y los marcamos como pendientes.
+		// Si no hay nada triggered, salteamos directo al menú — política
+		// de cero ruido en happy path.
+		var triggered []startup.Result
+		for _, r := range msg.results {
+			if r.Triggered {
+				triggered = append(triggered, r)
+			}
+		}
+		if len(triggered) == 0 {
+			m.screen = screenMenu
+			return m, nil
+		}
+		m.startupChecks = triggered
+		m.startupCursor = 0
+		m.screen = screenStartupChecks
+		return m, nil
+
+	case startupActionDoneMsg:
+		// Mostramos el output en pantalla de resultado para que el
+		// usuario vea qué pasó. Avanzamos el cursor — handleResultKey
+		// se encarga de volver a screenStartupChecks si quedan más
+		// checks pendientes, o al menú si era el último.
+		m.runLog = nil
+		var lines []string
+		if msg.err != nil {
+			lines = append(lines, "error: "+msg.err.Error())
+		}
+		lines = append(lines, splitNonEmpty(msg.out)...)
+		m.resultLines = lines
+		if msg.err != nil {
+			m.resultKind = resultError
+		} else {
+			m.resultKind = resultSuccess
+		}
+		m.startupCursor++
+		m.screen = screenResult
+		return m, nil
+
 	case unlockDoneMsg:
 		if msg.err != nil {
 			m.screen = screenResult
@@ -703,6 +825,16 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case screenMenu:
 		return m.handleMenuKey(msg)
+	case screenStartupChecks:
+		return m.handleStartupChecksKey(msg)
+	case screenStartupChecksLoading, screenStartupChecksRunning:
+		// Loading / running de chequeos secundarios: solo Ctrl+C cierra
+		// para no abandonar a medio dispatch. El usuario espera unos
+		// segundos.
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		return m, nil
 	case screenIdeaInput:
 		return m.handleIdeaInputKey(msg)
 	case screenIdeaRunning, screenExploreRunning, screenExploreLoading, screenExecuteRunning, screenExecuteLoading,
@@ -743,6 +875,124 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleResultKey(msg)
 	}
 	return m, nil
+}
+
+// handleStartupChecksKey procesa la respuesta del usuario al check
+// activo. Las opciones son:
+//   - s: ejecutar la acción del check (ej. correr `che migrate-labels`).
+//   - n: skipear este check por esta vez (queda pendiente para la
+//     próxima invocación).
+//   - N: marcar este check como skipeado para siempre en este repo
+//     (persistido en `.git/che-skip-checks`).
+//   - esc: salir de la pantalla de chequeos sin acción (equivalente a
+//     "n" para todos los pendientes — pasamos al menú).
+//   - ctrl+c: salir de la TUI completa.
+func (m Model) handleStartupChecksKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.startupCursor >= len(m.startupChecks) {
+		// Sanity: si llegamos sin pendientes, transicionamos al menú.
+		m.screen = screenMenu
+		return m, nil
+	}
+	current := m.startupChecks[m.startupCursor]
+	k := msg.String()
+	switch k {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "esc":
+		m.screen = screenMenu
+		m.startupChecks = nil
+		return m, nil
+	case "s":
+		return m.runStartupAction(current)
+	case "n":
+		return m.advanceStartupChecks()
+	case "N":
+		// Persistir y avanzar. El error de MarkSkipped no rompe la
+		// UI — loggeamos por debajo (output ya descartado al transition)
+		// y seguimos. Bajo carga normal MarkSkipped no falla porque ya
+		// chequeamos `.git/` al arrancar.
+		_ = startup.MarkSkipped(m.startupRepoRoot, current.Name)
+		return m.advanceStartupChecks()
+	}
+	return m, nil
+}
+
+// advanceStartupChecks avanza el cursor al próximo check pendiente. Si
+// no quedan, transiciona al menú.
+func (m Model) advanceStartupChecks() (tea.Model, tea.Cmd) {
+	m.startupCursor++
+	if m.startupCursor >= len(m.startupChecks) {
+		m.screen = screenMenu
+		m.startupChecks = nil
+		m.startupCursor = 0
+		return m, nil
+	}
+	return m, nil
+}
+
+// runStartupAction ejecuta la acción "sí" de un check. El comportamiento
+// depende del check:
+//   - migrate-labels: exec `che migrate-labels` en subprocess y muestra
+//     el output en la pantalla de result al terminar todos los checks.
+//   - version: exec `che upgrade` en subprocess.
+//   - locks: navega a la pantalla "Ver locks" del TUI (no auto-unlock).
+//
+// Para los dos primeros casos pasamos por screenStartupChecksRunning
+// mientras corre; el done msg avanza al próximo check.
+func (m Model) runStartupAction(c startup.Result) (tea.Model, tea.Cmd) {
+	switch c.Name {
+	case startup.CheckLocks:
+		// Atajo directo a la pantalla de locks: el usuario decide cuál
+		// desbloquear. Removemos los chequeos pendientes — no queremos
+		// volver a la pantalla de chequeos cuando termine de unlockear.
+		m.startupChecks = nil
+		m.startupCursor = 0
+		m.screen = screenLocksLoading
+		m.locks = nil
+		m.locksCursor = 0
+		m.locksErr = nil
+		return m, loadLocksCmd()
+	case startup.CheckMigrateLabels:
+		m.screen = screenStartupChecksRunning
+		return m, runCheCmd(c.Name, "migrate-labels")
+	case startup.CheckVersion:
+		m.screen = screenStartupChecksRunning
+		return m, runCheCmd(c.Name, "upgrade")
+	}
+	// Check desconocido: no-op, avanzamos.
+	return m.advanceStartupChecks()
+}
+
+// runCheCmd ejecuta el binario actual de `che` con los args dados como
+// subcomando. Devuelve un startupActionDoneMsg con el output combinado
+// (stdout+stderr) y el error si lo hubo.
+func runCheCmd(checkName string, args ...string) tea.Cmd {
+	return func() tea.Msg {
+		exe, err := os.Executable()
+		if err != nil {
+			return startupActionDoneMsg{checkName: checkName, err: err}
+		}
+		cmd := exec.Command(exe, args...)
+		out, err := cmd.CombinedOutput()
+		return startupActionDoneMsg{
+			checkName: checkName,
+			out:       string(out),
+			err:       err,
+		}
+	}
+}
+
+// runStartupChecksCmd corre los chequeos secundarios en background y
+// los devuelve como un solo mensaje. Respeta el ctx raíz para que un
+// shutdown externo cancele las requests a `gh`.
+func runStartupChecksCmd(ctx context.Context, version, repoRoot string) tea.Cmd {
+	return func() tea.Msg {
+		results := startup.RunChecks(ctx, startup.Options{
+			RepoRoot:       repoRoot,
+			CurrentVersion: version,
+		})
+		return startupChecksLoadedMsg{results: results}
+	}
 }
 
 func (m Model) handleMenuKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1490,7 +1740,21 @@ func (m Model) handleResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
 		return m, tea.Quit
 	}
-	m.screen = screenMenu
+	// Si estamos en medio del flow de chequeos secundarios y todavía
+	// quedan checks pendientes, volvemos a la pantalla de chequeos en
+	// vez de saltar al menú. Esto cubre el caso donde el usuario pidió
+	// "sí" sobre el primer check (ej. migrate-labels), vio el output, y
+	// queremos seguir con el siguiente (ej. version) sin que tenga que
+	// re-arrancar la TUI.
+	nextScreen := screenMenu
+	if m.startupCursor < len(m.startupChecks) {
+		nextScreen = screenStartupChecks
+	} else {
+		// Limpiamos también el estado de chequeos al salir definitivamente.
+		m.startupChecks = nil
+		m.startupCursor = 0
+	}
+	m.screen = nextScreen
 	m.resultLines = nil
 	m.runLog = nil
 	m.exploreNew = nil
@@ -1590,6 +1854,12 @@ func (m Model) View() string {
 	switch m.screen {
 	case screenMenu:
 		return renderMenu(m)
+	case screenStartupChecksLoading:
+		return renderStartupChecksLoading(m)
+	case screenStartupChecks:
+		return renderStartupChecks(m)
+	case screenStartupChecksRunning:
+		return renderStartupChecksRunning(m)
 	case screenIdeaInput:
 		return renderIdeaInput(m)
 	case screenIdeaRunning:
@@ -1656,6 +1926,105 @@ func (m Model) View() string {
 		return renderResult(m)
 	}
 	return ""
+}
+
+// ---- startup checks renders ----
+
+// renderStartupChecksLoading muestra una pantalla minimal mientras
+// corren los chequeos secundarios. Aparece pocos cientos de ms en el
+// happy path; si timeoutea (3s) no rompe la TUI — pasamos al menú con
+// los resultados parciales (que usualmente serán "todo no triggered").
+func renderStartupChecksLoading(_ Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("che — chequeos rápidos"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render("Verificando labels, versión y locks…"))
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("Ctrl+C cancela"))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+// renderStartupChecks rendea el banner del check activo. Muestra el
+// total de checks pendientes en el header (1/N) y el mensaje formateado
+// del check actual con sus 3 opciones.
+func renderStartupChecks(m Model) string {
+	var sb strings.Builder
+	sb.WriteString(titleStyle.Render("che — chequeos rápidos"))
+	sb.WriteString("\n")
+
+	total := len(m.startupChecks)
+	if total == 0 || m.startupCursor >= total {
+		// Sanity: no debería pasar (Update ya transicionó al menú).
+		sb.WriteString(subtitleStyle.Render("Todo en orden — entrando al menú…"))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	current := m.startupChecks[m.startupCursor]
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf(
+		"Encontramos %d cosa(s) para revisar antes de empezar (%d / %d)",
+		total, m.startupCursor+1, total,
+	)))
+	sb.WriteString("\n\n")
+
+	// Mensaje del check.
+	msg := formatStartupCheckMessage(current)
+	sb.WriteString("  " + lipgloss.NewStyle().Foreground(colorText).Render(msg) + "\n\n")
+
+	// Opciones.
+	hint := "[s] sí · [n] no esta vez · [N] nunca para este repo · [esc] saltar todos · [Ctrl+C] sale"
+	sb.WriteString(hintStyle.Render(hint))
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+// formatStartupCheckMessage arma el texto a mostrar para un check
+// triggered, con el emoji + descripción + acción sugerida según el
+// tipo. Mantenemos los emojis del spec del feature para coherencia
+// visual con el header de la TUI.
+func formatStartupCheckMessage(c startup.Result) string {
+	switch c.Name {
+	case startup.CheckMigrateLabels:
+		return fmt.Sprintf(
+			"🏷  Labels viejos sin migrar: %d (%s). Correr `che migrate-labels`?",
+			len(c.OldLabels), strings.Join(c.OldLabels, ", "),
+		)
+	case startup.CheckVersion:
+		return fmt.Sprintf(
+			"📦 che desactualizado: tenés %s, hay %s. Correr `che upgrade`?",
+			c.CurrentVersion, c.LatestVersion,
+		)
+	case startup.CheckLocks:
+		refs := make([]string, 0, len(c.Locks))
+		for _, l := range c.Locks {
+			refs = append(refs, fmt.Sprintf("#%d", l.Number))
+		}
+		return fmt.Sprintf(
+			"🔒 %d issues/PRs con che:locked > 1h: %s. Pueden estar colgados — abrir la pantalla de locks para desbloquearlos?",
+			len(c.Locks), strings.Join(refs, ", "),
+		)
+	}
+	return fmt.Sprintf("Check desconocido: %s", c.Name)
+}
+
+// renderStartupChecksRunning muestra una pantalla minimal mientras se
+// ejecuta la acción de un check (típicamente `che migrate-labels` o
+// `che upgrade`). El subprocess captura su propio output que se
+// muestra después en screenResult.
+func renderStartupChecksRunning(m Model) string {
+	var sb strings.Builder
+	current := ""
+	if m.startupCursor < len(m.startupChecks) {
+		current = m.startupChecks[m.startupCursor].Name
+	}
+	sb.WriteString(titleStyle.Render("che — corriendo acción"))
+	sb.WriteString("\n")
+	sb.WriteString(subtitleStyle.Render(fmt.Sprintf("Ejecutando acción para check: %s", current)))
+	sb.WriteString("\n")
+	sb.WriteString(hintStyle.Render("Esto puede tardar unos segundos"))
+	sb.WriteString("\n")
+	return sb.String()
 }
 
 // ---- locks renders ----
@@ -2494,7 +2863,9 @@ func renderIterateSelect(m Model) string {
 }
 
 // Run lanza el TUI y bloquea hasta que el usuario cierre. version se muestra
-// en el header del menú (típicamente cmd.Version).
+// en el header del menú (típicamente cmd.Version). runStartupChecks=true
+// arranca corriendo los chequeos secundarios; en false va directo al menú
+// (usado por --no-checks de root.go).
 //
 // Instala signal.NotifyContext(SIGINT, SIGTERM) sobre context.Background().
 // tea.WithoutSignalHandler desactiva el handler default de bubbletea — el
@@ -2503,11 +2874,12 @@ func renderIterateSelect(m Model) string {
 // tea.KeyMsg); las señales reales vienen de `kill -INT/TERM <pid>` fuera
 // de la TUI. Una goroutine convierte el ctx.Done() a shutdownMsg para que
 // el Update cancele la corrida activa y espere al cleanup antes de tea.Quit.
-func Run(version string) error {
+func Run(version string, runStartupChecks bool) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	p := tea.NewProgram(New(version, ctx), tea.WithAltScreen(), tea.WithoutSignalHandler())
+	model := NewWithOptions(version, ctx, Options{RunStartupChecks: runStartupChecks})
+	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithoutSignalHandler())
 
 	go func() {
 		<-ctx.Done()
