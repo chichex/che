@@ -51,6 +51,7 @@
           {{if checksLabel .Entity }}<span class="chip {{checksChipClass .Entity}}">{{checksLabel .Entity}}</span>{{end}}
           {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
           {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+          {{if and .RunningFlow .Auto}}<span class="chip chip-magenta" title="disparado por el auto-loop engine">auto</span>{{end}}
         </div>
       </div>
 
@@ -180,6 +181,7 @@
         {{if .PlanVerdict}}<span class="chip {{verdictChipClass .PlanVerdict}}">plan-validated:{{.PlanVerdict}}</span>{{end}}
         {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
         {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+        {{if and .RunningFlow .Auto}}<span class="chip chip-magenta" title="disparado por el auto-loop engine">auto</span>{{end}}
       </div>
     </div>
 

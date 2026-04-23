@@ -281,4 +281,52 @@
   // closeModal (Esc / click backdrop / x) cierra el stream via la stub
   // closeStreamIfOpen definida al principio y reasignada a closeStream
   // acá — no hace falta decorar la función.
+
+  // ==================== Auto-loop popover (Step 6) ====================
+  //
+  // El popover del auto-loop engine se llena lazy: el pill (.auto-loop-
+  // toggle) hace hx-get="/loop" con target=#loop-popover. Cuando el
+  // usuario clickea cualquier cosa fuera del popover o del pill, lo
+  // cerramos vaciando #loop-popover. Las respuestas de los POST
+  // (/loop/toggle, /loop/rule/...) incluyen un OOB del pill — htmx se
+  // encarga de esa parte automáticamente.
+  //
+  // Esc también lo cierra (antes del modal close, porque si está abierto
+  // el popover debe ir primero — como el modal en una ventana nativa).
+  function closeLoopPopover() {
+    var pop = document.getElementById("loop-popover");
+    if (pop) pop.innerHTML = "";
+  }
+
+  document.body.addEventListener("click", function (e) {
+    var t = e.target;
+    if (!(t instanceof Element)) return;
+    var pop = document.getElementById("loop-popover");
+    if (!pop) return;
+    // Click dentro del popover: no cerrar (deja que htmx haga su swap).
+    if (pop.contains(t)) return;
+    // Click sobre el pill: no cerrar (sería re-abrir en el mismo click).
+    // El hx-get del pill ya repoblará el popover si está vacío.
+    if (t.closest(".auto-loop-toggle")) return;
+    // Popover vacío: nada que cerrar.
+    if (!pop.innerHTML.trim()) return;
+    closeLoopPopover();
+  });
+
+  // Esc cierra popover si está abierto; sino cae al modal (ver handler
+  // de arriba). Usamos capture para correr antes del listener del modal,
+  // así un Esc cuando ambos están abiertos cierra primero el popover
+  // (jerárquico — como una ventana nativa).
+  document.addEventListener(
+    "keydown",
+    function (e) {
+      if (e.key !== "Escape") return;
+      var pop = document.getElementById("loop-popover");
+      if (pop && pop.innerHTML.trim()) {
+        e.stopPropagation();
+        closeLoopPopover();
+      }
+    },
+    true /* capture: corre antes del listener de body */
+  );
 })();

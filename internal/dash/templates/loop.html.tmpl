@@ -1,0 +1,81 @@
+{{/* loop.html.tmpl — partials del auto-loop engine (Step 6).
+
+     Define 3 templates:
+       - "auto-loop-toggle": el pill del topbar (OOB-able). Label depende
+         de Loop.Enabled y cuenta de reglas activas. Click abre el popover
+         via hx-get="/loop". Se reusa del render inicial (dashboard.tmpl)
+         y de todos los responses que quieran actualizar el label fuera
+         del target principal (hx-swap-oob="outerHTML").
+
+       - "loop-popover": el contenido del popover. Master switch + 4
+         checkboxes (uno por regla). Cada control es un hx-post al
+         endpoint correspondiente con target=#loop-popover (re-render del
+         popover en-place).
+
+       - "loop-response": concatena loop-popover + auto-loop-toggle con
+         OOB swap. Es la respuesta de los POST (/loop/toggle y
+         /loop/rule/...) — htmx hace 2 swaps de una: el popover (target
+         declarado) y el pill (OOB).
+
+     Recibe loopPopoverData (.Enabled, .Rules, .ActiveRules,
+     .ActiveLoops, .AutoLoops). Para "auto-loop-toggle" se pasa el wrapper
+     pageData.Loop (mismo tipo). */}}
+
+{{define "auto-loop-toggle"}}
+  <button id="auto-loop-toggle" hx-swap-oob="outerHTML"
+          type="button"
+          class="auto-loop-toggle{{if .Enabled}} on{{end}}"
+          hx-get="/loop"
+          hx-target="#loop-popover"
+          hx-swap="innerHTML"
+          title="auto-loop engine — step 6">
+    <div class="switch"></div>
+    <span class="label">{{pillLabel .}}</span>
+    {{if pillLabelHasSpinner .}}<span class="count">⟳ {{.AutoLoops}}</span>{{end}}
+  </button>
+{{end}}
+
+{{define "loop-popover"}}
+  {{/* El popover es un fragment — el wrapper #loop-popover vive en el
+       topbar (dashboard.tmpl) como div vacío hasta que se clickea el
+       pill. Contenido: master switch + 4 rows de reglas. Cada row
+       tiene un hx-post que re-renderea el popover en-place. */}}
+  <div class="loop-popover-inner" role="dialog" aria-label="auto-loop settings">
+    <div class="loop-row loop-master">
+      <button type="button"
+              class="loop-check{{if .Enabled}} on{{end}}"
+              hx-post="/loop/toggle"
+              hx-target="#loop-popover"
+              hx-swap="innerHTML"
+              title="master switch">
+        {{if .Enabled}}☑{{else}}☐{{end}}
+      </button>
+      <span class="loop-row-label"><b>master</b> ({{.ActiveRules}}/4 reglas activas)</span>
+    </div>
+    <hr class="loop-sep"/>
+    {{range .Rules}}
+      <div class="loop-row">
+        <button type="button"
+                class="loop-check{{if .On}} on{{end}}"
+                hx-post="/loop/rule/{{.Name}}"
+                hx-target="#loop-popover"
+                hx-swap="innerHTML"
+                title="{{.Label}}">
+          {{if .On}}☑{{else}}☐{{end}}
+        </button>
+        <span class="loop-row-label">{{.Label}}</span>
+      </div>
+    {{end}}
+    {{if gt .AutoLoops 0}}
+      <hr class="loop-sep"/>
+      <div class="loop-foot">
+        <span class="count">⟳ {{.AutoLoops}} auto-run{{if gt .AutoLoops 1}}s{{end}} en curso</span>
+      </div>
+    {{end}}
+  </div>
+{{end}}
+
+{{define "loop-response"}}
+  {{template "loop-popover" .}}
+  {{template "auto-loop-toggle" .}}
+{{end}}

@@ -76,6 +76,9 @@
     font-family: inherit;
     font-size: 10px;
   }
+  .auto-loop-wrap {
+    position: relative;
+  }
   .auto-loop-toggle {
     display: flex;
     align-items: center;
@@ -86,7 +89,65 @@
     border-radius: 16px;
     font-size: 11px;
     cursor: pointer;
+    color: var(--text);
+    font-family: inherit;
   }
+  .auto-loop-toggle:hover { border-color: var(--border-muted); }
+  .auto-loop-toggle:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+  /* ==================== Loop popover ====================
+     Dropdown posicionado absoluto debajo del pill. Se llena con hx-get /loop
+     (lazy — el server no arma el HTML si el usuario nunca clickea). Vacío
+     en el render inicial; el swap inserta .loop-popover-inner. Visible
+     solo cuando hay contenido — si está vacío, el padding/border desaparece
+     por el :empty selector, así no hay rectángulo fantasma en el topbar. */
+  .loop-popover {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    min-width: 280px;
+    background: var(--panel);
+    border: 1px solid var(--elevated);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 11px;
+    z-index: 500;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  }
+  .loop-popover:empty { display: none; }
+  .loop-popover-inner { display: flex; flex-direction: column; gap: 6px; }
+  .loop-row { display: flex; align-items: center; gap: 8px; }
+  .loop-row-label { color: var(--text); }
+  .loop-row-label b { color: var(--cyan); }
+  .loop-master .loop-row-label { color: var(--text); }
+  .loop-check {
+    background: transparent;
+    border: 1px solid var(--border-muted);
+    color: var(--muted);
+    width: 22px;
+    height: 22px;
+    border-radius: 4px;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .loop-check.on { color: var(--green); border-color: var(--green); }
+  .loop-check:hover { border-color: var(--text); }
+  .loop-sep {
+    border: none;
+    border-top: 1px solid var(--elevated);
+    margin: 4px 0;
+  }
+  .loop-foot {
+    color: var(--magenta);
+    font-size: 10px;
+    text-align: right;
+  }
+  .loop-foot .count { color: var(--magenta); font-weight: bold; }
   .auto-loop-toggle .switch {
     width: 28px;
     height: 14px;
@@ -668,7 +729,10 @@
     <span class="repo">{{.Repo}}</span>
     {{if .Version}}<span class="version" title="versión del binario che que está sirviendo este dash">{{.Version}}</span>{{end}}
     <input class="filter" placeholder="filter: type:feature, author:@me, label:urgent" value="">
-    {{template "auto-loop-toggle" .}}
+    <div class="auto-loop-wrap">
+      {{template "auto-loop-toggle" .Loop}}
+      <div id="loop-popover" class="loop-popover" aria-hidden="true"></div>
+    </div>
     {{template "status-chip" .}}
     <span class="hint"><kbd>/</kbd> buscar · <kbd>Esc</kbd> cerrar</span>
   </div>

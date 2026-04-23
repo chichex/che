@@ -25,15 +25,6 @@
   </span>
 {{end}}
 
-{{define "auto-loop-toggle"}}
-  <div id="auto-loop-toggle" hx-swap-oob="outerHTML"
-       class="auto-loop-toggle" title="⌘. para toggle (step 6)">
-    <div class="switch"></div>
-    <span class="label">auto-loop OFF</span>
-    {{if gt .ActiveLoops 0}}<span class="count">· {{.ActiveLoops}} activo{{if gt .ActiveLoops 1}}s{{end}}</span>{{end}}
-  </div>
-{{end}}
-
 {{define "board-loading"}}
   {{/* Loading state: se muestra mientras el primer poll de gh no termina.
        El wrapper .dash-board ya tiene grid-template-columns repeat(9,1fr);
@@ -107,6 +98,6 @@
 
 {{define "board-partial"}}
 {{template "status-chip" .}}
-{{template "auto-loop-toggle" .}}
+{{template "auto-loop-toggle" .Loop}}
 {{template "board-columns" .}}
 {{end}}

@@ -42,7 +42,7 @@ import (
 	"github.com/yuin/goldmark/renderer/html"
 )
 
-//go:embed templates/dashboard.html.tmpl templates/drawer.html.tmpl templates/board.html.tmpl
+//go:embed templates/dashboard.html.tmpl templates/drawer.html.tmpl templates/board.html.tmpl templates/loop.html.tmpl
 var templatesFS embed.FS
 
 //go:embed static/htmx.min.js static/dash.js
@@ -120,15 +120,27 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		errCh <- nil
 	}()
 
+	// Step 6: auto-loop tick goroutine. Se para cuando ctx se cancela
+	// via el done channel. Corre en fase con el poll interval — si el
+	// operador tiene PollInterval=15, el loop evalúa cada 15s después
+	// del primer tick. No hay startup delay porque el snapshot inicial
+	// del MockSource / GhSource puede estar vacío y runTick detecta
+	// no-op (nada que dispatchar).
+	loopDone := make(chan struct{})
+	go srv.runLoop(loopDone)
+
 	select {
 	case <-ctx.Done():
 		// Shutdown HTTP. El poller ya recibió la señal via el mismo ctx
-		// que cerró el server; sale solo en el siguiente select.
+		// que cerró el server; sale solo en el siguiente select. El
+		// loop tick también se corta via close(loopDone).
+		close(loopDone)
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		_ = httpSrv.Shutdown(shutdownCtx)
 		return nil
 	case err := <-errCh:
+		close(loopDone)
 		return err
 	}
 }
@@ -158,11 +170,22 @@ type Server struct {
 	// stream SSE la encuentren.
 	runAction func(flow string, targetRef, entityKey int, repo string) error
 
-	// mu protege running. El map trackea flows disparados desde el dashboard
-	// que todavía no se reflejan en el snapshot de la Source — evita doble
-	// dispatch y pinta el badge ⟳ instantáneo sin esperar al próximo poll.
-	mu      sync.Mutex
-	running map[int]string // IssueNumber → flow corriendo
+	// mu protege running y autoRunning. El map running trackea flows
+	// disparados desde el dashboard que todavía no se reflejan en el
+	// snapshot de la Source — evita doble dispatch y pinta el badge ⟳
+	// instantáneo sin esperar al próximo poll. autoRunning es un map
+	// paralelo que distingue "disparado por el auto-loop engine" de
+	// "disparado por el humano" para pintar un chip extra en el drawer.
+	mu          sync.Mutex
+	running     map[int]string // IssueNumber → flow corriendo
+	autoRunning map[int]bool   // IssueNumber → disparado por auto-loop (step 6)
+
+	// loop es el estado del auto-loop engine (step 6): master switch +
+	// flags por regla + contador de rounds. Protegido por su propio
+	// mutex interno — ver loop.go. El mutex es separado del `mu` de
+	// arriba porque los dominios son independientes y no queremos
+	// bloquear handlers HTTP mientras el tick evalúa.
+	loop *loopState
 
 	// logs es el buffer pub/sub de los logs del subproceso. Populado por
 	// spawnChe (o por tests) y consumido por el handler SSE /stream/{id}.
@@ -211,6 +234,8 @@ func NewServer(source Source, repoName string, pollInterval int) *Server {
 		repoName:     repoName,
 		pollInterval: pollInterval,
 		running:      map[int]string{},
+		autoRunning:  map[int]bool{},
+		loop:         newLoopState(),
 		logs:         NewLogStore(),
 	}
 	s.runAction = s.spawnChe
@@ -219,6 +244,7 @@ func NewServer(source Source, repoName string, pollInterval int) *Server {
 		"templates/dashboard.html.tmpl",
 		"templates/drawer.html.tmpl",
 		"templates/board.html.tmpl",
+		"templates/loop.html.tmpl",
 	))
 	s.tmpl = tmpl
 	s.mux = s.buildMux()
@@ -242,14 +268,22 @@ type pageData struct {
 	ActiveLoops  int    // entidades con RunningFlow != "" (loops o flows en curso)
 	NWO          string // nameWithOwner — usado por los templates para armar URLs a github.com
 	Version      string // versión del binario che — útil para validar que el dash corre el build esperado
+	// Loop es el estado del auto-loop engine (step 6). Se pasa al
+	// partial "auto-loop-toggle" para renderear el pill con el label
+	// correcto ("auto-loop OFF" / "auto-loop ON (3/4)"). El popover en
+	// sí se renderea sobre /loop (lazy) — acá solo el pill.
+	Loop loopPopoverData
 }
 
 // drawerData embebe la Entity y agrega el NWO del snapshot para que el
 // template del drawer pueda construir links a github.com sin depender de
-// pageData (que no llega al handler /drawer/{id}).
+// pageData (que no llega al handler /drawer/{id}). Auto (step 6) señala
+// si el RunningFlow actual fue disparado por el auto-loop engine vs el
+// humano — se refleja como chip "auto" en el drawer.
 type drawerData struct {
 	Entity
-	NWO string
+	NWO  string
+	Auto bool
 }
 
 // columnData representa una columna del Kanban con sus entidades ya
@@ -410,6 +444,11 @@ func (s *Server) templateFuncs() template.FuncMap {
 		// renderMarkdown convierte GFM a HTML seguro (raw HTML del input
 		// queda escapado por la opción WithUnsafe omitida en el renderer).
 		"renderMarkdown": renderMarkdown,
+		// Step 6 — auto-loop pill label helpers. Se exponen acá para
+		// que el partial "auto-loop-toggle" los use tanto en render
+		// inicial como en OOB swap. Ambos reciben loopPopoverData.
+		"pillLabel":            pillLabel,
+		"pillLabelHasSpinner":  pillLabelHasSpinner,
 	}
 }
 
@@ -486,6 +525,7 @@ func (s *Server) buildData() pageData {
 		ActiveLoops:  active,
 		Version:      s.version,
 		NWO:          snap.NWO,
+		Loop:         s.buildLoopData(),
 	}
 }
 
@@ -560,9 +600,12 @@ func (s *Server) markRunning(id int, flow string) (string, bool) {
 // che termina (éxito o error); a partir de ahí el snapshot del poller
 // manda. Si el subproceso aplicó labels transient, overlayRunning ve el
 // snapshot "ya lo refleja" y limpia el map en el próximo buildData.
+// También limpia el flag autoRunning (step 6) — la entity deja de ser
+// "auto" cuando el subproceso termina, independiente de quién la disparó.
 func (s *Server) clearRunning(id int) {
 	s.mu.Lock()
 	delete(s.running, id)
+	delete(s.autoRunning, id)
 	s.mu.Unlock()
 }
 
@@ -844,8 +887,9 @@ func (s *Server) buildMux() *http.ServeMux {
 			return
 		}
 		// Wrapper drawerData: el template necesita NWO para armar URLs a GH
-		// en los refs del header; Entity pelada no lo lleva.
-		data := drawerData{Entity: entity, NWO: s.source.Snapshot().NWO}
+		// en los refs del header; Entity pelada no lo lleva. Auto (step 6)
+		// indica si el RunningFlow fue disparado por el auto-loop engine.
+		data := drawerData{Entity: entity, NWO: s.source.Snapshot().NWO, Auto: s.isAutoRunning(id)}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		if err := s.tmpl.ExecuteTemplate(w, "drawer.html.tmpl", data); err != nil {
@@ -890,6 +934,13 @@ func (s *Server) buildMux() *http.ServeMux {
 			http.Error(w, "flow already running for this entity", http.StatusConflict)
 			return
 		}
+		// Step 6: flows manuales también cuentan para el cap del loop
+		// (son "rounds efectivas" sobre la entity). Incrementamos el
+		// counter con el mismo criterio que el tick — ANTES de runAction
+		// para evitar race con el próximo tick si el spawn tarda en volver.
+		// Nota: el handler NO setea autoRunning — lo dejamos en false
+		// para que el chip "auto" no se pinte sobre runs manuales.
+		s.loop.incRounds(id)
 		// targetRef = número que recibe el subcomando che. Para fused +
 		// validate/iterate pasa a ser PRNumber; para el resto queda
 		// IssueNumber. Ver resolveTargetRef. El id de la URL y del
@@ -905,9 +956,10 @@ func (s *Server) buildMux() *http.ServeMux {
 		}
 		// Re-render del drawer con el estado actualizado (ya refleja el
 		// flow via overlay local). El browser ve el chip ⟳ instantáneo
-		// y los botones disabled sin esperar al próximo poll.
+		// y los botones disabled sin esperar al próximo poll. Auto=false
+		// porque este dispatch vino del handler manual.
 		entity.RunningFlow = flow
-		data := drawerData{Entity: entity, NWO: s.source.Snapshot().NWO}
+		data := drawerData{Entity: entity, NWO: s.source.Snapshot().NWO, Auto: false}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		if err := s.tmpl.ExecuteTemplate(w, "drawer.html.tmpl", data); err != nil {
@@ -915,6 +967,14 @@ func (s *Server) buildMux() *http.ServeMux {
 			return
 		}
 	})
+
+	// ==== Step 6: auto-loop endpoints ====
+	// GET /loop              → popover HTML (hx-target="#loop-popover").
+	// POST /loop/toggle      → flipea master, devuelve popover + OOB del pill.
+	// POST /loop/rule/{name} → flipea una regla, idem.
+	mux.HandleFunc("GET /loop", s.handleLoopGet)
+	mux.HandleFunc("POST /loop/toggle", s.handleLoopToggle)
+	mux.HandleFunc("POST /loop/rule/{name}", s.handleLoopRule)
 
 	// GET /stream/{id} — Server-Sent Events del log en vivo del subproceso
 	// `che <flow> <id>` disparado desde el dashboard. Flujo:
