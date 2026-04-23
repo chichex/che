@@ -105,8 +105,9 @@
 
     <div class="pane pane-issue">
       {{/* Tab Issue: header con ref del issue + body. Sin acciones (las
-           acciones del issue viven en el PR ahora que están fused).
-           html/template autoescapa el body — no usamos template.HTML. */}}
+           acciones del issue viven en el PR ahora que están fused). El
+           body se renderiza como markdown (GFM) — renderMarkdown escapa
+           el raw HTML del input, así que es seguro insertar como HTML. */}}
       <div class="drawer-hdr">
         <div class="drawer-hdr-top">
           <div class="entity-row">
@@ -122,7 +123,7 @@
       </div>
       <div class="drawer-issue-body">
         {{if .IssueBody}}
-          <pre>{{.IssueBody}}</pre>
+          <div class="md">{{renderMarkdown .IssueBody}}</div>
         {{else}}
           <div style="color:var(--muted); padding: 12px 16px;">issue sin descripción</div>
         {{end}}
@@ -205,7 +206,7 @@
 
     {{if .IssueBody}}
       {{/* Issue-only: mostrar body abajo (no hay tabs — es la vista única). */}}
-      <div class="drawer-issue-body"><pre>{{.IssueBody}}</pre></div>
+      <div class="drawer-issue-body"><div class="md">{{renderMarkdown .IssueBody}}</div></div>
     {{end}}
   {{end}}
 

@@ -18,6 +18,7 @@
 package dash
 
 import (
+	"bytes"
 	"context"
 	"embed"
 	"fmt"
@@ -30,6 +31,11 @@ import (
 	"runtime"
 	"strconv"
 	"time"
+
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/parser"
+	"github.com/yuin/goldmark/renderer/html"
 )
 
 //go:embed templates/dashboard.html.tmpl templates/drawer.html.tmpl templates/board.html.tmpl
@@ -328,7 +334,31 @@ func (s *Server) templateFuncs() template.FuncMap {
 		"humanAgo": humanAgo,
 		// errShort trunca un error.Error() a 40 chars para que quepa en el chip.
 		"errShort": errShort,
+		// renderMarkdown convierte GFM a HTML seguro (raw HTML del input
+		// queda escapado por la opción WithUnsafe omitida en el renderer).
+		"renderMarkdown": renderMarkdown,
 	}
+}
+
+// mdRenderer es el goldmark configurado para GFM. Se construye una vez al
+// import y se reutiliza; goldmark.Markdown es concurrent-safe para Convert.
+var mdRenderer = goldmark.New(
+	goldmark.WithExtensions(extension.GFM),
+	goldmark.WithParserOptions(parser.WithAutoHeadingID()),
+	goldmark.WithRendererOptions(html.WithHardWraps()),
+)
+
+// renderMarkdown convierte un body GitHub-flavored a HTML. Si el Convert
+// falla (input raro), devuelve el texto crudo dentro de un <pre> como
+// fallback para no romper el drawer. Raw HTML del input queda escapado
+// (no pasamos html.WithUnsafe), así que es seguro insertarlo como
+// template.HTML.
+func renderMarkdown(md string) template.HTML {
+	var buf bytes.Buffer
+	if err := mdRenderer.Convert([]byte(md), &buf); err != nil {
+		return template.HTML("<pre>" + template.HTMLEscapeString(md) + "</pre>")
+	}
+	return template.HTML(buf.String())
 }
 
 // humanAgo devuelve un string tipo "hace 3s" / "hace 12s" / "hace 1m" / "hace 4m".
