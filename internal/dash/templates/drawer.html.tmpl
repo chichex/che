@@ -70,9 +70,23 @@
       </div>
 
       <div class="drawer-actions">
-        <button class="btn primary" disabled title="step 2: inerte">iterate</button>
-        <button class="btn warn" disabled title="step 2: inerte">validate</button>
-        <button class="btn ghost" style="margin-left:auto" disabled title="step 2: inerte">ver en GH</button>
+        {{/* Botones fire-and-forget: hx-post lanza el subcomando y swapea
+             el modal con el drawer refreshado (ya muestra ⟳ y botones
+             disabled). Si RunningFlow != "", toda la row entra disabled
+             para evitar doble dispatch mientras corre el flow. */}}
+        <button class="btn primary"
+                hx-post="/action/iterate/{{.IssueNumber}}"
+                hx-target="#modal-slot"
+                hx-swap="innerHTML"
+                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="iterate #{{.IssueNumber}}"{{end}}>iterate</button>
+        <button class="btn warn"
+                hx-post="/action/validate/{{.IssueNumber}}"
+                hx-target="#modal-slot"
+                hx-swap="innerHTML"
+                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate !{{.PRNumber}}"{{end}}>validate</button>
+        <a class="btn ghost" style="margin-left:auto"
+           href="https://github.com/{{.NWO}}/pull/{{.PRNumber}}"
+           target="_blank" rel="noopener">ver en GH</a>
       </div>
 
       <div class="drawer-logs">
@@ -168,13 +182,30 @@
     </div>
 
     <div class="drawer-actions">
+      {{/* Issue-only: botones varían por Status. Todos disabled si hay un
+           flow en curso (local o confirmado por el poller). "ver en GH" es
+           un <a> — link directo, sin backend ni hx-post. */}}
       {{if eq .Status "idea"}}
-        <button class="btn primary" disabled title="step 2: inerte">explore</button>
+        <button class="btn primary"
+                hx-post="/action/explore/{{.IssueNumber}}"
+                hx-target="#modal-slot"
+                hx-swap="innerHTML"
+                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="explore #{{.IssueNumber}}"{{end}}>explore</button>
       {{else if eq .Status "plan"}}
-        <button class="btn primary" disabled title="step 2: inerte">execute</button>
-        <button class="btn warn" disabled title="step 2: inerte">validate</button>
+        <button class="btn primary"
+                hx-post="/action/execute/{{.IssueNumber}}"
+                hx-target="#modal-slot"
+                hx-swap="innerHTML"
+                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="execute #{{.IssueNumber}}"{{end}}>execute</button>
+        <button class="btn warn"
+                hx-post="/action/validate/{{.IssueNumber}}"
+                hx-target="#modal-slot"
+                hx-swap="innerHTML"
+                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate #{{.IssueNumber}}"{{end}}>validate</button>
       {{end}}
-      <button class="btn ghost" style="margin-left:auto" disabled title="step 2: inerte">ver en GH</button>
+      <a class="btn ghost" style="margin-left:auto"
+         href="https://github.com/{{.NWO}}/issues/{{.IssueNumber}}"
+         target="_blank" rel="noopener">ver en GH</a>
     </div>
 
     <div class="drawer-logs">

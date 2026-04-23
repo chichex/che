@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -483,4 +484,309 @@ func TestBoardLoading_AfterFirstPoll(t *testing.T) {
 	if !strings.Contains(got, `data-status="idea"`) {
 		t.Errorf("/ should render columns after first poll OK")
 	}
+}
+
+// ============================================================
+// Step 4: POST /action/{flow}/{id}
+// ============================================================
+
+// fakeRunner captura las invocaciones a runAction sin spawnear procesos.
+// Concurrency-safe para que los tests de doble dispatch no corran con -race.
+type fakeRunner struct {
+	mu    sync.Mutex
+	calls []fakeCall
+	err   error
+}
+
+type fakeCall struct {
+	Flow string
+	ID   int
+	Repo string
+}
+
+func (f *fakeRunner) run(flow string, id int, repo string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, fakeCall{Flow: flow, ID: id, Repo: repo})
+	return f.err
+}
+
+func (f *fakeRunner) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
+func (f *fakeRunner) last() fakeCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.calls) == 0 {
+		return fakeCall{}
+	}
+	return f.calls[len(f.calls)-1]
+}
+
+// newActionServer monta un Server con fakeRunner inyectado + una Source
+// fija con issue 42 en status=plan (para que execute/validate apliquen).
+func newActionServer(t *testing.T) (*httptest.Server, *Server, *fakeRunner) {
+	t.Helper()
+	src := &fixedSource{snap: Snapshot{
+		NWO:    "demo/che",
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, IssueTitle: "plan ready", Status: "plan"},
+			{Kind: KindFused, IssueNumber: 7, IssueTitle: "fused", PRNumber: 12, Status: "executing", RunningFlow: "execute"},
+		},
+	}}
+	s := NewServer(src, "che-cli", 15)
+	fr := &fakeRunner{}
+	s.runAction = fr.run
+	s.repoPath = "/tmp/fakerepo"
+	ts := httptest.NewServer(s)
+	t.Cleanup(ts.Close)
+	return ts, s, fr
+}
+
+// TestAction_DispatchesFlow chequea el happy path: POST /action/execute/42
+// llama al runner una vez con los args correctos y responde 200 con el
+// drawer refreshado (ya muestra el chip ⟳).
+func TestAction_DispatchesFlow(t *testing.T) {
+	ts, _, fr := newActionServer(t)
+
+	resp, err := http.Post(ts.URL+"/action/execute/42", "", nil)
+	if err != nil {
+		t.Fatalf("POST /action/execute/42: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	if fr.count() != 1 {
+		t.Fatalf("runner calls: got %d want 1", fr.count())
+	}
+	got := fr.last()
+	if got.Flow != "execute" || got.ID != 42 || got.Repo != "/tmp/fakerepo" {
+		t.Errorf("runner call: got %+v want {execute 42 /tmp/fakerepo}", got)
+	}
+	// Response carga el drawer con el chip de running (overlay local)
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "⟳ execute") {
+		t.Errorf("drawer response missing running chip '⟳ execute'; body head: %s", string(body[:min(400, len(body))]))
+	}
+}
+
+// TestAction_InvalidFlow rechaza flows que no están en la allowlist.
+// Protección primaria: no interpolar input del request directo en un exec.
+func TestAction_InvalidFlow(t *testing.T) {
+	ts, _, fr := newActionServer(t)
+
+	resp, err := http.Post(ts.URL+"/action/foobar/42", "", nil)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status: got %d want 400", resp.StatusCode)
+	}
+	if fr.count() != 0 {
+		t.Errorf("runner should not have been called for invalid flow; got %d calls", fr.count())
+	}
+}
+
+// TestAction_UnknownEntity rechaza ids que no están en el snapshot.
+func TestAction_UnknownEntity(t *testing.T) {
+	ts, _, fr := newActionServer(t)
+
+	resp, err := http.Post(ts.URL+"/action/execute/999", "", nil)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status: got %d want 404", resp.StatusCode)
+	}
+	if fr.count() != 0 {
+		t.Errorf("runner should not be called for unknown entity")
+	}
+}
+
+// TestAction_DoubleDispatch chequea que un segundo POST sobre la misma
+// entity mientras el primer flow está corriendo devuelve 409 sin llamar
+// al runner otra vez.
+func TestAction_DoubleDispatch(t *testing.T) {
+	ts, _, fr := newActionServer(t)
+
+	resp1, err := http.Post(ts.URL+"/action/execute/42", "", nil)
+	if err != nil {
+		t.Fatalf("POST #1: %v", err)
+	}
+	resp1.Body.Close()
+	if resp1.StatusCode != 200 {
+		t.Fatalf("status #1: got %d want 200", resp1.StatusCode)
+	}
+
+	resp2, err := http.Post(ts.URL+"/action/validate/42", "", nil)
+	if err != nil {
+		t.Fatalf("POST #2: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusConflict {
+		t.Fatalf("status #2: got %d want 409", resp2.StatusCode)
+	}
+	if fr.count() != 1 {
+		t.Errorf("runner calls: got %d want 1 (second dispatch should be rejected)", fr.count())
+	}
+}
+
+// TestAction_SnapshotRunningBlocks: si el snapshot ya marca RunningFlow
+// para la entidad (ej: el usuario disparó `che execute` por CLI y el
+// poller lo levantó), el dashboard no deja disparar otro flow encima.
+func TestAction_SnapshotRunningBlocks(t *testing.T) {
+	ts, _, fr := newActionServer(t)
+
+	// Issue 7 está en status=executing con RunningFlow=execute en el snapshot
+	// — ver newActionServer.
+	resp, err := http.Post(ts.URL+"/action/iterate/7", "", nil)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status: got %d want 409", resp.StatusCode)
+	}
+	if fr.count() != 0 {
+		t.Errorf("runner should not be called when snapshot already shows flow running")
+	}
+}
+
+// TestAction_GETNotAllowed — el endpoint es POST-only. Evita triggers
+// accidentales por bots o browsers haciendo prefetch. Go 1.22 ServeMux
+// enruta al handler "GET /" (que es wildcard) cuando pedimos GET a un
+// path solo registrado como POST; ese handler devuelve 404 para paths
+// ≠ "/". Aceptamos 404 o 405 — lo importante es que NO ejecuta la
+// acción (no llama al runner).
+func TestAction_GETNotAllowed(t *testing.T) {
+	ts, _, fr := newActionServer(t)
+
+	resp, err := http.Get(ts.URL + "/action/execute/42")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed && resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status: got %d want 404 or 405", resp.StatusCode)
+	}
+	if fr.count() != 0 {
+		t.Errorf("runner must not be called on GET /action/...; got %d calls", fr.count())
+	}
+}
+
+// TestDrawerRendersActionButtons chequea que el drawer renderea los
+// botones con hx-post apuntando a /action/{flow}/{id} (ya no disabled)
+// y el "ver en GH" como <a href> a github.com.
+func TestDrawerRendersActionButtons(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		NWO:    "demo/che",
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, IssueTitle: "plan ready", Status: "plan"},
+		},
+	}}
+	s := NewServer(src, "che-cli", 15)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/drawer/42")
+	if err != nil {
+		t.Fatalf("GET /drawer/42: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	got := string(body)
+
+	if !strings.Contains(got, `hx-post="/action/execute/42"`) {
+		t.Errorf("drawer missing hx-post=/action/execute/42")
+	}
+	if !strings.Contains(got, `hx-post="/action/validate/42"`) {
+		t.Errorf("drawer missing hx-post=/action/validate/42")
+	}
+	if !strings.Contains(got, `href="https://github.com/demo/che/issues/42"`) {
+		t.Errorf("drawer missing 'ver en GH' href to issues/42")
+	}
+	if strings.Contains(got, "step 2: inerte") {
+		t.Errorf("drawer still shows legacy 'step 2: inerte' title on action buttons")
+	}
+}
+
+// TestDrawerRendersActionButtons_Fused verifica el variant Kind=1: los
+// botones iterate/validate apuntan al IssueNumber (los subcomandos che
+// iterate/validate aceptan ref de issue y resuelven el PR internamente),
+// y "ver en GH" linkea al PR.
+func TestDrawerRendersActionButtons_Fused(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		NWO:    "demo/che",
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindFused, IssueNumber: 42, PRNumber: 55, IssueTitle: "t", PRTitle: "t", Status: "validated"},
+		},
+	}}
+	s := NewServer(src, "che-cli", 15)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/drawer/42")
+	if err != nil {
+		t.Fatalf("GET /drawer/42: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	got := string(body)
+
+	if !strings.Contains(got, `hx-post="/action/iterate/42"`) {
+		t.Errorf("fused drawer missing hx-post=/action/iterate/42")
+	}
+	if !strings.Contains(got, `hx-post="/action/validate/42"`) {
+		t.Errorf("fused drawer missing hx-post=/action/validate/42")
+	}
+	// "ver en GH" del fused apunta al PR (es la vista principal del tab pr).
+	if !strings.Contains(got, `href="https://github.com/demo/che/pull/55"`) {
+		t.Errorf("fused drawer missing 'ver en GH' href to pull/55")
+	}
+}
+
+// TestDrawerDisablesWhenRunning: si la entidad tiene RunningFlow, los
+// botones de acción salen disabled (evita doble dispatch desde la UI).
+func TestDrawerDisablesWhenRunning(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		NWO:    "demo/che",
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, IssueTitle: "running", Status: "plan", RunningFlow: "execute"},
+		},
+	}}
+	s := NewServer(src, "che-cli", 15)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/drawer/42")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	got := string(body)
+
+	// hx-post presente (no lo sacamos del DOM) pero la prop disabled activa.
+	if !strings.Contains(got, "disabled") {
+		t.Errorf("drawer with RunningFlow should disable action buttons")
+	}
+}
+
+// min es un helper — Go tiene builtin min en 1.21+ pero lo aliaseamos
+// por claridad en el error message del happy path.
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

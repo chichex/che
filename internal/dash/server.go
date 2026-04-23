@@ -27,9 +27,11 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/yuin/goldmark"
@@ -81,6 +83,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 
 	srv := NewServer(source, repoName, opts.Poll)
+	srv.repoPath = opts.Repo
 
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(opts.Port))
 	httpSrv := &http.Server{
@@ -132,10 +135,36 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 type Server struct {
 	source       Source
 	repoName     string
-	pollInterval int // segundos
+	repoPath     string // cwd del subproceso che <flow>; "" => heredar del server
+	pollInterval int    // segundos
 
 	tmpl *template.Template
 	mux  *http.ServeMux
+
+	// runAction dispara un subcomando che en background. Inyectable para
+	// poder testear el handler POST /action sin spawnear procesos reales.
+	// Default: spawnChe, que hace exec.Command sobre el mismo binario
+	// (os.Executable()) o el que haya en $PATH.
+	runAction func(flow string, id int, repo string) error
+
+	// mu protege running. El map trackea flows disparados desde el dashboard
+	// que todavía no se reflejan en el snapshot de la Source — evita doble
+	// dispatch y pinta el badge ⟳ instantáneo sin esperar al próximo poll.
+	mu      sync.Mutex
+	running map[int]string // IssueNumber → flow corriendo
+}
+
+// allowedFlows es la allowlist de flows disparables desde el dashboard. Se
+// chequea en el handler antes de pasar el string a exec.Command — nunca
+// interpolamos input del request directo en un spawn. Estos 4 son los
+// flows reales que el dashboard habilita en el modal (explore/execute/
+// iterate/validate); close queda fuera porque hoy el che close requiere
+// confirmación humana y no lo pegamos al botón.
+var allowedFlows = map[string]bool{
+	"explore":  true,
+	"execute":  true,
+	"iterate":  true,
+	"validate": true,
 }
 
 // NewServer construye el handler. pollInterval en segundos, mínimo 1 para
@@ -148,7 +177,9 @@ func NewServer(source Source, repoName string, pollInterval int) *Server {
 		source:       source,
 		repoName:     repoName,
 		pollInterval: pollInterval,
+		running:      map[int]string{},
 	}
+	s.runAction = s.spawnChe
 	tmpl := template.New("dash").Funcs(s.templateFuncs())
 	tmpl = template.Must(tmpl.ParseFS(templatesFS,
 		"templates/dashboard.html.tmpl",
@@ -393,8 +424,12 @@ func errShort(err error) string {
 }
 
 // buildData prepara la data común de los templates (index + board partial).
+// Las entidades se overlaye con el estado local (s.running) para que los
+// flows disparados desde el dashboard se reflejen en la UI de inmediato,
+// sin esperar al próximo poll de la Source.
 func (s *Server) buildData() pageData {
 	snap := s.source.Snapshot()
+	snap.Entities = s.overlayRunning(snap.Entities)
 	active := 0
 	for _, e := range snap.Entities {
 		if e.RunningFlow != "" {
@@ -412,14 +447,118 @@ func (s *Server) buildData() pageData {
 }
 
 // findEntity busca por IssueNumber en el snapshot actual. Usado por el
-// handler `/drawer/{id}`.
+// handler `/drawer/{id}`. El resultado lleva el RunningFlow del snapshot
+// merged con s.running (local) — si hay dispatch local pendiente de poll,
+// el drawer lo refleja sin esperar al próximo refresh.
 func (s *Server) findEntity(id int) (Entity, bool) {
 	for _, e := range s.source.Snapshot().Entities {
 		if e.IssueNumber == id {
+			s.mu.Lock()
+			if flow, ok := s.running[id]; ok && e.RunningFlow == "" {
+				e.RunningFlow = flow
+			}
+			s.mu.Unlock()
 			return e, true
 		}
 	}
 	return Entity{}, false
+}
+
+// overlayRunning aplica el estado local (s.running) sobre un slice de
+// entidades: si la entidad del snapshot tiene RunningFlow vacío pero hay
+// un flow local en vuelo para su issue, lo copia. También limpia entradas
+// locales stale (el snapshot ya confirma RunningFlow != "" para esa entidad
+// → ya no necesitamos overlay, la Source es source of truth).
+func (s *Server) overlayRunning(in []Entity) []Entity {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.running) == 0 {
+		return in
+	}
+	out := make([]Entity, len(in))
+	for i, e := range in {
+		if e.RunningFlow != "" {
+			// Snapshot ya refleja el flow → limpiamos el overlay local.
+			// Evita que s.running crezca sin bound si los handlers no
+			// limpian explícitamente (ej: el subprocess ya terminó y el
+			// label transient apareció en el siguiente poll).
+			delete(s.running, e.IssueNumber)
+		} else if flow, ok := s.running[e.IssueNumber]; ok {
+			e.RunningFlow = flow
+		}
+		out[i] = e
+	}
+	return out
+}
+
+// markRunning intenta reservar un flow para id. Si ya hay uno en curso
+// (local o en snapshot), devuelve el flow existente y ok=false. Si reserva
+// con éxito, ok=true. Llamado bajo lock por el handler de acción.
+func (s *Server) markRunning(id int, flow string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cur, ok := s.running[id]; ok && cur != "" {
+		return cur, false
+	}
+	// También chequeamos el snapshot: si el último poll ya vio un flow
+	// corriendo, no dejamos disparar otro encima. Acceso al snapshot
+	// fuera de lock sería ok (Snapshot() es concurrency-safe), pero
+	// mantenerlo bajo lock simplifica razonar sobre ordenamientos.
+	for _, e := range s.source.Snapshot().Entities {
+		if e.IssueNumber == id && e.RunningFlow != "" {
+			return e.RunningFlow, false
+		}
+	}
+	s.running[id] = flow
+	return flow, true
+}
+
+// clearRunning libera la reserva local. Se llama cuando el subproceso
+// che termina (éxito o error); a partir de ahí el snapshot del poller
+// manda. Si el subproceso aplicó labels transient, overlayRunning ve el
+// snapshot "ya lo refleja" y limpia el map en el próximo buildData.
+func (s *Server) clearRunning(id int) {
+	s.mu.Lock()
+	delete(s.running, id)
+	s.mu.Unlock()
+}
+
+// spawnChe es el default de s.runAction. Lanza `che <flow> <id>` en
+// background y no bloquea el handler. Prefiere os.Executable() sobre
+// exec.LookPath("che") para evitar la gotcha del brew cask vs el binario
+// recién compilado (ver project_local_binary_staleness.md): si dash corre
+// desde un binario puesto en dist/ o via go run, queremos re-ejecutar el
+// mismo bin, no el que brew linkea en /opt/homebrew/bin.
+func (s *Server) spawnChe(flow string, id int, repo string) error {
+	bin, err := os.Executable()
+	if err != nil || bin == "" {
+		// Fallback: che en $PATH.
+		bin, err = exec.LookPath("che")
+		if err != nil {
+			return fmt.Errorf("no se pudo resolver el binario che: %w", err)
+		}
+	}
+	cmd := exec.Command(bin, flow, strconv.Itoa(id))
+	if repo != "" {
+		cmd.Dir = repo
+	}
+	// stdout/stderr van al mismo io del dashboard para que queden en
+	// la consola donde corre `che dash`. El operador ve la traza del
+	// subflow sin abrir otra terminal. No capturamos acá el stream —
+	// eso es step 5.
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start che %s %d: %w", flow, id, err)
+	}
+	// Wait en goroutine: al terminar, liberamos la reserva local. El
+	// exit code del subproceso no nos interesa acá — el próximo poll
+	// del Source va a reflejar el estado final (labels che:*).
+	go func() {
+		_ = cmd.Wait()
+		s.clearRunning(id)
+	}()
+	return nil
 }
 
 func (s *Server) buildMux() *http.ServeMux {
@@ -482,6 +621,55 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /drawer/close", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
+	})
+
+	// POST /action/{flow}/{id} — dispara un subcomando che en background.
+	// flow se valida contra allowedFlows antes de pasarlo a exec.Command.
+	// Responde con el partial del drawer refreshado (que ahora mostrará
+	// el chip ⟳ y los botones disabled por RunningFlow != "").
+	mux.HandleFunc("POST /action/{flow}/{id}", func(w http.ResponseWriter, r *http.Request) {
+		flow := r.PathValue("flow")
+		if !allowedFlows[flow] {
+			http.Error(w, "invalid flow", http.StatusBadRequest)
+			return
+		}
+		idStr := r.PathValue("id")
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			http.Error(w, "invalid id", http.StatusBadRequest)
+			return
+		}
+		entity, ok := s.findEntity(id)
+		if !ok {
+			http.Error(w, "entity not found", http.StatusNotFound)
+			return
+		}
+		// Reservar antes de spawnar: si hay un flow ya en curso para
+		// esta entidad (local o en snapshot), devolver 409 sin tocar
+		// nada. findEntity arriba ya consideró el merge del local.
+		if _, okRes := s.markRunning(id, flow); !okRes {
+			http.Error(w, "flow already running for this entity", http.StatusConflict)
+			return
+		}
+		if err := s.runAction(flow, id, s.repoPath); err != nil {
+			// Spawn falló: liberar la reserva para que el usuario pueda
+			// re-intentar después de arreglar el problema (ej: `che` no
+			// está en $PATH, repo path inválido).
+			s.clearRunning(id)
+			http.Error(w, "spawn failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		// Re-render del drawer con el estado actualizado (ya refleja el
+		// flow via overlay local). El browser ve el chip ⟳ instantáneo
+		// y los botones disabled sin esperar al próximo poll.
+		entity.RunningFlow = flow
+		data := drawerData{Entity: entity, NWO: s.source.Snapshot().NWO}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if err := s.tmpl.ExecuteTemplate(w, "drawer.html.tmpl", data); err != nil {
+			http.Error(w, "template error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	})
 
 	// Static. Servimos directo desde el embed FS.
