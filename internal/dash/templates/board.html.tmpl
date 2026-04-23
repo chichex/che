@@ -43,7 +43,7 @@
           <div class="card"
                data-entity="{{.IssueNumber}}"
                hx-get="/drawer/{{.IssueNumber}}"
-               hx-target="#drawer-slot"
+               hx-target="#modal-slot"
                hx-swap="innerHTML">
             {{if eq .Kind 1}}
               {{/* Fused: ref dual clickable (issue → PR). stopPropagation es

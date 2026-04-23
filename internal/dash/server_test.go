@@ -75,9 +75,11 @@ func TestDashboardHandler_Index(t *testing.T) {
 	if strings.Contains(got, ">mergeable<") {
 		t.Errorf("body still contains old column 'mergeable'")
 	}
-	// Step 2: drawer ya no va inline; solo el slot vacío.
-	if !strings.Contains(got, `id="drawer-slot"`) {
-		t.Errorf("body missing #drawer-slot")
+	// El detalle ahora se monta como modal overlay; el slot del modal vive
+	// vacío hasta que htmx swappee el partial. Antes era #drawer-slot
+	// (sidebar); el rename a #modal-slot acompaña al refactor del wrapper.
+	if !strings.Contains(got, `id="modal-slot"`) {
+		t.Errorf("body missing #modal-slot")
 	}
 	// Step 2: htmx + dash.js embedded.
 	if !strings.Contains(got, `src="/static/htmx.min.js"`) {
@@ -221,8 +223,11 @@ func TestStaticHandler_DashJS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	if !strings.Contains(string(body), "closeDrawer") {
-		t.Errorf("dash.js body missing closeDrawer fn")
+	// Tras el refactor a modal el cierre se llama closeModal (antes
+	// closeDrawer); el listener de htmx:afterSwap sigue presente como hook
+	// reservado para futuros usos sobre #modal-slot.
+	if !strings.Contains(string(body), "closeModal") {
+		t.Errorf("dash.js body missing closeModal fn")
 	}
 	if !strings.Contains(string(body), "htmx:afterSwap") {
 		t.Errorf("dash.js body missing htmx:afterSwap listener")
