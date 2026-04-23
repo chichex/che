@@ -642,6 +642,96 @@ func TestAction_FusedValidateUsesPR(t *testing.T) {
 	}
 }
 
+// TestAction_FusedCloseUsesPR: close en fused también mapea a PRNumber
+// (che close acepta <pr>, no issue). Same pattern que validate/iterate.
+func TestAction_FusedCloseUsesPR(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		NWO:    "demo/che",
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindFused, IssueNumber: 122, PRNumber: 140, IssueTitle: "f", Status: "validated"},
+		},
+	}}
+	s := NewServer(src, "che-cli", 15)
+	fr := &fakeRunner{}
+	s.runAction = fr.run
+	s.repoPath = "/tmp/r"
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/close/122", "", nil)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	got := fr.last()
+	if got.Flow != "close" || got.TargetRef != 140 || got.EntityKey != 122 {
+		t.Errorf("close mapping: got %+v want {close target=140 key=122 ...}", got)
+	}
+}
+
+// TestDrawerRendersCloseButton_FusedExecuted: close aparece en fused
+// cuando el status es executed o validated (los que acepta che close).
+func TestDrawerRendersCloseButton_FusedExecuted(t *testing.T) {
+	for _, status := range []string{"executed", "validated"} {
+		t.Run(status, func(t *testing.T) {
+			src := &fixedSource{snap: Snapshot{
+				NWO:    "demo/che",
+				LastOK: time.Now(),
+				Entities: []Entity{
+					{Kind: KindFused, IssueNumber: 42, PRNumber: 55, IssueTitle: "t", PRTitle: "t", Status: status},
+				},
+			}}
+			s := NewServer(src, "che-cli", 15)
+			ts := httptest.NewServer(s)
+			defer ts.Close()
+
+			resp, err := http.Get(ts.URL + "/drawer/42")
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if !strings.Contains(string(body), `hx-post="/action/close/42"`) {
+				t.Errorf("status=%s: drawer missing close button", status)
+			}
+		})
+	}
+}
+
+// TestDrawerHidesCloseButton_FusedPreExecuted: close NO aparece si el
+// PR está en un status anterior a executed (executing/validating no
+// deberían ofrecer close — che close los rechaza).
+func TestDrawerHidesCloseButton_FusedPreExecuted(t *testing.T) {
+	for _, status := range []string{"executing", "validating", "closing", "closed"} {
+		t.Run(status, func(t *testing.T) {
+			src := &fixedSource{snap: Snapshot{
+				NWO:    "demo/che",
+				LastOK: time.Now(),
+				Entities: []Entity{
+					{Kind: KindFused, IssueNumber: 42, PRNumber: 55, IssueTitle: "t", PRTitle: "t", Status: status},
+				},
+			}}
+			s := NewServer(src, "che-cli", 15)
+			ts := httptest.NewServer(s)
+			defer ts.Close()
+
+			resp, err := http.Get(ts.URL + "/drawer/42")
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if strings.Contains(string(body), `hx-post="/action/close/42"`) {
+				t.Errorf("status=%s: drawer should not show close button", status)
+			}
+		})
+	}
+}
+
 // TestAction_IssueOnlyValidateUsesIssue: fused NO aplica (issue-only), así
 // que validate pasa IssueNumber tal cual — no mapea a nada.
 func TestAction_IssueOnlyValidateUsesIssue(t *testing.T) {

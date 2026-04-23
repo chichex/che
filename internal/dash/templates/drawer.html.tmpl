@@ -90,6 +90,17 @@
                 hx-target="#modal-slot"
                 hx-swap="innerHTML"
                 {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate !{{.PRNumber}}"{{end}}>validate</button>
+        {{/* close visible en che:executed y che:validated (los estados que
+             acepta `che close <pr>`). El comando warnea (no rechaza) si
+             el verdict no es approve — el click ES la decisión humana
+             per memoria feedback_close_no_gate. */}}
+        {{if or (eq .Status "executed") (eq .Status "validated")}}
+        <button class="btn danger"
+                hx-post="/action/close/{{.IssueNumber}}"
+                hx-target="#modal-slot"
+                hx-swap="innerHTML"
+                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="close !{{.PRNumber}} (mergea y cierra el issue)"{{end}}>close</button>
+        {{end}}
         <a class="btn ghost" style="margin-left:auto"
            href="https://github.com/{{.NWO}}/pull/{{.PRNumber}}"
            target="_blank" rel="noopener">ver en GH</a>

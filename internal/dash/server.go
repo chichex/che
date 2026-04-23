@@ -196,28 +196,28 @@ type Server struct {
 
 // allowedFlows es la allowlist de flows disparables desde el dashboard. Se
 // chequea en el handler antes de pasar el string a exec.Command — nunca
-// interpolamos input del request directo en un spawn. Estos 4 son los
-// flows reales que el dashboard habilita en el modal (explore/execute/
-// iterate/validate); close queda fuera porque hoy el che close requiere
-// confirmación humana y no lo pegamos al botón.
+// interpolamos input del request directo en un spawn. Los 5 flows del
+// lifecycle están habilitados; el click del botón ES la decisión humana
+// del close (memoria feedback_close_no_gate: warnea pero no rechaza).
 var allowedFlows = map[string]bool{
 	"explore":  true,
 	"execute":  true,
 	"iterate":  true,
 	"validate": true,
+	"close":    true,
 }
 
 // resolveTargetRef decide qué número pasar al subcomando che. Centraliza la
-// regla: `che validate <N>` y `che iterate <N>` hacen gh api issues/N y
-// enrutan por pull_request != null — para entidades fused (hay PR abierto)
-// queremos el modo PR, no el plan. `che explore` / `che execute` son
-// issue-first por diseño y siempre reciben IssueNumber. La URL del POST
-// sigue siendo con IssueNumber como clave canónica: coincide con data-entity
-// del modal, con el key del LogStore y con el overlay local de running —
-// toda la UI razona en IssueNumber; este helper es el único lugar donde se
-// traduce a PRNumber para el subproceso.
+// regla: `che validate|iterate|close <N>` operan sobre el PR — para
+// entidades fused (hay PR abierto) queremos el PR number, no el issue.
+// `che explore` / `che execute` son issue-first por diseño y siempre
+// reciben IssueNumber. La URL del POST sigue siendo con IssueNumber como
+// clave canónica: coincide con data-entity del modal, con el key del
+// LogStore y con el overlay local de running — toda la UI razona en
+// IssueNumber; este helper es el único lugar donde se traduce a PRNumber
+// para el subproceso.
 func resolveTargetRef(e Entity, flow string) int {
-	if e.Kind == KindFused && (flow == "validate" || flow == "iterate") && e.PRNumber > 0 {
+	if e.Kind == KindFused && (flow == "validate" || flow == "iterate" || flow == "close") && e.PRNumber > 0 {
 		return e.PRNumber
 	}
 	return e.IssueNumber
