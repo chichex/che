@@ -691,7 +691,7 @@ func TestFilterPlanCandidates(t *testing.T) {
 		},
 		{
 			"otros labels no interfieren",
-			[]Issue{mk(1, labels.StatusPlan, "ct:plan")},
+			[]Issue{mk(1, labels.ChePlan, "ct:plan")},
 			[]int{1},
 		},
 	}

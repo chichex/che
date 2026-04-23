@@ -40,7 +40,7 @@
     "acceptance_criteria": [
       "`che explore 42` postea un comment con el análisis",
       "El body del issue se actualiza con el plan consolidado",
-      "El label transiciona de status:idea a status:plan"
+      "El label transiciona de che:idea a che:plan"
     ],
     "approach": "Crear cmd/explore.go + internal/flow/explore/ espejando el patrón de idea.",
     "steps": [

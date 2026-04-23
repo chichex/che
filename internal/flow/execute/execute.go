@@ -1,13 +1,17 @@
-// Package execute implements flow 03 — tomar un issue en status:plan, armar
-// un worktree aislado, invocar al agente para producir el diff, abrir/actualizar
-// un PR draft contra main y transicionar el issue a status:executed. La
-// lógica vive acá (pura, testeable) para que el subcomando `che execute` y
-// la TUI compartan la misma implementación.
+// Package execute implements flow 03 — tomar un issue en che:idea o
+// che:plan, armar un worktree aislado, invocar al agente para producir el
+// diff, abrir/actualizar un PR draft contra main y transicionar el issue a
+// che:executed. La lógica vive acá (pura, testeable) para que el subcomando
+// `che execute` y la TUI compartan la misma implementación.
 //
 // execute NO dispara validadores: si el humano quiere validación
 // automática del plan antes de ejecutar o del PR después de crearlo,
 // corre `che validate` explícitamente. El gate de intervención humana
 // son los labels plan-validated:* sobre el issue.
+//
+// La transición de estados captura el `from` (che:idea o che:plan) al
+// momento del lock para poder hacer rollback al estado original si algo
+// falla post-lock.
 package execute
 
 import (
@@ -179,14 +183,15 @@ func preparePlan(body string) (*ConsolidatedPlan, error) {
 
 // Run ejecuta el flow completo sobre un issue. Decisiones claves:
 //   - Preflight: repo git + gh auth + gh pr list (scope check).
-//   - Transition status:plan → status:executing (lock).
+//   - Transition <from> → che:executing (lock), donde <from> es che:idea
+//     o che:plan según el estado actual del issue.
 //   - Crear worktree .worktrees/issue-N sobre branch exec/N-<slug>.
 //   - Invocar agente, commit en el worktree, push.
 //   - Crear o actualizar PR draft contra main con Closes #<n>.
 //   - Fire-and-forget validadores sobre el diff del PR.
-//   - Transition status:executing → status:executed.
+//   - Transition che:executing → che:executed.
 //   - Comentario al issue con link al PR.
-//   - Rollback: si algo falla después del lock, revertir a status:plan y
+//   - Rollback: si algo falla después del lock, revertir a <from> y
 //     limpiar worktree.
 func Run(issueRef string, opts Opts) ExitCode {
 	stdout := opts.Stdout
@@ -279,6 +284,11 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitSemantic
 	}
 
+	// from = che:idea | che:plan. Lo capturamos acá para que el lock + el
+	// rollback usen el mismo estado de origen, robusto frente a issues que
+	// el humano arranca directo desde idea (sin pasar por explore).
+	from := fromState(issue)
+
 	plan, err := preparePlan(issue.Body)
 	if err != nil {
 		switch {
@@ -313,11 +323,12 @@ func Run(issueRef string, opts Opts) ExitCode {
 		}
 	}()
 
-	// Transition plan → executing. Desde acá se lockea el issue (también vía
-	// status — redundante con che:locked pero preservado porque el listado
-	// de candidatos y el gate ya dependen de status).
-	progress("transicionando issue a status:executing…")
-	if err := labels.Apply(issueRef, labels.StatusPlan, labels.StatusExecuting); err != nil {
+	// Transition <from> → che:executing. Desde acá se lockea el issue
+	// (también vía che:* — redundante con che:locked pero preservado porque
+	// el listado de candidatos y el gate ya dependen de la máquina de
+	// estados).
+	progress("transicionando issue a che:executing…")
+	if err := labels.Apply(issueRef, from, labels.CheExecuting); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
@@ -336,11 +347,12 @@ func Run(issueRef string, opts Opts) ExitCode {
 	// Label handling (depende del punto de la falla):
 	//   - executedApplied=true          → no tocamos el label (quedó en executed).
 	//   - !executedApplied && prCreated → transicionamos a executed: el PR
-	//     remoto ya existe, así que ese es el estado consistente. Volver a
-	//     plan dejaría el issue "libre" con un PR vivo apuntando a él, que
+	//     remoto ya existe, así que ese es el estado consistente. Volver al
+	//     `from` dejaría el issue "libre" con un PR vivo apuntando a él, que
 	//     es peor que dejarlo en executed para retry manual.
-	//   - !executedApplied && !prCreated → rollback normal a plan (ownership-
-	//     aware: re-fetch y chequeamos que seguimos teniendo el lock).
+	//   - !executedApplied && !prCreated → rollback normal al `from`
+	//     capturado (che:idea o che:plan), ownership-aware (re-fetch y
+	//     chequeamos que seguimos teniendo el lock).
 	//
 	// Después del label, en orden fijo para que un segundo Ctrl+C vea
 	// progreso: 2) git worktree remove --force, 3) git branch -D. Los
@@ -357,11 +369,11 @@ func Run(issueRef string, opts Opts) ExitCode {
 		if cause != "" {
 			switch {
 			case executedApplied:
-				fmt.Fprintf(stderr, "%s — limpiando localmente (worktree, branch; label queda en executed)…\n", cause)
+				fmt.Fprintf(stderr, "%s — limpiando localmente (worktree, branch; label queda en che:executed)…\n", cause)
 			case prCreated:
-				fmt.Fprintf(stderr, "%s — limpiando localmente (label → executed por PR vivo, worktree, branch)…\n", cause)
+				fmt.Fprintf(stderr, "%s — limpiando localmente (label → che:executed por PR vivo, worktree, branch)…\n", cause)
 			default:
-				fmt.Fprintf(stderr, "%s — limpiando localmente (label → plan, worktree, branch)…\n", cause)
+				fmt.Fprintf(stderr, "%s — limpiando localmente (label → %s, worktree, branch)…\n", cause, from)
 			}
 		}
 
@@ -373,20 +385,20 @@ func Run(issueRef string, opts Opts) ExitCode {
 				// PR ya creado: dejar el issue en executed para preservar
 				// consistencia con el estado remoto. Best-effort; si falla,
 				// warneamos.
-				if err := labels.Apply(issueRef, labels.StatusExecuting, labels.StatusExecuted); err != nil {
-					fmt.Fprintf(stderr, "warning: no se pudo transicionar a status:executed tras señal post-PR: %v — revisá labels a mano\n", err)
+				if err := labels.Apply(issueRef, labels.CheExecuting, labels.CheExecuted); err != nil {
+					fmt.Fprintf(stderr, "warning: no se pudo transicionar a che:executed tras señal post-PR: %v — revisá labels a mano\n", err)
 				}
 			} else {
-				// Sin PR todavía: rollback a plan, pero solo si seguimos
+				// Sin PR todavía: rollback al `from`, pero solo si seguimos
 				// siendo el owner del lock (otra corrida podría haberlo
 				// tomado si el worktree se quedó colgado).
 				current, fetchErr := fetchIssue(rollbackCtx, issueRef)
 				if fetchErr != nil {
 					fmt.Fprintf(stderr, "warning: rollback no aplicado: no se pudo re-fetch el issue (%v) — revisá labels a mano\n", fetchErr)
-				} else if !current.HasLabel(labels.StatusExecuting) {
-					fmt.Fprintln(stderr, "rollback abortado: el issue ya no está en status:executing (owner=otro)")
+				} else if !current.HasLabel(labels.CheExecuting) {
+					fmt.Fprintln(stderr, "rollback abortado: el issue ya no está en che:executing (owner=otro)")
 				} else {
-					if err := labels.Apply(issueRef, labels.StatusExecuting, labels.StatusPlan); err != nil {
+					if err := labels.Apply(issueRef, labels.CheExecuting, from); err != nil {
 						fmt.Fprintf(stderr, "warning: rollback failed: %v — revisá labels del issue a mano\n", err)
 					}
 				}
@@ -515,14 +527,14 @@ func Run(issueRef string, opts Opts) ExitCode {
 		prCreated = true
 	}
 
-	// Transición a status:executed. Sin validadores automáticos; el label
+	// Transición a che:executed. Sin validadores automáticos; el label
 	// refleja "ejecución terminada". Orden importante: una señal entre
 	// `prCreated=true` y `executedApplied=true` dejaría al cleanup en modo
 	// "PR vivo + label en executing", que forzaría un label fix-up en el
 	// defer. Transicionar ya mismo encoge la ventana a mínimo y deja al
 	// issue en el estado consistente con el PR remoto.
-	progress("transicionando issue a status:executed…")
-	if err := labels.Apply(issueRef, labels.StatusExecuting, labels.StatusExecuted); err != nil {
+	progress("transicionando issue a che:executed…")
+	if err := labels.Apply(issueRef, labels.CheExecuting, labels.CheExecuted); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
@@ -542,14 +554,17 @@ func Run(issueRef string, opts Opts) ExitCode {
 	return ExitOK
 }
 
-// ListCandidates devuelve los issues abiertos con ct:plan + status:plan.
-// Estos son los candidatos a ejecutar. El gate de plan-validated:* se
-// chequea más tarde en gate() — el listado los muestra igual para que el
-// humano vea los que necesitan intervención.
+// ListCandidates devuelve los issues abiertos con ct:plan + che:plan.
+// Estos son los candidatos típicos a ejecutar (post-explore). execute
+// también acepta che:idea (skipping explore) pero esos casos se invocan
+// por número directo, no via el listado de la TUI — mantener el filtro
+// simple. El gate de plan-validated:* se chequea más tarde en gate() — el
+// listado los muestra igual para que el humano vea los que necesitan
+// intervención.
 func ListCandidates() ([]Candidate, error) {
 	cmd := exec.Command("gh", "issue", "list",
 		"--label", labels.CtPlan,
-		"--label", labels.StatusPlan,
+		"--label", labels.ChePlan,
 		"--state", "open",
 		"--json", "number,title,labels",
 		"--limit", "50")
@@ -625,7 +640,7 @@ func precheckPRScopes(ctx context.Context) error {
 // hasRepoScope busca 'repo' o 'public_repo' en la lista de scopes que
 // imprime `gh auth status -t`. La línea típica es:
 //
-//	- Token scopes: 'gist', 'read:org', 'repo', 'workflow'
+//   - Token scopes: 'gist', 'read:org', 'repo', 'workflow'
 //
 // Matcheamos con word boundaries para no confundir 'repo' con 'repo:status'
 // (que es un scope menos privilegiado).
@@ -677,11 +692,11 @@ func fetchIssue(ctx context.Context, ref string) (*Issue, error) {
 // gate valida las precondiciones para ejecutar:
 //   - Issue OPEN.
 //   - Tiene label ct:plan.
-//   - Tiene label status:plan.
-//   - NO tiene label status:executing (hay otro run en curso o quedó colgado).
-//   - NO tiene plan-validated:changes-requested (el validador del plan pidió
-//     cambios; hay que iterar/re-explorar primero).
-//   - NO tiene plan-validated:needs-human (decisión de producto pendiente).
+//   - Tiene che:idea O che:plan (acepta ambos: el humano puede saltar
+//     explore y ejecutar directo desde idea).
+//   - NO tiene labels más avanzados (executing/executed/validating/
+//     validated/closing/closed).
+//   - NO tiene plan-validated:changes-requested / :needs-human.
 //
 // plan-validated:approve o ausencia de cualquier plan-validated:* = green
 // light. El humano decide si correr `che validate` antes de ejecutar; si
@@ -694,8 +709,19 @@ func gate(i *Issue) error {
 	if !i.HasLabel(labels.CtPlan) {
 		return fmt.Errorf("issue #%d is missing label ct:plan (not created by `che idea`?)", i.Number)
 	}
-	if i.HasLabel(labels.StatusExecuting) {
-		return fmt.Errorf("issue #%d is already status:executing — otro run en curso o quedó colgado; quitá el label a mano si es lo segundo", i.Number)
+	if i.HasLabel(labels.CheExecuting) {
+		return fmt.Errorf("issue #%d ya está en che:executing — otro run en curso o quedó colgado; quitá el label a mano si es lo segundo", i.Number)
+	}
+	for _, beyond := range []string{
+		labels.CheExecuted,
+		labels.CheValidating,
+		labels.CheValidated,
+		labels.CheClosing,
+		labels.CheClosed,
+	} {
+		if i.HasLabel(beyond) {
+			return fmt.Errorf("issue #%d ya avanzó en el pipeline (%s presente) — execute no aplica", i.Number, beyond)
+		}
 	}
 	if i.HasLabel(labels.CheLocked) {
 		return fmt.Errorf("issue #%d tiene che:locked — otro flow lo tiene agarrado, o quedó colgado. Si es lo segundo: `che unlock %d`", i.Number, i.Number)
@@ -706,10 +732,20 @@ func gate(i *Issue) error {
 	if i.HasLabel(labels.PlanValidatedNeedsHuman) {
 		return fmt.Errorf("issue #%d tiene plan-validated:needs-human — resolvé a mano antes de ejecutar", i.Number)
 	}
-	if !i.HasLabel(labels.StatusPlan) {
-		return fmt.Errorf("issue #%d is not status:plan — corré `che explore %d` primero", i.Number, i.Number)
+	if !i.HasLabel(labels.CheIdea) && !i.HasLabel(labels.ChePlan) {
+		return fmt.Errorf("issue #%d no está en che:idea ni che:plan — corré `che explore %d` primero", i.Number, i.Number)
 	}
 	return nil
+}
+
+// fromState devuelve el estado de origen del issue al momento del gate
+// (che:idea o che:plan). Si tiene ambos (no debería, pero defensa) prefiere
+// che:plan que es el path normal post-explore.
+func fromState(i *Issue) string {
+	if i.HasLabel(labels.ChePlan) {
+		return labels.ChePlan
+	}
+	return labels.CheIdea
 }
 
 // ---- prompt builder ----
@@ -972,7 +1008,7 @@ func renderIssueComment(prURL string) string {
 	sb.WriteString("## Ejecución completada\n\n")
 	sb.WriteString("Se abrió un PR draft con los cambios:\n\n")
 	sb.WriteString("- PR: " + prURL + "\n\n")
-	sb.WriteString("El issue quedó en `status:executed`. Revisá el PR + CI; si querés validación automática antes de mergear, corré `che validate <pr>`.\n")
+	sb.WriteString("El issue quedó en `che:executed`. Revisá el PR + CI; si querés validación automática antes de mergear, corré `che validate <pr>`.\n")
 	return sb.String()
 }
 

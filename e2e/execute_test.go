@@ -103,17 +103,18 @@ func TestExecute_GoldenPath(t *testing.T) {
 		t.Fatalf("expected 2 issue edits (lock + unlock), got %d", len(edits))
 	}
 	// Primer edit: plan → executing.
-	edits[0].AssertArgsContain(t, "--add-label", "status:executing")
+	edits[0].AssertArgsContain(t, "--add-label", "che:executing")
 	// Segundo edit: executing → executed. awaiting-human ya no se aplica
 	// (el gate vive en plan-validated:* / validated:*).
-	edits[1].AssertArgsContain(t, "--add-label", "status:executed")
+	edits[1].AssertArgsContain(t, "--add-label", "che:executed")
 
 	if comments := inv.FindCalls("gh", "issue", "comment", "42", "--body-file"); len(comments) != 1 {
 		t.Fatalf("expected 1 issue comment, got %d", len(comments))
 	}
 }
 
-// TestExecute_IssueNotStatusPlan_Exit3: issue sin status:plan (está en idea) → exit 3.
+// TestExecute_IssueNotStatusPlan_Exit3: issue sin che:idea ni che:plan
+// (avanzado más allá o nunca clasificado) → exit 3.
 func TestExecute_IssueNotStatusPlan_Exit3(t *testing.T) {
 	env := setupExecuteEnv(t)
 	scriptExecutePrechecks(env)
@@ -123,7 +124,7 @@ func TestExecute_IssueNotStatusPlan_Exit3(t *testing.T) {
 	if r.ExitCode != 3 {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
-	harness.AssertContains(t, r.Stderr, "status:plan")
+	harness.AssertContains(t, r.Stderr, "che:idea ni che:plan")
 	env.Invocations().AssertNotCalled(t, "claude")
 }
 
@@ -239,7 +240,7 @@ func TestExecute_AgentFails_Rollback(t *testing.T) {
 	if len(edits) != 2 {
 		t.Fatalf("expected 2 issue edits (lock + rollback), got %d", len(edits))
 	}
-	edits[1].AssertArgsContain(t, "--add-label", "status:plan")
+	edits[1].AssertArgsContain(t, "--add-label", "che:plan")
 }
 
 // TestExecute_AgentFails_RollbackSkippedIfLockLost: claude falla y cuando
@@ -277,7 +278,7 @@ func TestExecute_AgentFails_RollbackSkippedIfLockLost(t *testing.T) {
 	rollbackCount := 0
 	for _, e := range edits {
 		for i := 0; i+1 < len(e.Args); i++ {
-			if e.Args[i] == "--add-label" && e.Args[i+1] == "status:plan" {
+			if e.Args[i] == "--add-label" && e.Args[i+1] == "che:plan" {
 				rollbackCount++
 			}
 		}
@@ -353,7 +354,7 @@ func TestExecute_NoChanges_ExistingPR_Rollback(t *testing.T) {
 	edits := inv.FindCalls("gh", "issue", "edit", "42")
 	for _, e := range edits {
 		for i := 0; i+1 < len(e.Args); i++ {
-			if e.Args[i] == "--add-label" && e.Args[i+1] == "status:executed" {
+			if e.Args[i] == "--add-label" && e.Args[i+1] == "che:executed" {
 				t.Fatalf("rogue transition to status:executed: %v", e.Args)
 			}
 		}
@@ -532,7 +533,7 @@ func TestExecute_PreviousPRClosed_NoAutoReopen(t *testing.T) {
 	if len(edits) != 2 {
 		t.Fatalf("expected 2 issue edits (lock + rollback), got %d", len(edits))
 	}
-	edits[1].AssertArgsContain(t, "--add-label", "status:plan")
+	edits[1].AssertArgsContain(t, "--add-label", "che:plan")
 }
 
 // TestExecute_PRCreateFails_PostPush_CleanupCorrect: si `gh pr create` falla
@@ -600,7 +601,7 @@ func TestExecute_PRCreateFails_PostPush_CleanupCorrect(t *testing.T) {
 	if len(edits) != 2 {
 		t.Fatalf("expected 2 issue edits (lock + rollback), got %d", len(edits))
 	}
-	edits[1].AssertArgsContain(t, "--add-label", "status:plan")
+	edits[1].AssertArgsContain(t, "--add-label", "che:plan")
 
 	// Se intentó crear una sola vez — el fallo no desencadena retry.
 	if creates := inv.FindCalls("gh", "pr", "create"); len(creates) != 1 {

@@ -225,6 +225,20 @@ func BlockingVerdict(pr *PullRequest) string {
 	return ""
 }
 
+// closeFromState devuelve el estado de origen de la máquina al momento
+// del gate (che:executed o che:validated). Devuelve "" si el PR no tiene
+// ninguno — el gate aborta. Prefiere che:validated cuando ambos están
+// presentes (path normal post-validate).
+func closeFromState(p *PullRequest) string {
+	if p.HasLabel(labels.CheValidated) {
+		return labels.CheValidated
+	}
+	if p.HasLabel(labels.CheExecuted) {
+		return labels.CheExecuted
+	}
+	return ""
+}
+
 // hasConflicts devuelve true si el PR tiene conflictos con la base y
 // necesita resolución manual/del agente antes de poder mergear.
 // mergeStateStatus puede venir vacío en fetchs rápidos; mergeable es más
@@ -306,9 +320,9 @@ func hasBlockingLabel(p validate.PullRequest) bool {
 //   - Cleanup del worktree (ver shouldCleanupWorktree):
 //     · --keep-branch inhibe siempre, aunque el worktree sea propio del run.
 //     · happy path (merge OK): limpia el worktree asociado, sea propio o
-//       reusado/auto-detectado bajo .worktrees/.
+//     reusado/auto-detectado bajo .worktrees/.
 //     · failure path: limpia solo si el worktree es propio del run, para no
-//       borrar trabajo del usuario en worktrees reusados.
+//     borrar trabajo del usuario en worktrees reusados.
 func Run(prRef string, opts Opts) ExitCode {
 	stdout := opts.Stdout
 	if stdout == nil {
@@ -360,6 +374,15 @@ func Run(prRef string, opts Opts) ExitCode {
 		return ExitSemantic
 	}
 
+	// Gate de máquina de estados: aceptamos che:executed o che:validated.
+	// `from` se captura para que el lock + el rollback usen el mismo
+	// origen (executed por path normal, validated post-validate).
+	prFrom := closeFromState(pr)
+	if prFrom == "" {
+		log.Error(fmt.Sprintf("PR #%d no está en che:executed ni che:validated — corré `che execute` o `che validate` antes", pr.Number))
+		return ExitSemantic
+	}
+
 	log.Step("aplicando lock che:locked", output.F{PR: pr.Number})
 	if err := labels.Lock(prRef); err != nil {
 		log.Error("no pude aplicar che:locked", output.F{Cause: err})
@@ -368,6 +391,23 @@ func Run(prRef string, opts Opts) ExitCode {
 	defer func() {
 		if err := labels.Unlock(prRef); err != nil {
 			log.Warn(fmt.Sprintf("no se pudo quitar che:locked de %s: %v — corré `che unlock %s`", prRef, err, prRef))
+		}
+	}()
+
+	// Transición <prFrom> → che:closing. Rollback en defer LIFO si
+	// stateClosed queda en false.
+	log.Step("transicionando a che:closing", output.F{PR: pr.Number})
+	if err := labels.Apply(prRef, prFrom, labels.CheClosing); err != nil {
+		log.Error("no pude transicionar a che:closing", output.F{Cause: err})
+		return ExitRetry
+	}
+	var stateClosed bool
+	defer func() {
+		if stateClosed {
+			return
+		}
+		if err := labels.Apply(prRef, labels.CheClosing, prFrom); err != nil {
+			log.Warn(fmt.Sprintf("rollback che:closing → %s fallo: %v — revisá labels a mano", prFrom, err))
 		}
 	}()
 
@@ -519,6 +559,16 @@ func Run(prRef string, opts Opts) ExitCode {
 
 	fmt.Fprintln(stdout, branchOutcomeMessage(pr.HeadBranch, keepBranch, preRemoteKnown, preRemoteMissing, remoteDeleteFailed))
 
+	// Cierre de la transición de máquina de estados: che:closing → che:closed.
+	// El PR queda en estado terminal `che:closed`, consistente con el merge
+	// remoto. Best-effort: si falla, warneamos pero el merge ya ocurrió.
+	log.Step("transicionando PR a che:closed", output.F{PR: pr.Number})
+	if err := labels.Apply(prRef, labels.CheClosing, labels.CheClosed); err != nil {
+		log.Warn(fmt.Sprintf("no pude transicionar PR a che:closed: %v — revisá labels a mano", err))
+	} else {
+		stateClosed = true
+	}
+
 	// Cerrar issues asociados. Después del merge, los que tenían "closes #N"
 	// en el body del PR quedan OPEN un tiempo hasta que github procesa el
 	// auto-close; hacemos un close explícito para no depender de eso y para
@@ -567,8 +617,10 @@ func firstClosingIssue(pr *PullRequest) int {
 
 // closeAssociatedIssues cierra TODOS los issues referenciados con "closes
 // #N" en el PR (puede haber más de uno) que estén todavía OPEN, y les
-// aplica la transición de labels a status:closed cuando corresponde
-// (status:executed → status:closed). Errores no fatales (log + seguir).
+// aplica la transición de labels a che:closed cuando corresponde. La
+// transición intermedia es <from> → che:closing → che:closed, donde
+// <from> puede ser che:executed o che:validated según el path. Best-
+// effort: si los labels no están como esperamos, logueamos y seguimos.
 // Devuelve la lista de números de issues que se cerraron efectivamente
 // (para reporte en stdout).
 func closeAssociatedIssues(pr *PullRequest, log *output.Logger) []int {
@@ -587,12 +639,21 @@ func closeAssociatedIssues(pr *PullRequest, log *output.Logger) []int {
 				output.F{Issue: ref.Number, Cause: err})
 		} else {
 			closed = append(closed, ref.Number)
-			log.Success("issue cerrado", output.F{Issue: ref.Number, Labels: []string{labels.StatusClosed}})
+			log.Success("issue cerrado", output.F{Issue: ref.Number, Labels: []string{labels.CheClosed}})
 		}
-		// Transición de labels. Best-effort: si el issue no estaba en
-		// status:executed, la transición falla — lo logueamos y seguimos.
-		if err := labels.Apply(refStr, labels.StatusExecuted, labels.StatusClosed); err != nil {
-			log.Warn(fmt.Sprintf("warning: labels del issue #%d no transicionaron a status:closed", ref.Number),
+		// Transición de labels best-effort. Probamos primero che:executed y
+		// si falla che:validated. Si el issue no tiene ninguno (ej.
+		// referenciado pero no manejado por che) los dos fallan y warneamos.
+		if err := labels.Apply(refStr, labels.CheExecuted, labels.CheClosing); err != nil {
+			if err2 := labels.Apply(refStr, labels.CheValidated, labels.CheClosing); err2 != nil {
+				log.Warn(fmt.Sprintf("warning: labels del issue #%d no transicionaron a che:closing (executed: %v · validated: %v)",
+					ref.Number, err, err2),
+					output.F{Issue: ref.Number})
+				continue
+			}
+		}
+		if err := labels.Apply(refStr, labels.CheClosing, labels.CheClosed); err != nil {
+			log.Warn(fmt.Sprintf("warning: labels del issue #%d no transicionaron a che:closed", ref.Number),
 				output.F{Issue: ref.Number, Cause: err})
 		}
 	}

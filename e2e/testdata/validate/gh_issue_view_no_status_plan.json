@@ -6,7 +6,7 @@
   "state": "OPEN",
   "labels": [
     {"name": "ct:plan"},
-    {"name": "status:idea"},
+    {"name": "che:idea"},
     {"name": "type:feat"},
     {"name": "size:m"}
   ]

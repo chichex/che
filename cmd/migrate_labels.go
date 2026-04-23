@@ -24,16 +24,20 @@ type pair struct {
 // → closed, pensado para que el output del subcomando se lea como una
 // progresión natural en stdout.
 //
+// Los strings `status:*` viven literales acá (no como constantes del
+// paquete labels) porque son input de migración, no uso runtime: el
+// resto del código usa exclusivamente las constantes `labels.Che*`.
+//
 // No incluye los 4 estados nuevos (`che:planning`, `che:validating`,
 // `che:validated`, `che:closing`): no existen en repos viejos, los crea
 // `labels.Ensure` lazy cuando un flow los aplica por primera vez.
 func migrationPairs() []pair {
 	return []pair{
-		{Old: labels.StatusIdea, New: labels.CheIdea},
-		{Old: labels.StatusPlan, New: labels.ChePlan},
-		{Old: labels.StatusExecuting, New: labels.CheExecuting},
-		{Old: labels.StatusExecuted, New: labels.CheExecuted},
-		{Old: labels.StatusClosed, New: labels.CheClosed},
+		{Old: "status:idea", New: labels.CheIdea},
+		{Old: "status:plan", New: labels.ChePlan},
+		{Old: "status:executing", New: labels.CheExecuting},
+		{Old: "status:executed", New: labels.CheExecuted},
+		{Old: "status:closed", New: labels.CheClosed},
 	}
 }
 

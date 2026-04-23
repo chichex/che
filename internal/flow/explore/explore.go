@@ -1,7 +1,7 @@
 // Package explore implements flow 02 — tomar un issue ya creado por `che
 // idea`, leerlo, profundizar con el agente elegido, y persistir el análisis
 // (comentario en el issue + plan consolidado escrito en el body +
-// transición de label a status:plan). La validación automática vive en un
+// transición de label a che:plan). La validación automática vive en un
 // flow separado (`che validate`): explore NO dispara validadores ni
 // implementa loop humano.
 package explore
@@ -283,7 +283,8 @@ type ConsolidatedPlan = plan.ConsolidatedPlan
 
 // Run ejecuta el flow sin ramificaciones: analiza el issue, postea un
 // comment con el análisis, escribe el plan consolidado en el body y
-// transiciona status:idea → status:plan.
+// transiciona che:idea → che:planning (lock) → che:plan (éxito) ó
+// che:idea (rollback).
 func Run(issueRef string, opts Opts) ExitCode {
 	stdout := opts.Stdout
 	if stdout == nil {
@@ -353,6 +354,23 @@ func Run(issueRef string, opts Opts) ExitCode {
 		}
 	}()
 
+	// Transición idea → planning (lock de máquina de estados). El rollback
+	// (planning → idea) lo hace el defer si succeeded queda en false.
+	progress("transicionando label a che:planning…")
+	if err := labels.Apply(issueRef, labels.CheIdea, labels.ChePlanning); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
+	}
+	var succeeded bool
+	defer func() {
+		if succeeded {
+			return
+		}
+		if err := labels.Apply(issueRef, labels.ChePlanning, labels.CheIdea); err != nil {
+			fmt.Fprintf(stderr, "warning: rollback che:planning → che:idea fallo: %v — revisá labels a mano\n", err)
+		}
+	}()
+
 	a := opts.Agent
 	if a == "" {
 		a = DefaultAgent
@@ -389,12 +407,13 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitRetry
 	}
 
-	progress("transicionando label a status:plan…")
-	if err := labels.Apply(issueRef, labels.StatusIdea, labels.StatusPlan); err != nil {
+	progress("transicionando label a che:plan…")
+	if err := labels.Apply(issueRef, labels.ChePlanning, labels.ChePlan); err != nil {
 		fmt.Fprintf(stderr, "error: editing labels: %v\n", err)
 		fmt.Fprintf(stderr, "warning: comentario posteado (%s) pero label no cambió; corré de nuevo o editá a mano\n", commentURL)
 		return ExitRetry
 	}
+	succeeded = true
 
 	fmt.Fprintf(stdout, "Explored %s\n", issue.URL)
 	if commentURL != "" {
@@ -426,7 +445,7 @@ func precheckGhAuth() error {
 
 // Candidate es un issue candidato a explorar. Cubre dos buckets que la TUI
 // separa visualmente:
-//   - ideas de che (ct:plan sin status:plan/executing/executed): Raw=false.
+//   - ideas de che (ct:plan sin che:planning/plan/executing/executed/...): Raw=false.
 //   - issues "crudos" abiertos a mano sin ningún ct:*: Raw=true. explore
 //     los reclassifica antes de explorar.
 type Candidate struct {
@@ -440,8 +459,9 @@ type Candidate struct {
 // ListCandidates devuelve los issues abiertos que la TUI muestra como
 // "ideas sin explorar". Cubre dos buckets:
 //  1. issues creados por che idea (ct:plan) que todavía no fueron
-//     explorados (sin status:plan) y que no pasaron por execute (sin
-//     status:executing | status:executed);
+//     explorados ni avanzaron en el pipeline (sin che:planning, che:plan,
+//     che:executing, che:executed, che:validating, che:validated,
+//     che:closing, che:closed);
 //  2. issues "crudos" abiertos a mano en GitHub — sin ningún label ct:* —
 //     que explore reclassifica antes de explorar.
 //
@@ -468,9 +488,14 @@ func filterCandidates(issues []Issue) []Candidate {
 			continue // otro flow lo tiene agarrado.
 		}
 		if i.HasLabel(labels.CtPlan) {
-			if i.HasLabel(labels.StatusPlan) ||
-				i.HasLabel(labels.StatusExecuting) ||
-				i.HasLabel(labels.StatusExecuted) {
+			if i.HasLabel(labels.ChePlanning) ||
+				i.HasLabel(labels.ChePlan) ||
+				i.HasLabel(labels.CheExecuting) ||
+				i.HasLabel(labels.CheExecuted) ||
+				i.HasLabel(labels.CheValidating) ||
+				i.HasLabel(labels.CheValidated) ||
+				i.HasLabel(labels.CheClosing) ||
+				i.HasLabel(labels.CheClosed) {
 				continue
 			}
 			cheIdeas = append(cheIdeas, Candidate{Number: i.Number, Title: i.Title})
@@ -540,7 +565,7 @@ func fetchIssue(ref string) (*Issue, error) {
 
 // reclassifyIssue clasifica un issue que no fue creado por `che idea` (no
 // tiene ct:plan) delegando en idea.Classify, y le aplica los labels de
-// pipeline (ct:plan + status:idea + type/size inferidos). Si el issue ya
+// pipeline (ct:plan + che:idea + type/size inferidos). Si el issue ya
 // tenía type:* o size:* manualmente, los preserva y solo agrega los que
 // falten — respetamos lo que el humano decidió a mano.
 //
@@ -571,9 +596,9 @@ func reclassifyIssue(ref string, issue *Issue, log *output.Logger) error {
 
 	// Si el issue ya tiene un type:* o size:*, lo respetamos. La
 	// clasificación del LLM es un fallback para issues sin nada. Ídem con
-	// status:* — si alguien editó labels a mano y dejó el issue con
-	// status:plan pero sin ct:plan, no queremos sumar status:idea arriba
-	// (GitHub aceptaría ambos y el flow quedaría con dos status:*).
+	// che:* — si alguien editó labels a mano y dejó el issue con
+	// che:plan pero sin ct:plan, no queremos sumar che:idea arriba
+	// (GitHub aceptaría ambos y el flow quedaría con dos che:*).
 	hasType, hasSize, hasStatus := false, false, false
 	for _, l := range issue.Labels {
 		if strings.HasPrefix(l.Name, "type:") {
@@ -582,16 +607,16 @@ func reclassifyIssue(ref string, issue *Issue, log *output.Logger) error {
 		if strings.HasPrefix(l.Name, "size:") {
 			hasSize = true
 		}
-		if strings.HasPrefix(l.Name, "status:") {
+		if strings.HasPrefix(l.Name, "che:") && l.Name != labels.CheLocked {
 			hasStatus = true
 		}
 	}
 
 	toAdd := []string{labels.CtPlan}
 	if !hasStatus {
-		toAdd = append(toAdd, labels.StatusIdea)
+		toAdd = append(toAdd, labels.CheIdea)
 	} else {
-		log.Warn("issue con status:* preexistente sin ct:plan; preservando el status actual",
+		log.Warn("issue con che:* preexistente sin ct:plan; preservando el estado actual",
 			output.F{Issue: issue.Number})
 	}
 	if !hasType {
@@ -627,8 +652,9 @@ func reclassifyIssue(ref string, issue *Issue, log *output.Logger) error {
 	return nil
 }
 
-// gateBasic valida las precondiciones: open + ct:plan + NO status:plan (ya
-// explorado).
+// gateBasic valida las precondiciones: open + ct:plan + NO está más allá
+// de che:idea (planning/plan/executing/executed/validating/validated/
+// closing/closed → el issue ya avanzó en el pipeline, explore no aplica).
 func gateBasic(i *Issue) error {
 	if i.State != "OPEN" {
 		return fmt.Errorf("issue #%d is closed", i.Number)
@@ -636,8 +662,19 @@ func gateBasic(i *Issue) error {
 	if !i.HasLabel(labels.CtPlan) {
 		return fmt.Errorf("issue #%d is missing label ct:plan (not created by `che idea`?)", i.Number)
 	}
-	if i.HasLabel(labels.StatusPlan) {
-		return fmt.Errorf("issue #%d was already explored (status:plan present)", i.Number)
+	for _, beyond := range []string{
+		labels.ChePlanning,
+		labels.ChePlan,
+		labels.CheExecuting,
+		labels.CheExecuted,
+		labels.CheValidating,
+		labels.CheValidated,
+		labels.CheClosing,
+		labels.CheClosed,
+	} {
+		if i.HasLabel(beyond) {
+			return fmt.Errorf("issue #%d ya avanzó en el pipeline (%s presente) — explore no aplica", i.Number, beyond)
+		}
 	}
 	if i.HasLabel(labels.CheLocked) {
 		return fmt.Errorf("issue #%d tiene che:locked — otro flow lo tiene agarrado, o quedó colgado. Si es lo segundo: `che unlock %d`", i.Number, i.Number)

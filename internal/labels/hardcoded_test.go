@@ -8,27 +8,24 @@ import (
 )
 
 // TestNoHardcodedLabelsOutsideThisPackage camina el árbol del módulo y falla
-// si aparecen strings literales de labels (`"ct:plan"`, `"status:plan"`, …)
+// si aparecen strings literales de labels (`"ct:plan"`, `"che:plan"`, …)
 // en código de producción fuera de `internal/labels`. La única fuente de
 // verdad son las constantes de este paquete — si mañana renombramos
-// `status:plan`, hay que cambiarlo acá y nada más.
+// `che:plan`, hay que cambiarlo acá y nada más.
 //
 // Scope del check:
 //   - solo archivos `.go`,
 //   - excluye `_test.go` (fixtures pueden usar strings literales),
-//   - excluye `internal/labels` (este paquete es la fuente de verdad).
+//   - excluye `internal/labels` (este paquete es la fuente de verdad),
+//   - excluye `cmd/migrate_labels*.go` — ese subcomando hace migración
+//     in-place de los `status:*` viejos a `che:*` nuevos, así que los
+//     literales `"status:idea"` etc. son su input, no uso runtime.
 func TestNoHardcodedLabelsOutsideThisPackage(t *testing.T) {
 	root := moduleRoot(t)
 
 	forbidden := []string{
-		`"` + StatusIdea + `"`,
-		`"` + StatusPlan + `"`,
-		`"` + StatusExecuting + `"`,
-		`"` + StatusExecuted + `"`,
 		`"` + CtPlan + `"`,
-		// Máquina nueva (prefix `che:*`). Aunque PR1 todavía no migra los
-		// flows, dejamos los 9 ya bloqueados para que PR2..PR5 estén
-		// forzados a usar las constantes desde el día 1.
+		// Máquina (prefix `che:*`).
 		`"` + CheIdea + `"`,
 		`"` + ChePlanning + `"`,
 		`"` + ChePlan + `"`,
@@ -59,6 +56,12 @@ func TestNoHardcodedLabelsOutsideThisPackage(t *testing.T) {
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
+		// Skip cmd/migrate_labels*.go: el subcomando de migración usa
+		// literales `"status:*"` como input — son entrada, no runtime.
+		rel, _ := filepath.Rel(root, path)
+		if strings.HasPrefix(rel, "cmd/migrate_labels") {
+			return nil
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
@@ -66,7 +69,6 @@ func TestNoHardcodedLabelsOutsideThisPackage(t *testing.T) {
 		content := string(data)
 		for _, lit := range forbidden {
 			if strings.Contains(content, lit) {
-				rel, _ := filepath.Rel(root, path)
 				violations = append(violations, rel+": contiene "+lit)
 			}
 		}

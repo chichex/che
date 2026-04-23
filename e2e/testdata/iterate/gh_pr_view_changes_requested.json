@@ -7,5 +7,5 @@
   "headRefName": "feat/x",
   "author": {"login": "acme-bot"},
   "closingIssuesReferences": [{"number": 42}],
-  "labels": [{"name": "validated:changes-requested"}]
+  "labels": [{"name": "che:validated"}, {"name": "validated:changes-requested"}]
 }

@@ -139,7 +139,7 @@ func assertCleanupApplied(t *testing.T, env *harness.Env, stderr string) {
 	foundRollback := false
 	for _, e := range edits {
 		for i := 0; i+1 < len(e.Args); i++ {
-			if e.Args[i] == "--add-label" && e.Args[i+1] == "status:plan" {
+			if e.Args[i] == "--add-label" && e.Args[i+1] == "che:plan" {
 				foundRollback = true
 			}
 		}

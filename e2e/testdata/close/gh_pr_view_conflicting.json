@@ -9,5 +9,5 @@
   "mergeStateStatus": "DIRTY",
   "author": {"login": "acme-bot"},
   "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
-  "labels": []
+  "labels": [{"name": "che:executed"}]
 }

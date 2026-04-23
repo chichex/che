@@ -25,16 +25,23 @@ func TestGate(t *testing.T) {
 		wantErr string
 	}{
 		{
-			name: "ok",
+			name: "ok plan",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "status:plan"},
+				{Name: "ct:plan"}, {Name: "che:plan"},
+			}},
+			wantErr: "",
+		},
+		{
+			name: "ok idea (skip explore)",
+			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
+				{Name: "ct:plan"}, {Name: "che:idea"},
 			}},
 			wantErr: "",
 		},
 		{
 			name: "ok with plan-validated:approve",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "status:plan"}, {Name: "plan-validated:approve"},
+				{Name: "ct:plan"}, {Name: "che:plan"}, {Name: "plan-validated:approve"},
 			}},
 			wantErr: "",
 		},
@@ -45,20 +52,27 @@ func TestGate(t *testing.T) {
 		},
 		{
 			name:    "missing ct:plan",
-			issue:   Issue{Number: 1, State: "OPEN", Labels: []Label{{Name: "status:plan"}}},
+			issue:   Issue{Number: 1, State: "OPEN", Labels: []Label{{Name: "che:plan"}}},
 			wantErr: "ct:plan",
 		},
 		{
 			name: "executing lock",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "status:executing"},
+				{Name: "ct:plan"}, {Name: "che:executing"},
 			}},
 			wantErr: "executing",
 		},
 		{
+			name: "already executed",
+			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
+				{Name: "ct:plan"}, {Name: "che:executed"},
+			}},
+			wantErr: "che:executed",
+		},
+		{
 			name: "plan-validated:changes-requested blocks",
 			issue: Issue{Number: 42, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "status:plan"},
+				{Name: "ct:plan"}, {Name: "che:plan"},
 				{Name: "plan-validated:changes-requested"},
 			}},
 			wantErr: "plan-validated:changes-requested",
@@ -66,17 +80,17 @@ func TestGate(t *testing.T) {
 		{
 			name: "plan-validated:needs-human blocks",
 			issue: Issue{Number: 42, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "status:plan"},
+				{Name: "ct:plan"}, {Name: "che:plan"},
 				{Name: "plan-validated:needs-human"},
 			}},
 			wantErr: "plan-validated:needs-human",
 		},
 		{
-			name: "not plan",
+			name: "not idea nor plan",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "status:idea"},
+				{Name: "ct:plan"},
 			}},
-			wantErr: "not status:plan",
+			wantErr: "no está en che:idea ni che:plan",
 		},
 	}
 	for _, c := range cases {
@@ -103,7 +117,7 @@ func TestGate(t *testing.T) {
 // rechazado — evita tener que consultar el manual.
 func TestGate_ChangesRequestedErrorMentionsIterate(t *testing.T) {
 	issue := Issue{Number: 42, State: "OPEN", Labels: []Label{
-		{Name: "ct:plan"}, {Name: "status:plan"},
+		{Name: "ct:plan"}, {Name: "che:plan"},
 		{Name: "plan-validated:changes-requested"},
 	}}
 	err := gate(&issue)
@@ -584,7 +598,7 @@ func TestRenderIssueComment_LinksPR(t *testing.T) {
 	for _, need := range []string{
 		"<!-- claude-cli: flow=execute",
 		"https://github.com/acme/demo/pull/7",
-		"status:executed",
+		"che:executed",
 		"che validate",
 	} {
 		if !strings.Contains(got, need) {
