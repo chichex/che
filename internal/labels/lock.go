@@ -1,9 +1,10 @@
 // Package labels — archivo separado para el label "ortogonal" che:locked.
 //
-// A diferencia de los status:* que forman una máquina de estados (explore →
-// plan → executing → executed → closed), che:locked es un mutex simple on/off
-// aplicado al arrancar un flow y removido al terminar. No transiciona: el
-// flow lo aplica con Lock y lo saca con Unlock en un defer.
+// A diferencia de los che:* que forman una máquina de estados (idea →
+// planning → plan → executing → executed → validating → validated → closing
+// → closed), che:locked es un mutex simple on/off aplicado al arrancar un
+// flow y removido al terminar. No transiciona: el flow lo aplica con Lock y
+// lo saca con Unlock en un defer.
 //
 // El label sirve tanto para issues como para PRs: en la API REST de GitHub un
 // PR es un issue, así que el endpoint /repos/:o/:r/issues/:n/labels funciona

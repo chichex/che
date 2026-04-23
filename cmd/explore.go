@@ -21,7 +21,8 @@ artefactos:
   2. Un "plan consolidado" que se escribe en el body del issue — es lo
      que después lee 'che execute' al arrancar.
 
-Cuando termina, el issue transiciona de status:idea a status:plan.
+Cuando termina, el issue transiciona de che:idea a che:plan (pasando por
+che:planning durante el run).
 explore NO dispara validadores ni pausa el flow para input humano: la
 validación automática vive en 'che validate' como paso opt-in antes de
 ejecutar.
