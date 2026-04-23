@@ -189,6 +189,8 @@ func Run(ref string, opts Opts) ExitCode {
 // Gates: PR open + head branch + NO che:locked + che:validated +
 // validated:changes-requested. Transición de máquina: che:validated →
 // che:executing (lock) → che:executed (éxito) ó che:validated (rollback).
+// Los che:* viven en el issue linkeado cuando existe (consistente con
+// execute.go); si no hay issue linkeado caemos al PR.
 func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCode {
 	log.Info("chequeando repo git")
 	repoRoot, err := repoToplevel()
@@ -211,8 +213,18 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		log.Error(fmt.Sprintf("PR #%d no tiene head branch (¿fork?) — iterate no soporta ese caso", pr.Number))
 		return ExitSemantic
 	}
-	if !pr.HasLabel(labels.CheValidated) {
-		log.Error(fmt.Sprintf("PR #%d no está en che:validated — corré `che validate %d` primero", pr.Number, pr.Number))
+	// Resolver dónde viven los labels che:* de máquina de estados. Si el
+	// PR tiene issue linkeado con algún che:*, los gates leen del issue y
+	// las transiciones van al issue; si no, al PR mismo (compat).
+	stateRes := pr.ResolveStateRef(prRef)
+	stateRef := stateRes.Ref
+
+	if !stateRes.HasLabel(labels.CheValidated) {
+		if stateRes.ResolvedToIssue {
+			log.Error(fmt.Sprintf("issue #%d (linkeado al PR #%d) no está en che:validated — corré `che validate %d` primero", stateRes.IssueNumber, pr.Number, pr.Number))
+		} else {
+			log.Error(fmt.Sprintf("PR #%d no está en che:validated — corré `che validate %d` primero", pr.Number, pr.Number))
+		}
 		return ExitSemantic
 	}
 	if !pr.HasLabel(labels.ValidatedChangesRequested) {
@@ -236,8 +248,13 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 	}()
 
 	// Transición che:validated → che:executing. Rollback en defer LIFO.
-	log.Step("transicionando a che:executing", output.F{PR: pr.Number})
-	if err := labels.Apply(prRef, labels.CheValidated, labels.CheExecuting); err != nil {
+	// Target: issue si hay linkeado con che:*, PR si no.
+	if stateRes.ResolvedToIssue {
+		log.Step("transicionando issue a che:executing", output.F{Issue: stateRes.IssueNumber})
+	} else {
+		log.Step("transicionando a che:executing", output.F{PR: pr.Number})
+	}
+	if err := labels.Apply(stateRef, labels.CheValidated, labels.CheExecuting); err != nil {
 		log.Error("no pude transicionar a che:executing", output.F{Cause: err})
 		return ExitRetry
 	}
@@ -246,7 +263,7 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		if stateExecuted {
 			return
 		}
-		if err := labels.Apply(prRef, labels.CheExecuting, labels.CheValidated); err != nil {
+		if err := labels.Apply(stateRef, labels.CheExecuting, labels.CheValidated); err != nil {
 			log.Warn(fmt.Sprintf("rollback che:executing → che:validated fallo: %v — revisá labels a mano", err))
 		}
 	}()
@@ -328,9 +345,14 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		log.Warn("warning: no se pudo remover label — removelo a mano", output.F{Cause: err})
 	}
 
-	// Cierre de la transición: che:executing → che:executed.
-	log.Step("transicionando a che:executed", output.F{PR: pr.Number})
-	if err := labels.Apply(prRef, labels.CheExecuting, labels.CheExecuted); err != nil {
+	// Cierre de la transición: che:executing → che:executed. Target: el
+	// mismo ref que usamos para abrir la transición (issue si corresponde).
+	if stateRes.ResolvedToIssue {
+		log.Step("transicionando issue a che:executed", output.F{Issue: stateRes.IssueNumber})
+	} else {
+		log.Step("transicionando a che:executed", output.F{PR: pr.Number})
+	}
+	if err := labels.Apply(stateRef, labels.CheExecuting, labels.CheExecuted); err != nil {
 		log.Warn(fmt.Sprintf("no pude transicionar a che:executed: %v — revisá labels a mano", err))
 	} else {
 		stateExecuted = true

@@ -1,11 +1,13 @@
 package closing
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/chichex/che/internal/flow/stateref"
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
 )
@@ -332,6 +334,87 @@ func TestPullRequest_HasLabel(t *testing.T) {
 	}
 	if pr.HasLabel("baz") {
 		t.Errorf("expected HasLabel(baz)=false")
+	}
+}
+
+// TestCloseFromStateRes cubre la versión state-ref-aware del from-state
+// gate: prefiere che:validated sobre che:executed, y lee los labels desde
+// el Resolution (issue si hay linkeado, PR si no).
+func TestCloseFromStateRes(t *testing.T) {
+	cases := []struct {
+		name string
+		r    stateref.Resolution
+		want string
+	}{
+		{"empty", stateref.Resolution{}, ""},
+		{"executed only", stateref.Resolution{Labels: []string{labels.CheExecuted}}, labels.CheExecuted},
+		{"validated only", stateref.Resolution{Labels: []string{labels.CheValidated}}, labels.CheValidated},
+		{"both → validated wins", stateref.Resolution{Labels: []string{labels.CheExecuted, labels.CheValidated}}, labels.CheValidated},
+		{"noise labels don't interfere", stateref.Resolution{Labels: []string{"ct:plan", "priority:high"}}, ""},
+		{"validated from issue", stateref.Resolution{
+			Ref:             "122",
+			Labels:          []string{labels.CheValidated, "ct:plan"},
+			ResolvedToIssue: true,
+			IssueNumber:     122,
+		}, labels.CheValidated},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := closeFromStateRes(c.r); got != c.want {
+				t.Fatalf("closeFromStateRes(%+v) = %q, want %q", c.r, got, c.want)
+			}
+		})
+	}
+}
+
+// TestPullRequest_ResolveStateRef_ViaIssue: cuando el PR tiene issue
+// linkeado con che:*, la resolución devuelve el issue como ref y trae los
+// labels del issue. Usa el stub de stateref para no tocar gh.
+func TestPullRequest_ResolveStateRef_ViaIssue(t *testing.T) {
+	defer stateref.SetFetchIssueLabelsForTest(func(n int) ([]string, error) {
+		if n != 122 {
+			return nil, fmt.Errorf("unexpected n=%d", n)
+		}
+		return []string{"ct:plan", labels.CheExecuted}, nil
+	})()
+
+	pr := mkPR(140, withLabel(labels.ValidatedChangesRequested), withClosing(122))
+	r := pr.ResolveStateRef("140")
+	if !r.ResolvedToIssue {
+		t.Fatalf("expected ResolvedToIssue=true, got %+v", r)
+	}
+	if r.IssueNumber != 122 {
+		t.Fatalf("expected IssueNumber=122, got %d", r.IssueNumber)
+	}
+	if r.Ref != "122" {
+		t.Fatalf("expected Ref=122, got %q", r.Ref)
+	}
+	if !r.HasLabel(labels.CheExecuted) {
+		t.Fatalf("expected issue's che:executed to be in Labels: %v", r.Labels)
+	}
+	if r.HasLabel(labels.ValidatedChangesRequested) {
+		t.Fatalf("PR's validated:changes-requested shouldn't be on the issue-resolution")
+	}
+}
+
+// TestPullRequest_ResolveStateRef_Fallback: PR sin closing issues cae al
+// PR. Preserva compat con PRs ajenos.
+func TestPullRequest_ResolveStateRef_Fallback(t *testing.T) {
+	defer stateref.SetFetchIssueLabelsForTest(func(n int) ([]string, error) {
+		t.Fatalf("fetcher should not be called when no closing issues")
+		return nil, nil
+	})()
+
+	pr := mkPR(140, withLabel(labels.CheExecuted))
+	r := pr.ResolveStateRef("140")
+	if r.ResolvedToIssue {
+		t.Fatalf("expected fallback to PR, got %+v", r)
+	}
+	if r.Ref != "140" {
+		t.Fatalf("expected Ref=140 (PR), got %q", r.Ref)
+	}
+	if !r.HasLabel(labels.CheExecuted) {
+		t.Fatalf("expected PR's che:executed in Labels: %v", r.Labels)
 	}
 }
 

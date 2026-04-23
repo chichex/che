@@ -398,6 +398,47 @@ func TestPullRequest_HasLabel(t *testing.T) {
 	}
 }
 
+// TestPullRequest_ClosingIssueNumbers protege la proyección al slice de
+// ints, consumida por stateref.Resolve.
+func TestPullRequest_ClosingIssueNumbers(t *testing.T) {
+	var pr *PullRequest
+	if got := pr.ClosingIssueNumbers(); got != nil {
+		t.Errorf("nil pr should return nil, got %v", got)
+	}
+	pr = &PullRequest{}
+	if got := pr.ClosingIssueNumbers(); len(got) != 0 {
+		t.Errorf("empty pr should return empty, got %v", got)
+	}
+	pr.ClosingIssuesReferences = []struct {
+		Number int `json:"number"`
+	}{{Number: 122}, {Number: 0}, {Number: 5}}
+	got := pr.ClosingIssueNumbers()
+	want := []int{122, 0, 5}
+	if len(got) != len(want) {
+		t.Fatalf("len mismatch: got %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Errorf("index %d: got %d, want %d", i, got[i], want[i])
+		}
+	}
+}
+
+// TestPullRequest_PRLabelNames protege la proyección al slice de labels.
+func TestPullRequest_PRLabelNames(t *testing.T) {
+	pr := &PullRequest{}
+	pr.Labels = append(pr.Labels, struct {
+		Name string `json:"name"`
+	}{Name: labels.CheExecuted})
+	pr.Labels = append(pr.Labels, struct {
+		Name string `json:"name"`
+	}{Name: labels.ValidatedApprove})
+	got := pr.PRLabelNames()
+	if len(got) != 2 || got[0] != labels.CheExecuted || got[1] != labels.ValidatedApprove {
+		t.Fatalf("got %v", got)
+	}
+}
+
 func TestRenderSummaryComment_Table(t *testing.T) {
 	results := []validatorResult{
 		{

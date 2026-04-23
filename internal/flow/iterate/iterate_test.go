@@ -2,10 +2,12 @@ package iterate
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/chichex/che/internal/flow/stateref"
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
 	planpkg "github.com/chichex/che/internal/plan"
@@ -447,6 +449,92 @@ func TestFilterIterablePlanCandidates(t *testing.T) {
 func TestLabelsConstants(t *testing.T) {
 	if labels.PlanValidatedChangesRequested != "plan-validated:changes-requested" {
 		t.Errorf("unexpected label constant: %q", labels.PlanValidatedChangesRequested)
+	}
+}
+
+// TestRunPRGate_StateFromIssue simula el escenario real: PR #140 sin che:*
+// en sus labels, pero con issue #122 linkeado en che:executed (y ya con
+// validated:changes-requested sobre el PR, aplicado por un che:validate
+// previo). El gate de iterate.runPR debe resolver al issue, no caer al
+// PR, y ver che:executed ahí para el path correcto. Este test no ejecuta
+// runPR (requiere gh + claude + worktree) — valida la lógica de
+// resolución que el gate usa directamente.
+//
+// Es el caso que motivó el fix: antes de él, `che iterate 140` fallaba
+// con "no está en che:validated" porque leía del PR, que nunca había
+// tenido el label.
+func TestRunPRGate_StateFromIssue(t *testing.T) {
+	defer stateref.SetFetchIssueLabelsForTest(func(n int) ([]string, error) {
+		if n != 122 {
+			return nil, fmt.Errorf("unexpected n=%d", n)
+		}
+		// Escenario post-validate exitoso: issue en che:validated.
+		return []string{"ct:plan", "pricing-modes", labels.CheValidated}, nil
+	})()
+
+	pr := validate.PullRequest{
+		Number:     140,
+		State:      "OPEN",
+		HeadBranch: "feat/pricing",
+	}
+	pr.Labels = append(pr.Labels, struct {
+		Name string `json:"name"`
+	}{Name: labels.ValidatedChangesRequested})
+	pr.ClosingIssuesReferences = []struct {
+		Number int `json:"number"`
+	}{{Number: 122}}
+
+	r := pr.ResolveStateRef("140")
+
+	// El gate de runPR lee che:validated desde stateRes.HasLabel(...). Si
+	// la resolución resolvió al issue con che:validated, el gate pasa.
+	if !r.ResolvedToIssue {
+		t.Fatalf("expected resolution to go to issue, got %+v", r)
+	}
+	if r.IssueNumber != 122 {
+		t.Fatalf("expected IssueNumber=122, got %d", r.IssueNumber)
+	}
+	if !r.HasLabel(labels.CheValidated) {
+		t.Fatalf("gate should see che:validated on the issue: %v", r.Labels)
+	}
+	if r.Ref != "122" {
+		t.Fatalf("transitions should target issue ref '122', got %q", r.Ref)
+	}
+}
+
+// TestRunPRGate_StateFallbackToPR: cuando el PR no tiene issue linkeado
+// (ej. PR que el usuario metió a mano, no creado por che execute), el
+// gate cae al PR y lee los labels de ahí. Preserva compat.
+func TestRunPRGate_StateFallbackToPR(t *testing.T) {
+	defer stateref.SetFetchIssueLabelsForTest(func(n int) ([]string, error) {
+		t.Fatalf("fetcher should not be called when no closing issues")
+		return nil, nil
+	})()
+
+	pr := validate.PullRequest{
+		Number:     140,
+		State:      "OPEN",
+		HeadBranch: "feat/x",
+	}
+	// PR ajeno: usuario aplicó che:validated a mano.
+	pr.Labels = append(pr.Labels,
+		struct {
+			Name string `json:"name"`
+		}{Name: labels.CheValidated},
+		struct {
+			Name string `json:"name"`
+		}{Name: labels.ValidatedChangesRequested},
+	)
+
+	r := pr.ResolveStateRef("140")
+	if r.ResolvedToIssue {
+		t.Fatalf("expected fallback to PR, got %+v", r)
+	}
+	if r.Ref != "140" {
+		t.Fatalf("expected Ref=140, got %q", r.Ref)
+	}
+	if !r.HasLabel(labels.CheValidated) {
+		t.Fatalf("gate should see che:validated on the PR: %v", r.Labels)
 	}
 }
 

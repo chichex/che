@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/chichex/che/internal/flow/execute"
+	"github.com/chichex/che/internal/flow/stateref"
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
@@ -133,6 +134,39 @@ func (p *PullRequest) HasLabel(name string) bool {
 	return false
 }
 
+// ClosingIssueNumbers proyecta pr.ClosingIssuesReferences al slice de
+// números. Usado por stateref.Resolve.
+func (p *PullRequest) ClosingIssueNumbers() []int {
+	if p == nil {
+		return nil
+	}
+	out := make([]int, 0, len(p.ClosingIssuesReferences))
+	for _, r := range p.ClosingIssuesReferences {
+		out = append(out, r.Number)
+	}
+	return out
+}
+
+// PRLabelNames proyecta pr.Labels al slice de nombres. Fallback para
+// stateref.Resolve cuando el PR no tiene issue linkeado.
+func (p *PullRequest) PRLabelNames() []string {
+	if p == nil {
+		return nil
+	}
+	out := make([]string, 0, len(p.Labels))
+	for _, l := range p.Labels {
+		out = append(out, l.Name)
+	}
+	return out
+}
+
+// ResolveStateRef devuelve el ref donde viven los labels che:* para este PR.
+// Preferencia: primer closing issue con che:* → issueRef; fallback: el PR
+// mismo (compat con PRs ajenos).
+func (p *PullRequest) ResolveStateRef(prRef string) stateref.Resolution {
+	return stateref.Resolve(prRef, p.PRLabelNames(), p.ClosingIssueNumbers())
+}
+
 // Check es el subset de un item de `gh pr checks --json ...` que usamos.
 // Los estados posibles incluyen: SUCCESS, FAILURE, PENDING, IN_PROGRESS,
 // SKIPPED, NEUTRAL, CANCELLED, TIMED_OUT, ACTION_REQUIRED.
@@ -229,11 +263,27 @@ func BlockingVerdict(pr *PullRequest) string {
 // del gate (che:executed o che:validated). Devuelve "" si el PR no tiene
 // ninguno — el gate aborta. Prefiere che:validated cuando ambos están
 // presentes (path normal post-validate).
+//
+// Compat shim: sigue leyendo del PR. Nuevos call-sites usan
+// closeFromStateRes que lee del issue cuando corresponde.
 func closeFromState(p *PullRequest) string {
 	if p.HasLabel(labels.CheValidated) {
 		return labels.CheValidated
 	}
 	if p.HasLabel(labels.CheExecuted) {
+		return labels.CheExecuted
+	}
+	return ""
+}
+
+// closeFromStateRes es la versión state-ref-aware: decide el from-state
+// leyendo los labels desde el Resolution (issue si hay linkeado, PR si no).
+// Misma preferencia: che:validated gana sobre che:executed.
+func closeFromStateRes(r stateref.Resolution) string {
+	if r.HasLabel(labels.CheValidated) {
+		return labels.CheValidated
+	}
+	if r.HasLabel(labels.CheExecuted) {
 		return labels.CheExecuted
 	}
 	return ""
@@ -374,12 +424,23 @@ func Run(prRef string, opts Opts) ExitCode {
 		return ExitSemantic
 	}
 
+	// Resolver dónde viven los labels che:* de máquina de estados. Los
+	// che:* para un PR creado por `che execute` viven en el issue linkeado
+	// (closingIssuesReferences); si el PR no tiene issue linkeado (PR
+	// ajeno) caemos al PR.
+	stateRes := pr.ResolveStateRef(prRef)
+	stateRef := stateRes.Ref
+
 	// Gate de máquina de estados: aceptamos che:executed o che:validated.
 	// `from` se captura para que el lock + el rollback usen el mismo
 	// origen (executed por path normal, validated post-validate).
-	prFrom := closeFromState(pr)
+	prFrom := closeFromStateRes(stateRes)
 	if prFrom == "" {
-		log.Error(fmt.Sprintf("PR #%d no está en che:executed ni che:validated — corré `che execute` o `che validate` antes", pr.Number))
+		if stateRes.ResolvedToIssue {
+			log.Error(fmt.Sprintf("issue #%d (linkeado al PR #%d) no está en che:executed ni che:validated — corré `che execute` o `che validate` antes", stateRes.IssueNumber, pr.Number))
+		} else {
+			log.Error(fmt.Sprintf("PR #%d no está en che:executed ni che:validated — corré `che execute` o `che validate` antes", pr.Number))
+		}
 		return ExitSemantic
 	}
 
@@ -395,9 +456,14 @@ func Run(prRef string, opts Opts) ExitCode {
 	}()
 
 	// Transición <prFrom> → che:closing. Rollback en defer LIFO si
-	// stateClosed queda en false.
-	log.Step("transicionando a che:closing", output.F{PR: pr.Number})
-	if err := labels.Apply(prRef, prFrom, labels.CheClosing); err != nil {
+	// stateClosed queda en false. Target: issue si hay linkeado con che:*,
+	// PR si no.
+	if stateRes.ResolvedToIssue {
+		log.Step("transicionando issue a che:closing", output.F{Issue: stateRes.IssueNumber})
+	} else {
+		log.Step("transicionando a che:closing", output.F{PR: pr.Number})
+	}
+	if err := labels.Apply(stateRef, prFrom, labels.CheClosing); err != nil {
 		log.Error("no pude transicionar a che:closing", output.F{Cause: err})
 		return ExitRetry
 	}
@@ -406,7 +472,7 @@ func Run(prRef string, opts Opts) ExitCode {
 		if stateClosed {
 			return
 		}
-		if err := labels.Apply(prRef, labels.CheClosing, prFrom); err != nil {
+		if err := labels.Apply(stateRef, labels.CheClosing, prFrom); err != nil {
 			log.Warn(fmt.Sprintf("rollback che:closing → %s fallo: %v — revisá labels a mano", prFrom, err))
 		}
 	}()
@@ -560,11 +626,16 @@ func Run(prRef string, opts Opts) ExitCode {
 	fmt.Fprintln(stdout, branchOutcomeMessage(pr.HeadBranch, keepBranch, preRemoteKnown, preRemoteMissing, remoteDeleteFailed))
 
 	// Cierre de la transición de máquina de estados: che:closing → che:closed.
-	// El PR queda en estado terminal `che:closed`, consistente con el merge
-	// remoto. Best-effort: si falla, warneamos pero el merge ya ocurrió.
-	log.Step("transicionando PR a che:closed", output.F{PR: pr.Number})
-	if err := labels.Apply(prRef, labels.CheClosing, labels.CheClosed); err != nil {
-		log.Warn(fmt.Sprintf("no pude transicionar PR a che:closed: %v — revisá labels a mano", err))
+	// El target queda en estado terminal `che:closed`, consistente con el
+	// merge remoto. Best-effort: si falla, warneamos pero el merge ya
+	// ocurrió. Target: issue si hay linkeado con che:*, PR si no.
+	if stateRes.ResolvedToIssue {
+		log.Step("transicionando issue a che:closed", output.F{Issue: stateRes.IssueNumber})
+	} else {
+		log.Step("transicionando PR a che:closed", output.F{PR: pr.Number})
+	}
+	if err := labels.Apply(stateRef, labels.CheClosing, labels.CheClosed); err != nil {
+		log.Warn(fmt.Sprintf("no pude transicionar a che:closed: %v — revisá labels a mano", err))
 	} else {
 		stateClosed = true
 	}
@@ -573,7 +644,13 @@ func Run(prRef string, opts Opts) ExitCode {
 	// en el body del PR quedan OPEN un tiempo hasta que github procesa el
 	// auto-close; hacemos un close explícito para no depender de eso y para
 	// aplicar la transición de labels atómicamente con el cierre.
-	closedIssues := closeAssociatedIssues(pr, log)
+	//
+	// Si la máquina ya corrió sobre uno de los closing issues (stateRes.
+	// ResolvedToIssue), skipeamos la transición duplicada en ese issue:
+	// ya lo dejamos en che:closed arriba. La llamada `gh issue close`
+	// seguimos haciéndola para cerrar el issue (pasar a CLOSED de GitHub,
+	// no confundir con che:closed).
+	closedIssues := closeAssociatedIssues(pr, stateRes, log)
 
 	log.Success("merged PR", output.F{PR: pr.Number, URL: pr.URL})
 	fmt.Fprintf(stdout, "Closed PR %s\n", pr.URL)
@@ -623,7 +700,12 @@ func firstClosingIssue(pr *PullRequest) int {
 // effort: si los labels no están como esperamos, logueamos y seguimos.
 // Devuelve la lista de números de issues que se cerraron efectivamente
 // (para reporte en stdout).
-func closeAssociatedIssues(pr *PullRequest, log *output.Logger) []int {
+//
+// Si stateRes.ResolvedToIssue es true, skipeamos la transición de labels
+// del issue resuelto: ya la corrió el Run principal antes de llamar acá.
+// Igual corremos el `gh issue close` para ese issue (cierra el issue
+// efectivamente — no confundir `CLOSED en GitHub` con che:closed).
+func closeAssociatedIssues(pr *PullRequest, stateRes stateref.Resolution, log *output.Logger) []int {
 	var closed []int
 	for _, ref := range pr.ClosingIssuesReferences {
 		if ref.Number == 0 {
@@ -640,6 +722,12 @@ func closeAssociatedIssues(pr *PullRequest, log *output.Logger) []int {
 		} else {
 			closed = append(closed, ref.Number)
 			log.Success("issue cerrado", output.F{Issue: ref.Number, Labels: []string{labels.CheClosed}})
+		}
+		// Si el Run ya aplicó la transición sobre este issue, no re-corremos
+		// — quedó en che:closed; aplicar "che:executed → che:closing" acá
+		// fallaría porque el label origen ya no está.
+		if stateRes.ResolvedToIssue && stateRes.IssueNumber == ref.Number {
+			continue
 		}
 		// Transición de labels best-effort. Probamos primero che:executed y
 		// si falla che:validated. Si el issue no tiene ninguno (ej.

@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/chichex/che/internal/agent"
+	"github.com/chichex/che/internal/flow/stateref"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
 	planpkg "github.com/chichex/che/internal/plan"
@@ -143,6 +144,41 @@ func (p *PullRequest) HasLabel(name string) bool {
 		}
 	}
 	return false
+}
+
+// ClosingIssueNumbers proyecta pr.ClosingIssuesReferences al slice de
+// números en el orden que vino de la API. Vacío si el PR no cierra issues.
+// Usado por stateref.Resolve para decidir dónde viven los labels che:*.
+func (p *PullRequest) ClosingIssueNumbers() []int {
+	if p == nil {
+		return nil
+	}
+	out := make([]int, 0, len(p.ClosingIssuesReferences))
+	for _, r := range p.ClosingIssuesReferences {
+		out = append(out, r.Number)
+	}
+	return out
+}
+
+// PRLabelNames proyecta pr.Labels al slice de nombres. Fallback para
+// stateref.Resolve cuando el PR no tiene issue linkeado.
+func (p *PullRequest) PRLabelNames() []string {
+	if p == nil {
+		return nil
+	}
+	out := make([]string, 0, len(p.Labels))
+	for _, l := range p.Labels {
+		out = append(out, l.Name)
+	}
+	return out
+}
+
+// ResolveStateRef devuelve el ref donde viven los labels che:* de estado
+// para este PR. Preferencia: primer closing issue con che:* → issueRef;
+// fallback: el PR mismo (compat con PRs ajenos). Thin wrapper sobre
+// stateref.Resolve para el caller típico que ya tiene el *PullRequest.
+func (p *PullRequest) ResolveStateRef(prRef string) stateref.Resolution {
+	return stateref.Resolve(prRef, p.PRLabelNames(), p.ClosingIssueNumbers())
 }
 
 // Candidate es la vista mínima para la TUI al listar PRs abiertos.
@@ -348,8 +384,15 @@ var ErrInvalidRef = errInvalidRef
 //
 // Gates: PR open, NO che:locked. La transición de máquina de estados
 // (che:executed → che:validating → che:validated, con rollback) corre
-// sobre el PR — los labels che:* viven en el mismo recurso (issue/PR
-// son uno desde la API REST de GitHub: /issues/:n acepta ambos).
+// sobre el issue linkeado al PR (via closingIssuesReferences). Execute
+// escribe los che:* sobre el issue, no sobre el PR — si leyéramos del PR
+// nunca veríamos `che:executed` y la transición se saltearía silenciosa.
+// Si el PR no tiene issue linkeado (PR ajeno, no creado por `che execute`)
+// caemos al PR, preservando compat.
+//
+// Los labels validated:* (verdict) y che:locked (lock del recurso) se
+// siguen aplicando sobre el PR: el verdict es relevante al diff, el lock
+// al recurso tocado.
 func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCode {
 	log.Info("obteniendo PR desde GitHub")
 	pr, err := FetchPR(prRef)
@@ -377,15 +420,25 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		}
 	}()
 
+	// Resolver dónde viven los labels che:* de máquina de estados. Si el
+	// PR tiene issue linkeado con algún che:*, las transiciones van al
+	// issue; si no, al PR mismo (compat).
+	stateRes := pr.ResolveStateRef(prRef)
+	stateRef := stateRes.Ref
+
 	// Transición de máquina de estados: che:executed → che:validating.
-	// Si el PR no tiene che:executed (humano corrió validate sobre un PR
-	// no creado por execute), saltamos la transición — solo aplicamos los
-	// labels validated:* al final. Esto preserva compat con PRs ajenos.
-	hasExecutedState := pr.HasLabel(labels.CheExecuted)
+	// Si el target no tiene che:executed (humano corrió validate sobre un
+	// PR no creado por execute, o execute no terminó OK) saltamos la
+	// transición — solo aplicamos los labels validated:* al final.
+	hasExecutedState := stateRes.HasLabel(labels.CheExecuted)
 	var stateValidated bool
 	if hasExecutedState {
-		log.Step("transicionando a che:validating", output.F{PR: pr.Number})
-		if err := labels.Apply(prRef, labels.CheExecuted, labels.CheValidating); err != nil {
+		if stateRes.ResolvedToIssue {
+			log.Step("transicionando issue a che:validating", output.F{Issue: stateRes.IssueNumber})
+		} else {
+			log.Step("transicionando a che:validating", output.F{PR: pr.Number})
+		}
+		if err := labels.Apply(stateRef, labels.CheExecuted, labels.CheValidating); err != nil {
 			log.Error("no pude transicionar a che:validating", output.F{Cause: err})
 			return ExitRetry
 		}
@@ -393,7 +446,7 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 			if stateValidated {
 				return
 			}
-			if err := labels.Apply(prRef, labels.CheValidating, labels.CheExecuted); err != nil {
+			if err := labels.Apply(stateRef, labels.CheValidating, labels.CheExecuted); err != nil {
 				log.Warn(fmt.Sprintf("rollback che:validating → che:executed fallo: %v — revisá labels a mano", err))
 			}
 		}()
@@ -458,10 +511,16 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 	}
 
 	// Cierre de la transición de máquina de estados: che:validating →
-	// che:validated. Solo aplica si arrancamos con che:executed.
+	// che:validated. Solo aplica si arrancamos con che:executed. El
+	// target es el mismo que usamos para abrir la transición (issue si
+	// había closing issue con che:*, PR si no).
 	if hasExecutedState {
-		log.Step("transicionando a che:validated", output.F{PR: pr.Number})
-		if err := labels.Apply(prRef, labels.CheValidating, labels.CheValidated); err != nil {
+		if stateRes.ResolvedToIssue {
+			log.Step("transicionando issue a che:validated", output.F{Issue: stateRes.IssueNumber})
+		} else {
+			log.Step("transicionando a che:validated", output.F{PR: pr.Number})
+		}
+		if err := labels.Apply(stateRef, labels.CheValidating, labels.CheValidated); err != nil {
 			log.Warn(fmt.Sprintf("no pude transicionar a che:validated: %v — revisá labels a mano", err))
 		} else {
 			stateValidated = true
