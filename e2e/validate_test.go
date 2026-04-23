@@ -279,7 +279,7 @@ func TestValidate_Plan_NoStatusPlan_Exit3(t *testing.T) {
 	if r.ExitCode != 3 {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
-	harness.AssertContains(t, r.Stderr, "status:plan")
+	harness.AssertContains(t, r.Stderr, "che:plan")
 	harness.AssertContains(t, r.Stderr, "che explore")
 	env.Invocations().AssertNotCalled(t, "claude")
 }
@@ -326,6 +326,12 @@ func scriptValidatePrechecks(env *harness.Env) {
 	env.ExpectGh(`^auth status$`).Consumable().
 		RespondStdout("Logged in as acme\n", 0)
 	scriptCheLockDefault(env)
+	// Validate ahora hace transiciones de máquina de estados (plan→
+	// validating→validated o executed→validating→validated). labels.Ensure
+	// llama gh label create por cada label antes de aplicarlos.
+	env.ExpectGh(`^label create che:`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^issue edit \d+ --remove-label che:`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^pr edit \d+ --remove-label che:`).RespondStdout("ok\n", 0)
 }
 
 // scriptDetectTargetPR scriptea la respuesta de `gh api repos/.../issues/<n>`

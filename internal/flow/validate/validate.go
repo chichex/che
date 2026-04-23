@@ -147,12 +147,12 @@ func (p *PullRequest) HasLabel(name string) bool {
 
 // Candidate es la vista mínima para la TUI al listar PRs abiertos.
 type Candidate struct {
-	Number         int
-	Title          string
-	URL            string
-	IsDraft        bool
-	Author         string
-	RelatedIssues  []int // issues referenciados via "Closes #N" / "Fixes #N" en el body del PR
+	Number        int
+	Title         string
+	URL           string
+	IsDraft       bool
+	Author        string
+	RelatedIssues []int // issues referenciados via "Closes #N" / "Fixes #N" en el body del PR
 }
 
 // PRComment es un comment del PR; el body puede tener header de claude-cli al
@@ -345,6 +345,11 @@ var ErrInvalidRef = errInvalidRef
 // runPR es el flow histórico: valida el diff de un PR abierto, postea
 // comments en el PR y aplica validated:*. El preflight (auth + remote)
 // ya corrió en Run.
+//
+// Gates: PR open, NO che:locked. La transición de máquina de estados
+// (che:executed → che:validating → che:validated, con rollback) corre
+// sobre el PR — los labels che:* viven en el mismo recurso (issue/PR
+// son uno desde la API REST de GitHub: /issues/:n acepta ambos).
 func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCode {
 	log.Info("obteniendo PR desde GitHub")
 	pr, err := FetchPR(prRef)
@@ -371,6 +376,28 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 			log.Warn(fmt.Sprintf("no se pudo quitar che:locked de %s: %v — corré `che unlock %s`", prRef, err, prRef))
 		}
 	}()
+
+	// Transición de máquina de estados: che:executed → che:validating.
+	// Si el PR no tiene che:executed (humano corrió validate sobre un PR
+	// no creado por execute), saltamos la transición — solo aplicamos los
+	// labels validated:* al final. Esto preserva compat con PRs ajenos.
+	hasExecutedState := pr.HasLabel(labels.CheExecuted)
+	var stateValidated bool
+	if hasExecutedState {
+		log.Step("transicionando a che:validating", output.F{PR: pr.Number})
+		if err := labels.Apply(prRef, labels.CheExecuted, labels.CheValidating); err != nil {
+			log.Error("no pude transicionar a che:validating", output.F{Cause: err})
+			return ExitRetry
+		}
+		defer func() {
+			if stateValidated {
+				return
+			}
+			if err := labels.Apply(prRef, labels.CheValidating, labels.CheExecuted); err != nil {
+				log.Warn(fmt.Sprintf("rollback che:validating → che:executed fallo: %v — revisá labels a mano", err))
+			}
+		}()
+	}
 
 	log.Step("descargando diff del PR", output.F{PR: pr.Number})
 	diff, err := FetchDiff(prRef)
@@ -430,21 +457,35 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		}
 	}
 
+	// Cierre de la transición de máquina de estados: che:validating →
+	// che:validated. Solo aplica si arrancamos con che:executed.
+	if hasExecutedState {
+		log.Step("transicionando a che:validated", output.F{PR: pr.Number})
+		if err := labels.Apply(prRef, labels.CheValidating, labels.CheValidated); err != nil {
+			log.Warn(fmt.Sprintf("no pude transicionar a che:validated: %v — revisá labels a mano", err))
+		} else {
+			stateValidated = true
+		}
+	}
+
 	fmt.Fprintln(stdout, renderReport(results))
 	fmt.Fprintf(stdout, "che ya dejó los comments en el PR %s\n", pr.URL)
 	return ExitOK
 }
 
 // runPlan es el flow nuevo: valida el plan consolidado del body de un issue
-// en status:plan, postea comments en el issue y aplica plan-validated:*.
-// El preflight (auth + remote) ya corrió en Run.
+// en che:plan, postea comments en el issue y aplica plan-validated:*. El
+// preflight (auth + remote) ya corrió en Run.
 //
 // Gates:
 //   - issue abierto
-//   - issue tiene status:plan (corré `che explore` si no)
+//   - issue tiene che:plan (corré `che explore` si no)
 //   - body del issue tiene un plan consolidado parseable (no basta
 //     HasConsolidatedHeader: Parse puede devolver ambigüedad irrecuperable
 //     o sin sub-secciones; acá rechazamos con mensaje accionable).
+//
+// Transición: che:plan → che:validating → che:validated (con rollback si
+// algo falla post-lock).
 func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCode {
 	log.Info("obteniendo issue desde GitHub")
 	issue, err := FetchIssue(issueRef)
@@ -456,8 +497,8 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		log.Error(fmt.Sprintf("issue #%d is not OPEN (state=%s)", issue.Number, issue.State))
 		return ExitSemantic
 	}
-	if !issue.HasLabel(labels.StatusPlan) {
-		log.Error(fmt.Sprintf("issue #%d no está en status:plan — corré `che explore %d` primero", issue.Number, issue.Number))
+	if !issue.HasLabel(labels.ChePlan) {
+		log.Error(fmt.Sprintf("issue #%d no está en che:plan — corré `che explore %d` primero", issue.Number, issue.Number))
 		return ExitSemantic
 	}
 	if issue.HasLabel(labels.CheLocked) {
@@ -473,6 +514,24 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 	defer func() {
 		if err := labels.Unlock(issueRef); err != nil {
 			log.Warn(fmt.Sprintf("no se pudo quitar che:locked de %s: %v — corré `che unlock %s`", issueRef, err, issueRef))
+		}
+	}()
+
+	// Transición: che:plan → che:validating. El defer revierte si succeded
+	// queda en false al final (rollback a che:plan). LIFO: el unlock corre
+	// después del rollback, garantizando que el lock cubre toda la ventana.
+	log.Step("transicionando a che:validating", output.F{Issue: issue.Number})
+	if err := labels.Apply(issueRef, labels.ChePlan, labels.CheValidating); err != nil {
+		log.Error("no pude transicionar a che:validating", output.F{Cause: err})
+		return ExitRetry
+	}
+	var stateValidated bool
+	defer func() {
+		if stateValidated {
+			return
+		}
+		if err := labels.Apply(issueRef, labels.CheValidating, labels.ChePlan); err != nil {
+			log.Warn(fmt.Sprintf("rollback che:validating → che:plan fallo: %v — revisá labels a mano", err))
 		}
 	}()
 
@@ -537,6 +596,14 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 			log.Success("verdict consolidado",
 				output.F{Issue: issue.Number, Verdict: verdict, Labels: []string{target}})
 		}
+	}
+
+	// Cierre de la transición: che:validating → che:validated.
+	log.Step("transicionando a che:validated", output.F{Issue: issue.Number})
+	if err := labels.Apply(issueRef, labels.CheValidating, labels.CheValidated); err != nil {
+		log.Warn(fmt.Sprintf("no pude transicionar a che:validated: %v — revisá labels a mano", err))
+	} else {
+		stateValidated = true
 	}
 
 	fmt.Fprintln(stdout, renderReport(results))
@@ -1206,11 +1273,11 @@ func postPRComment(prRef, body string) error {
 // plan. Mismo shape minimalista que usa explore; no lo importamos de ahí
 // para no crear dependencia cruzada entre flows.
 type Issue struct {
-	Number int         `json:"number"`
-	Title  string      `json:"title"`
-	Body   string      `json:"body"`
-	URL    string      `json:"url"`
-	State  string      `json:"state"`
+	Number int          `json:"number"`
+	Title  string       `json:"title"`
+	Body   string       `json:"body"`
+	URL    string       `json:"url"`
+	State  string       `json:"state"`
 	Labels []IssueLabel `json:"labels"`
 }
 
@@ -1483,7 +1550,7 @@ type PlanCandidate struct {
 	URL    string
 }
 
-// ListPlanCandidates devuelve los issues abiertos con status:plan que NO
+// ListPlanCandidates devuelve los issues abiertos con che:plan que NO
 // tienen plan-validated:approve — candidatos a validar como plan. Limita a
 // 50 (la TUI se vuelve inmanejable con más, igual que ListOpenPRs).
 //
@@ -1491,7 +1558,7 @@ type PlanCandidate struct {
 // :needs-human visibles: el humano puede re-validar tras editar el plan.
 func ListPlanCandidates() ([]PlanCandidate, error) {
 	cmd := exec.Command("gh", "issue", "list",
-		"--label", labels.StatusPlan,
+		"--label", labels.ChePlan,
 		"--state", "open",
 		"--json", "number,title,url,labels",
 		"--limit", "50")

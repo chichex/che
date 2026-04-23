@@ -11,37 +11,7 @@ func TestTransitionFor_Valid(t *testing.T) {
 		wantAdd  []string
 		wantRem  []string
 	}{
-		{
-			from:    StatusIdea,
-			to:      StatusPlan,
-			wantAdd: []string{StatusPlan},
-			wantRem: []string{StatusIdea},
-		},
-		{
-			from:    StatusPlan,
-			to:      StatusExecuting,
-			wantAdd: []string{StatusExecuting},
-			wantRem: []string{StatusPlan},
-		},
-		{
-			from:    StatusExecuting,
-			to:      StatusExecuted,
-			wantAdd: []string{StatusExecuted},
-			wantRem: []string{StatusExecuting},
-		},
-		{
-			from:    StatusExecuting,
-			to:      StatusPlan,
-			wantAdd: []string{StatusPlan},
-			wantRem: []string{StatusExecuting},
-		},
-		{
-			from:    StatusExecuted,
-			to:      StatusClosed,
-			wantAdd: []string{StatusClosed},
-			wantRem: []string{StatusExecuted},
-		},
-		// ─── Máquina nueva (prefix `che:*`), 21 transiciones ────────────────
+		// ─── Máquina (prefix `che:*`), 21 transiciones ──────────────────────
 		{
 			from:    CheIdea,
 			to:      ChePlanning,
@@ -65,6 +35,12 @@ func TestTransitionFor_Valid(t *testing.T) {
 			to:      CheValidated,
 			wantAdd: []string{CheValidated},
 			wantRem: []string{ChePlanning},
+		},
+		{
+			from:    CheValidated,
+			to:      ChePlanning,
+			wantAdd: []string{ChePlanning},
+			wantRem: []string{CheValidated},
 		},
 		{
 			from:    CheIdea,
@@ -189,20 +165,14 @@ func TestTransitionFor_Invalid(t *testing.T) {
 	cases := []struct {
 		from, to string
 	}{
-		{StatusIdea, StatusExecuting},         // no se puede saltar explore
-		{StatusExecuted, StatusPlan},          // no hay vuelta atrás desde executed
-		{"", StatusExecuting},                 // from vacío
-		{StatusPlan, ""},                      // to vacío
-		{StatusPlan, "status:ready-to-close"}, // estado no soportado todavía
-		{StatusPlan, StatusClosed},            // plan no va directo a closed (execute primero)
-		{StatusExecuting, StatusClosed},       // executing no va directo a closed (terminar exec primero)
-
-		// ─── Casos inválidos en la máquina nueva (`che:*`) ───────────────
-		{CheIdea, CheValidated},    // no se puede saltar planning/plan/executing/executed
-		{CheClosed, CheIdea},       // closed es terminal — no hay transición de salida
-		{CheClosed, ChePlan},       // closed es terminal — no hay transición de salida
-		{CheValidated, CheClosed},  // hay que pasar por closing primero
-		{CheExecuting, CheClosing}, // no se puede cerrar un execute en curso
+		{"", CheExecuting},              // from vacío
+		{ChePlan, ""},                   // to vacío
+		{ChePlan, "che:ready-to-close"}, // estado no soportado
+		{CheIdea, CheValidated},         // no se puede saltar planning/plan/executing/executed
+		{CheClosed, CheIdea},            // closed es terminal — no hay transición de salida
+		{CheClosed, ChePlan},            // closed es terminal — no hay transición de salida
+		{CheValidated, CheClosed},       // hay que pasar por closing primero
+		{CheExecuting, CheClosing},      // no se puede cerrar un execute en curso
 	}
 	for _, c := range cases {
 		t.Run(c.from+"→"+c.to, func(t *testing.T) {

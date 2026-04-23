@@ -6,7 +6,7 @@
   "state": "CLOSED",
   "labels": [
     {"name": "ct:plan"},
-    {"name": "status:idea"},
+    {"name": "che:idea"},
     {"name": "type:feature"},
     {"name": "size:m"}
   ]

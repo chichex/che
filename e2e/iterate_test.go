@@ -241,8 +241,12 @@ func TestIterate_Plan_NoChanges_ExitRetry(t *testing.T) {
 	if comments := inv.FindCalls("gh", "issue", "comment", "42", "--body-file"); len(comments) != 0 {
 		t.Fatalf("expected 0 issue comment on no-change, got %d", len(comments))
 	}
-	if rm := inv.FindCalls("gh", "issue", "edit", "42", "--remove-label"); len(rm) != 0 {
-		t.Fatalf("expected 0 remove-label on no-change, got %d", len(rm))
+	// El flow nuevo hace lock (validated→planning) + rollback (planning→
+	// validated) cuando opus no produce cambios. Lo que NO debe pasar es
+	// remover el label plan-validated:changes-requested.
+	rm := inv.FindCalls("gh", "issue", "edit", "42", "--remove-label", "plan-validated:changes-requested")
+	if len(rm) != 0 {
+		t.Fatalf("expected 0 remove-label plan-validated:changes-requested on no-change, got %d", len(rm))
 	}
 }
 
@@ -272,6 +276,15 @@ func scriptIteratePrechecks(env *harness.Env) {
 	env.ExpectGh(`^auth status$`).Consumable().
 		RespondStdout("Logged in as acme\n", 0)
 	scriptCheLockDefault(env)
+	// Iterate ahora hace transiciones de máquina de estados (validated→
+	// planning ó validated→executing), que llaman labels.Ensure por cada
+	// label antes de aplicarlos. Catch-all para no listar cada label.
+	env.ExpectGh(`^label create che:`).RespondStdout("ok\n", 0)
+	// Catch-all para los edits de transición de estado. Los tests que
+	// asertan args específicos pueden registrar matchers más específicos
+	// antes de llamar al helper.
+	env.ExpectGh(`^issue edit \d+ --remove-label che:`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^pr edit \d+ --remove-label che:`).RespondStdout("ok\n", 0)
 }
 
 // scriptIterateDetectTargetPR scriptea la respuesta del `gh api

@@ -1,12 +1,12 @@
 {
   "number": 42,
   "title": "Implementar comando che execute",
-  "body": "## Plan consolidado (post-exploración)\n\n**Resumen:** Agregar comando che execute.\n\n**Goal:** Ejecutar un issue end-to-end.\n\n### Criterios de aceptación\n- [ ] che execute registrado como subcomando cobra\n- [ ] La TUI lista solo issues con ct:plan + status:plan\n\n### Approach\nConstruir execute como copia adaptada de explore.\n\n### Pasos\n1. Crear internal/flow/execute\n2. Wirear cmd/execute.go\n\n### Fuera de alcance\n- Ciclo iter con scope-lock\n\n---\n\n## Idea original\n\nLorem\n",
+  "body": "## Plan consolidado (post-exploración)\n\n**Resumen:** Agregar comando che execute.\n\n**Goal:** Ejecutar un issue end-to-end.\n\n### Criterios de aceptación\n- [ ] che execute registrado como subcomando cobra\n- [ ] La TUI lista solo issues con ct:plan + che:plan\n\n### Approach\nConstruir execute como copia adaptada de explore.\n\n### Pasos\n1. Crear internal/flow/execute\n2. Wirear cmd/execute.go\n\n### Fuera de alcance\n- Ciclo iter con scope-lock\n\n---\n\n## Idea original\n\nLorem\n",
   "url": "https://github.com/acme/demo/issues/42",
   "state": "OPEN",
   "labels": [
     {"name": "ct:plan"},
-    {"name": "status:plan"},
+    {"name": "che:plan"},
     {"name": "type:feature"},
     {"name": "size:l"}
   ]

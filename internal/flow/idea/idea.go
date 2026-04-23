@@ -154,7 +154,7 @@ func Run(text string, opts Opts) ExitCode {
 			Labels: []string{
 				"type:" + item.Type,
 				"size:" + strings.ToLower(item.Size),
-				labels.StatusIdea,
+				labels.CheIdea,
 				labels.CtPlan,
 			},
 		})
@@ -322,7 +322,7 @@ func validate(r *Response) error {
 	return nil
 }
 
-// ensureLabels garantiza que los labels type:*, size:* y status:idea que se
+// ensureLabels garantiza que los labels type:*, size:* y che:idea que se
 // van a aplicar existan en el repo. Delega en labels.Ensure (idempotente).
 func ensureLabels(items []Item, log *output.Logger) error {
 	seen := map[string]bool{}
@@ -331,7 +331,7 @@ func ensureLabels(items []Item, log *output.Logger) error {
 		for _, l := range []string{
 			"type:" + it.Type,
 			"size:" + strings.ToLower(it.Size),
-			labels.StatusIdea,
+			labels.CheIdea,
 			labels.CtPlan,
 		} {
 			if !seen[l] {
@@ -368,7 +368,7 @@ func createIssue(item Item) (string, error) {
 		"--body-file", bodyFile,
 		"--label", "type:" + item.Type,
 		"--label", "size:" + strings.ToLower(item.Size),
-		"--label", labels.StatusIdea,
+		"--label", labels.CheIdea,
 		"--label", labels.CtPlan,
 	}
 	cmd := exec.Command("gh", args...)

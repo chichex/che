@@ -166,7 +166,8 @@ func TestNormalizeKind_UnknownKindTreatedAsEmpty(t *testing.T) {
 	}
 }
 
-// TestGateBasic cubre las 3 precondiciones: OPEN, ct:plan, NO status:plan.
+// TestGateBasic cubre las precondiciones: OPEN, ct:plan, NO che:plan/...
+// y subsiguientes (ya avanzó en el pipeline).
 func TestGateBasic(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -176,7 +177,7 @@ func TestGateBasic(t *testing.T) {
 		{
 			name: "ok",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "status:idea"},
+				{Name: "ct:plan"}, {Name: "che:idea"},
 			}},
 			wantErr: "",
 		},
@@ -187,15 +188,15 @@ func TestGateBasic(t *testing.T) {
 		},
 		{
 			name:    "missing ct:plan",
-			issue:   Issue{Number: 1, State: "OPEN", Labels: []Label{{Name: "status:idea"}}},
+			issue:   Issue{Number: 1, State: "OPEN", Labels: []Label{{Name: "che:idea"}}},
 			wantErr: "ct:plan",
 		},
 		{
 			name: "already planned",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "status:plan"},
+				{Name: "ct:plan"}, {Name: "che:plan"},
 			}},
-			wantErr: "already explored",
+			wantErr: "ya avanzó en el pipeline",
 		},
 	}
 	for _, c := range cases {
@@ -281,14 +282,14 @@ func minimalResponseJSON() string {
 // explore va a reclassificar antes de explorar. che:locked excluye siempre.
 func TestFilterCandidates(t *testing.T) {
 	in := []Issue{
-		{Number: 1, Title: "idea clasica", Labels: []Label{{Name: "ct:plan"}, {Name: "status:idea"}}},
-		{Number: 2, Title: "ya explorada", Labels: []Label{{Name: "ct:plan"}, {Name: "status:plan"}}},
-		{Number: 3, Title: "ejecutandose", Labels: []Label{{Name: "ct:plan"}, {Name: "status:executing"}}},
-		{Number: 4, Title: "ejecutada", Labels: []Label{{Name: "ct:plan"}, {Name: "status:executed"}}},
-		{Number: 5, Title: "locked con ct:plan", Labels: []Label{{Name: "ct:plan"}, {Name: "status:idea"}, {Name: "che:locked"}}},
+		{Number: 1, Title: "idea clasica", Labels: []Label{{Name: "ct:plan"}, {Name: "che:idea"}}},
+		{Number: 2, Title: "ya explorada", Labels: []Label{{Name: "ct:plan"}, {Name: "che:plan"}}},
+		{Number: 3, Title: "ejecutandose", Labels: []Label{{Name: "ct:plan"}, {Name: "che:executing"}}},
+		{Number: 4, Title: "ejecutada", Labels: []Label{{Name: "ct:plan"}, {Name: "che:executed"}}},
+		{Number: 5, Title: "locked con ct:plan", Labels: []Label{{Name: "ct:plan"}, {Name: "che:idea"}, {Name: "che:locked"}}},
 		{Number: 6, Title: "raw sin labels", Labels: nil},
 		{Number: 7, Title: "raw con type y size", Labels: []Label{{Name: "type:feature"}, {Name: "size:m"}}},
-		{Number: 8, Title: "raw con status preexistente", Labels: []Label{{Name: "status:plan"}}},
+		{Number: 8, Title: "raw con che preexistente", Labels: []Label{{Name: "che:plan"}}},
 		{Number: 9, Title: "raw locked", Labels: []Label{{Name: "che:locked"}}},
 	}
 	got := filterCandidates(in)
@@ -299,7 +300,7 @@ func TestFilterCandidates(t *testing.T) {
 		{Number: 1, Title: "idea clasica", Raw: false},
 		{Number: 6, Title: "raw sin labels", Raw: true},
 		{Number: 7, Title: "raw con type y size", Raw: true},
-		{Number: 8, Title: "raw con status preexistente", Raw: true},
+		{Number: 8, Title: "raw con che preexistente", Raw: true},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("len(got)=%d want=%d; got=%+v", len(got), len(want), got)

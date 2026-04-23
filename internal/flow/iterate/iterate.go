@@ -86,10 +86,16 @@ func ListIterable() ([]validate.Candidate, error) {
 }
 
 // filterIterable aplica el criterio de inclusión. Pura, testeable.
+// Requiere validated:changes-requested AND che:validated — el segundo
+// label asegura que el PR pasó por validate (sino la transición de
+// máquina de estados no aplicaría).
 func filterIterable(raw []validate.PullRequest) []validate.Candidate {
 	res := make([]validate.Candidate, 0, len(raw))
 	for _, p := range raw {
 		if !hasChangesRequested(p) {
+			continue
+		}
+		if !p.HasLabel(labels.CheValidated) {
 			continue
 		}
 		if p.HasLabel(labels.CheLocked) {
@@ -116,7 +122,7 @@ func hasChangesRequested(p validate.PullRequest) bool {
 //     edita el plan consolidado del body, se postea un comment flow=iterate,
 //     se remueve el label. NO usa worktree ni git.
 //   - ref → PR con validated:changes-requested: modo PR (histórico). Worktree
-//     + commits + push + comment + remove label.
+//   - commits + push + comment + remove label.
 //
 // El preflight de GitHub (auth + remote github) corre antes de detectTarget
 // para que errores de entorno den el mensaje accionable correcto. El preflight
@@ -179,6 +185,10 @@ func Run(ref string, opts Opts) ExitCode {
 // remove label sobre un PR con validated:changes-requested. El preflight de
 // GitHub (auth + remote) ya corrió en Run — acá hacemos solo el preflight de
 // git repo (repoToplevel).
+//
+// Gates: PR open + head branch + NO che:locked + che:validated +
+// validated:changes-requested. Transición de máquina: che:validated →
+// che:executing (lock) → che:executed (éxito) ó che:validated (rollback).
 func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCode {
 	log.Info("chequeando repo git")
 	repoRoot, err := repoToplevel()
@@ -201,6 +211,14 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		log.Error(fmt.Sprintf("PR #%d no tiene head branch (¿fork?) — iterate no soporta ese caso", pr.Number))
 		return ExitSemantic
 	}
+	if !pr.HasLabel(labels.CheValidated) {
+		log.Error(fmt.Sprintf("PR #%d no está en che:validated — corré `che validate %d` primero", pr.Number, pr.Number))
+		return ExitSemantic
+	}
+	if !pr.HasLabel(labels.ValidatedChangesRequested) {
+		log.Error(fmt.Sprintf("PR #%d no tiene validated:changes-requested — nada que iterar", pr.Number))
+		return ExitSemantic
+	}
 	if pr.HasLabel(labels.CheLocked) {
 		log.Error(fmt.Sprintf("PR #%d tiene che:locked — otro flow lo tiene agarrado, o quedó colgado. Si es lo segundo: `che unlock %d`", pr.Number, pr.Number))
 		return ExitSemantic
@@ -214,6 +232,22 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 	defer func() {
 		if err := labels.Unlock(prRef); err != nil {
 			log.Warn(fmt.Sprintf("no se pudo quitar che:locked de %s: %v — corré `che unlock %s`", prRef, err, prRef))
+		}
+	}()
+
+	// Transición che:validated → che:executing. Rollback en defer LIFO.
+	log.Step("transicionando a che:executing", output.F{PR: pr.Number})
+	if err := labels.Apply(prRef, labels.CheValidated, labels.CheExecuting); err != nil {
+		log.Error("no pude transicionar a che:executing", output.F{Cause: err})
+		return ExitRetry
+	}
+	var stateExecuted bool
+	defer func() {
+		if stateExecuted {
+			return
+		}
+		if err := labels.Apply(prRef, labels.CheExecuting, labels.CheValidated); err != nil {
+			log.Warn(fmt.Sprintf("rollback che:executing → che:validated fallo: %v — revisá labels a mano", err))
 		}
 	}()
 
@@ -294,6 +328,14 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		log.Warn("warning: no se pudo remover label — removelo a mano", output.F{Cause: err})
 	}
 
+	// Cierre de la transición: che:executing → che:executed.
+	log.Step("transicionando a che:executed", output.F{PR: pr.Number})
+	if err := labels.Apply(prRef, labels.CheExecuting, labels.CheExecuted); err != nil {
+		log.Warn(fmt.Sprintf("no pude transicionar a che:executed: %v — revisá labels a mano", err))
+	} else {
+		stateExecuted = true
+	}
+
 	log.Success("iterated PR", output.F{PR: pr.Number, URL: pr.URL, Detail: fmt.Sprintf("%d nuevos commits", len(newCommits))})
 	fmt.Fprintf(stdout, "Iterated PR %s\n", pr.URL)
 	fmt.Fprintf(stdout, "Nuevos commits: %d\n", len(newCommits))
@@ -308,11 +350,15 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 //
 // Gates (exit semantic si alguno falla):
 //   - issue abierto.
+//   - issue tiene che:validated (pasó por validate).
 //   - issue tiene plan-validated:changes-requested.
-//   - issue NO tiene status:executing ni status:executed: si el execute ya
+//   - issue NO tiene che:executing ni che:executed: si el execute ya
 //     corrió, iterar el plan no tiene efecto sobre el PR asociado.
 //   - hay findings de validate en comments del issue.
 //   - el body del issue tiene un plan consolidado parseable.
+//
+// Transición: che:validated → che:planning (lock) → che:plan (éxito) ó
+// che:validated (rollback).
 func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCode {
 	log.Info("obteniendo issue desde GitHub")
 	issue, err := validate.FetchIssue(issueRef)
@@ -324,12 +370,16 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		log.Error(fmt.Sprintf("issue #%d is not OPEN (state=%s)", issue.Number, issue.State))
 		return ExitSemantic
 	}
+	if !issue.HasLabel(labels.CheValidated) {
+		log.Error(fmt.Sprintf("issue #%d no está en che:validated — corré `che validate %d` primero", issue.Number, issue.Number))
+		return ExitSemantic
+	}
 	if !issue.HasLabel(labels.PlanValidatedChangesRequested) {
 		log.Error(fmt.Sprintf("issue #%d no tiene plan-validated:changes-requested — corré `che validate %d` primero", issue.Number, issue.Number))
 		return ExitSemantic
 	}
 	// Execute ya corrió → iterar el plan no tiene efecto sobre el PR.
-	if issue.HasLabel(labels.StatusExecuting) || issue.HasLabel(labels.StatusExecuted) {
+	if issue.HasLabel(labels.CheExecuting) || issue.HasLabel(labels.CheExecuted) {
 		log.Error(fmt.Sprintf("issue #%d ya pasó por execute — iterar el plan no tiene efecto sobre el PR asociado. Iterar el PR directamente con `che iterate <pr>`.", issue.Number))
 		return ExitSemantic
 	}
@@ -346,6 +396,22 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 	defer func() {
 		if err := labels.Unlock(issueRef); err != nil {
 			log.Warn(fmt.Sprintf("no se pudo quitar che:locked de %s: %v — corré `che unlock %s`", issueRef, err, issueRef))
+		}
+	}()
+
+	// Transición che:validated → che:planning. Rollback en defer LIFO.
+	log.Step("transicionando a che:planning", output.F{Issue: issue.Number})
+	if err := labels.Apply(issueRef, labels.CheValidated, labels.ChePlanning); err != nil {
+		log.Error("no pude transicionar a che:planning", output.F{Cause: err})
+		return ExitRetry
+	}
+	var statePlan bool
+	defer func() {
+		if statePlan {
+			return
+		}
+		if err := labels.Apply(issueRef, labels.ChePlanning, labels.CheValidated); err != nil {
+			log.Warn(fmt.Sprintf("rollback che:planning → che:validated fallo: %v — revisá labels a mano", err))
 		}
 	}()
 
@@ -415,6 +481,14 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 	log.Step("removiendo label plan-validated:changes-requested del issue")
 	if err := removeIssueLabel(issueRef, labels.PlanValidatedChangesRequested); err != nil {
 		log.Warn("warning: no se pudo remover label — removelo a mano", output.F{Cause: err})
+	}
+
+	// Cierre de la transición: che:planning → che:plan.
+	log.Step("transicionando a che:plan", output.F{Issue: issue.Number})
+	if err := labels.Apply(issueRef, labels.ChePlanning, labels.ChePlan); err != nil {
+		log.Warn(fmt.Sprintf("no pude transicionar a che:plan: %v — revisá labels a mano", err))
+	} else {
+		statePlan = true
 	}
 
 	log.Success("iterated plan", output.F{Issue: issue.Number, URL: issue.URL})
@@ -667,13 +741,14 @@ func removeIssueLabel(issueRef, name string) error {
 }
 
 // ListIterablePlanCandidates devuelve los issues abiertos del repo con
-// plan-validated:changes-requested — candidatos a iteración de plan. La TUI
-// lo consume para poblar la lista "plans to iterate". Reusa validate.
-// PlanCandidate como shape (number/title/url) porque es exactamente lo
-// mismo que la TUI necesita para validate sobre plan, solo que filtrado
-// por un label distinto.
+// che:validated + plan-validated:changes-requested — candidatos a iteración
+// de plan. La TUI lo consume para poblar la lista "plans to iterate".
+// Reusa validate.PlanCandidate como shape (number/title/url) porque es
+// exactamente lo mismo que la TUI necesita para validate sobre plan, solo
+// que filtrado por un label distinto.
 func ListIterablePlanCandidates() ([]validate.PlanCandidate, error) {
 	cmd := exec.Command("gh", "issue", "list",
+		"--label", labels.CheValidated,
 		"--label", labels.PlanValidatedChangesRequested,
 		"--state", "open",
 		"--json", "number,title,url,labels",
@@ -1256,4 +1331,3 @@ func removeLabel(prRef, name string) error {
 	}
 	return nil
 }
-

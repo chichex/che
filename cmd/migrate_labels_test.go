@@ -17,11 +17,11 @@ func TestMigrationPairs(t *testing.T) {
 	pairs := migrationPairs()
 
 	want := []pair{
-		{Old: labels.StatusIdea, New: labels.CheIdea},
-		{Old: labels.StatusPlan, New: labels.ChePlan},
-		{Old: labels.StatusExecuting, New: labels.CheExecuting},
-		{Old: labels.StatusExecuted, New: labels.CheExecuted},
-		{Old: labels.StatusClosed, New: labels.CheClosed},
+		{Old: "status:idea", New: labels.CheIdea},
+		{Old: "status:plan", New: labels.ChePlan},
+		{Old: "status:executing", New: labels.CheExecuting},
+		{Old: "status:executed", New: labels.CheExecuted},
+		{Old: "status:closed", New: labels.CheClosed},
 	}
 
 	if len(pairs) != len(want) {

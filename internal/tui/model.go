@@ -219,7 +219,7 @@ type Model struct {
 	exploreAgentIdx    int
 	exploreChosenAgent explore.Agent
 
-	// selector de execute: lista de issues en status:plan, seguido de
+	// selector de execute: lista de issues en che:plan, seguido de
 	// selector de ejecutor. Sin panel de validadores — execute tampoco
 	// dispara validadores automáticamente.
 	executeCandidates  []execute.Candidate
@@ -232,15 +232,15 @@ type Model struct {
 	// selector de validate: dos listas (planes pendientes + PRs abiertos)
 	// con cursor unificado (0..len(plans)-1 → planes, resto → PRs), seguido
 	// del panel de validadores (stepper 0..N por agente).
-	validatePlans []validate.PlanCandidate
-	validatePRs   []validate.Candidate
+	validatePlans  []validate.PlanCandidate
+	validatePRs    []validate.Candidate
 	validateCursor int
 	// validateLoad* tracking: el loader dispara dos comandos paralelos
 	// (plans + PRs). Transicionamos a Select solo cuando los dos recibidos.
-	validatePlansLoaded bool
-	validatePRsLoaded   bool
-	validatePlansErr    error
-	validatePRsErr      error
+	validatePlansLoaded     bool
+	validatePRsLoaded       bool
+	validatePlansErr        error
+	validatePRsErr          error
 	validateChosenRef       string
 	validateChosenURL       string
 	validateChosenTitle     string
@@ -260,9 +260,9 @@ type Model struct {
 
 	// selector de iterate: dos listas (planes con plan-validated:changes-
 	// requested + PRs con validated:changes-requested) con cursor unificado.
-	iteratePlans []validate.PlanCandidate
-	iteratePRs   []validate.Candidate
-	iterateCursor int
+	iteratePlans       []validate.PlanCandidate
+	iteratePRs         []validate.Candidate
+	iterateCursor      int
 	iteratePlansLoaded bool
 	iteratePRsLoaded   bool
 	iteratePlansErr    error
@@ -394,6 +394,7 @@ type executeDoneMsg struct {
 	stdout string
 	stderr string
 }
+
 // validate ahora tiene dos listas paralelas (planes pendientes + PRs
 // abiertos). El loader dispara dos comandos async y la transición a Select
 // espera a que ambas respuestas lleguen (o falló una y la otra cargó ok).
@@ -420,6 +421,7 @@ type closeDoneMsg struct {
 	stdout string
 	stderr string
 }
+
 // iterate sigue la misma idea: dos listas (planes con plan-validated:
 // changes-requested + PRs con validated:changes-requested).
 type iteratePlansLoadedMsg struct {
@@ -435,6 +437,7 @@ type iterateDoneMsg struct {
 	stdout string
 	stderr string
 }
+
 // shutdownMsg llega cuando el context raíz se cancela (SIGINT/SIGTERM desde
 // fuera del TUI). La UI la interpreta igual que Ctrl+C durante un run en
 // curso: cancela la corrida activa y espera a que el done msg llegue antes
@@ -584,8 +587,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.screen = screenResult
 			m.resultKind = resultInfo
 			m.resultLines = []string{
-				"No hay issues con label ct:plan + status:plan listos para ejecutar.",
-				"Primero corré `che explore <issue>` sobre un issue en status:idea.",
+				"No hay issues con label ct:plan + che:plan listos para ejecutar.",
+				"Primero corré `che explore <issue>` sobre un issue en che:idea.",
 			}
 			return m, nil
 		}
@@ -952,7 +955,7 @@ func (m Model) handleExecuteAgentKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// loadValidatePlansCmd lista issues en status:plan sin plan-validated:approve.
+// loadValidatePlansCmd lista issues en che:plan sin plan-validated:approve.
 func loadValidatePlansCmd() tea.Cmd {
 	return func() tea.Msg {
 		plans, err := validate.ListPlanCandidates()
@@ -1894,7 +1897,7 @@ func renderExecuteLoading(m Model) string {
 	var sb strings.Builder
 	sb.WriteString(titleStyle.Render("Ejecutar un issue"))
 	sb.WriteString("\n")
-	sb.WriteString(subtitleStyle.Render("Buscando issues en status:plan…"))
+	sb.WriteString(subtitleStyle.Render("Buscando issues en che:plan…"))
 	sb.WriteString("\n")
 	sb.WriteString(hintStyle.Render("Ctrl+C cancela"))
 	sb.WriteString("\n")
@@ -2113,7 +2116,6 @@ func humanDuration(d time.Duration) string {
 	}
 	return fmt.Sprintf("%dh", int(d.Hours()))
 }
-
 
 // formatContext arma la línea "v0.0.8 · chichex/demo · main". Omite partes
 // vacías (ej. si estás fuera de un repo git).

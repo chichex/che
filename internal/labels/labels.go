@@ -16,29 +16,9 @@ import (
 	"strings"
 )
 
-// Status labels que la máquina de estados de che maneja sobre cada issue.
-// Estos son los labels "mutables": cambian a medida que el issue avanza por
-// el embudo idea → explore → execute → close. En el modelo nuevo el estado
-// "esperando input humano" deja de existir como status:*; el gate de
-// intervención humana vive en los labels plan-validated:* (sobre issues) y
-// validated:* (sobre PRs), aplicados por `che validate`.
-//
-// DEPRECATED: estas constantes coexisten temporalmente con las nuevas Che*
-// (prefix `che:*`) durante el refactor en 5 PRs. Se eliminarán cuando todos
-// los flows hayan migrado a la máquina de 9 estados — ver bloque Che*
-// debajo y el subcomando `che migrate-labels` que renombra in-place los
-// labels viejos a los nuevos en repos ya en uso.
-const (
-	StatusIdea      = "status:idea"
-	StatusPlan      = "status:plan"
-	StatusExecuting = "status:executing"
-	StatusExecuted  = "status:executed"
-	StatusClosed    = "status:closed"
-)
-
-// Che* labels — nueva máquina de estados con prefix `che:*` que reemplaza
-// a `status:*` post-refactor. La diferencia clave respecto del modelo
-// viejo (5 estados) es la introducción de 3 estados transient (planning,
+// Che* labels — máquina de estados con prefix `che:*`. Reemplaza al
+// modelo viejo (`status:*`, 5 estados) post-refactor. La diferencia
+// clave es la introducción de 3 estados transient (planning,
 // validating, closing) y un estado terminal de validate (validated):
 //
 //   - planning   — explore en curso (entre idea y plan).
@@ -57,10 +37,10 @@ const (
 // ve `che:planning` y aborta. Los rollbacks viven en validTransitions:
 // cualquier `*ing` puede volver al estado anterior si el flow falla.
 //
-// El prefix `che:*` reemplaza a `status:*` post-refactor (el subcomando
-// `che migrate-labels` renombra in-place los labels viejos a los nuevos
-// en repos ya en uso). Las constantes Status* viejas siguen acá durante
-// el refactor en 5 PRs y se eliminan cuando todos los flows hayan migrado.
+// El subcomando `che migrate-labels` renombra in-place los labels viejos
+// `status:*` a los nuevos `che:*` en repos que arrancaron con el modelo
+// viejo (los strings literales viven solo en cmd/migrate_labels.go porque
+// son entrada de migración, no uso runtime).
 const (
 	CheIdea       = "che:idea"
 	ChePlanning   = "che:planning"
@@ -122,56 +102,17 @@ type Transition struct {
 	Add    []string
 }
 
-// validTransitions define la máquina de estados de execute. Las transiciones
-// del resto de los flows (explore) no están acá todavía — cuando se extraiga
-// `internal/flow/common/` esos usos deberían migrar a este paquete.
+// validTransitions define la máquina de estados con prefix `che:*`. 21
+// transiciones que cubren los 5 flows (explore / execute / iterate plan /
+// iterate PR / validate / close). Cada `*ing` (planning, executing,
+// validating, closing) tiene una transición de éxito (avanza al estado
+// terminal correspondiente) y una de rollback (vuelve al estado anterior
+// si el flow falla). Los gates de intervención humana no viven acá: están
+// en plan-validated:* (issues) y validated:* (PRs), aplicados por `che
+// validate` por separado.
 //
-// Claves: "from→to". El modelo nuevo no maneja awaiting-human como estado
-// intermedio; los gates de intervención humana viven en los labels
-// plan-validated:* y validated:*, aplicados por `che validate`.
+// Claves: "from→to".
 var validTransitions = map[string]Transition{
-	// explore termina: idea → plan (se registra acá para que explore use
-	// labels.Apply en vez de mandar un `gh issue edit` crudo; las reglas de
-	// estado viven todas en un lugar).
-	StatusIdea + "→" + StatusPlan: {
-		Remove: []string{StatusIdea},
-		Add:    []string{StatusPlan},
-	},
-	// execute arranca: plan → executing (lock).
-	StatusPlan + "→" + StatusExecuting: {
-		Remove: []string{StatusPlan},
-		Add:    []string{StatusExecuting},
-	},
-	// execute termina OK: executing → executed.
-	StatusExecuting + "→" + StatusExecuted: {
-		Remove: []string{StatusExecuting},
-		Add:    []string{StatusExecuted},
-	},
-	// rollback: executing → plan (cualquier fallo post-lock).
-	StatusExecuting + "→" + StatusPlan: {
-		Remove: []string{StatusExecuting},
-		Add:    []string{StatusPlan},
-	},
-	// close termina OK: executed → closed. Los validated:* del PR quedan en
-	// el PR (no pertenecen al issue).
-	StatusExecuted + "→" + StatusClosed: {
-		Remove: []string{StatusExecuted},
-		Add:    []string{StatusClosed},
-	},
-
-	// ─── Transiciones de la máquina nueva (prefix `che:*`) ────────────────
-	//
-	// 21 transiciones que cubren los 5 flows (explore / execute / iterate
-	// plan / iterate PR / validate / close). Cada `*ing` (planning,
-	// executing, validating, closing) tiene una transición de éxito (avanza
-	// al estado terminal correspondiente) y una de rollback (vuelve al
-	// estado anterior si el flow falla). Los gates de intervención humana
-	// no viven acá: están en plan-validated:* (issues) y validated:* (PRs),
-	// aplicados por `che validate` por separado.
-	//
-	// Coexisten temporalmente con las 5 transiciones del modelo viejo
-	// arriba; el switch de los flows a este conjunto se hace en PR2.
-
 	// explore arranca: idea → planning (lock).
 	CheIdea + "→" + ChePlanning: {
 		Remove: []string{CheIdea},
@@ -192,6 +133,13 @@ var validTransitions = map[string]Transition{
 	ChePlanning + "→" + CheValidated: {
 		Remove: []string{ChePlanning},
 		Add:    []string{CheValidated},
+	},
+	// iterate plan start: validated → planning (lock — el humano pidió
+	// iterar el plan tras un validate con changes-requested; entramos al
+	// estado transient mientras opus reescribe).
+	CheValidated + "→" + ChePlanning: {
+		Remove: []string{CheValidated},
+		Add:    []string{ChePlanning},
 	},
 	// execute desde idea (skipping explore — el humano pidió ejecutar
 	// directo sin pasar por explore/plan).
