@@ -438,6 +438,8 @@
     font-family: inherit;
     font-size: 11px;
     cursor: pointer;
+    text-decoration: none;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease, transform 80ms ease;
   }
   .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
   .btn.primary { background: var(--cyan); color: var(--bg); border-color: var(--cyan); }
@@ -445,6 +447,18 @@
   .btn.warn { border-color: var(--orange); color: var(--orange); background: transparent; }
   .btn.danger { border-color: var(--red); color: var(--red); background: transparent; }
   .btn.ghost { border-color: var(--muted); color: var(--muted); background: transparent; }
+
+  /* Hover / active feedback. :not([disabled]) evita feedback en el estado
+     disabled (runs en curso). <a class="btn"> no tiene atributo disabled
+     así que el :not() matchea y los links reciben hover normal. */
+  .btn:hover:not([disabled]) { background: var(--border-muted); border-color: var(--muted); }
+  .btn.primary:hover:not([disabled]) { filter: brightness(1.12); box-shadow: 0 0 0 2px rgba(0,215,255,0.25); background: var(--cyan); border-color: var(--cyan); }
+  .btn.success:hover:not([disabled]) { background: rgba(80,250,123,0.12); color: var(--green); }
+  .btn.warn:hover:not([disabled]) { background: rgba(255,184,108,0.14); color: var(--orange); }
+  .btn.danger:hover:not([disabled]) { background: rgba(255,85,85,0.14); color: var(--red); }
+  .btn.ghost:hover:not([disabled]) { color: var(--text); border-color: var(--text); background: transparent; }
+  .btn:active:not([disabled]) { transform: translateY(1px); }
+  .btn:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 
   .drawer-logs { display: flex; flex-direction: column; min-height: 0; background: #15161b; }
   .drawer-logs-hdr {
