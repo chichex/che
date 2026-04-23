@@ -224,6 +224,35 @@
                 hx-target="#modal-slot"
                 hx-swap="innerHTML"
                 {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate #{{.IssueNumber}}"{{end}}>validate</button>
+      {{else if eq .Status "validated"}}
+        {{/* che:validated issue-only (plan validado). El siguiente paso depende
+             del verdict del plan:
+               - changes-requested → iterate (el validador pidió cambios).
+               - needs-human       → ningún botón; el humano resuelve a mano
+                                     (ej editar el body + re-validar).
+               - approve / ""      → execute (o re-validate si querés otra ronda). */}}
+        {{if eq .PlanVerdict "changes-requested"}}
+          <button class="btn primary"
+                  hx-post="/action/iterate/{{.IssueNumber}}"
+                  hx-target="#modal-slot"
+                  hx-swap="innerHTML"
+                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="iterate #{{.IssueNumber}} (aplicar findings del último validate)"{{end}}>iterate</button>
+        {{else if eq .PlanVerdict "needs-human"}}
+          <span class="needs-human-hint" style="color:var(--muted); font-size: 12px; padding: 6px 0;">
+            plan-validated:needs-human — resolvé a mano (editá el body del issue) antes de seguir.
+          </span>
+        {{else}}
+          <button class="btn primary"
+                  hx-post="/action/execute/{{.IssueNumber}}"
+                  hx-target="#modal-slot"
+                  hx-swap="innerHTML"
+                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="execute #{{.IssueNumber}} (plan validado → aplicar)"{{end}}>execute</button>
+          <button class="btn warn"
+                  hx-post="/action/validate/{{.IssueNumber}}"
+                  hx-target="#modal-slot"
+                  hx-swap="innerHTML"
+                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate #{{.IssueNumber}} (re-validar el plan)"{{end}}>validate</button>
+        {{end}}
       {{end}}
       <a class="btn ghost" style="margin-left:auto"
          href="https://github.com/{{.NWO}}/issues/{{.IssueNumber}}"

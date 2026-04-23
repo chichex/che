@@ -1,15 +1,18 @@
 // Package dash — auto-loop engine (Step 6).
 //
 // El auto-loop observa el snapshot del Source y dispara automáticamente
-// `che validate` o `che iterate` sobre entidades que estén en estados
-// "intermedios" (plan o executed) sin verdict resolutorio — cerrando el
+// `che validate`, `che iterate` o `che execute` sobre entidades que
+// estén en estados "intermedios" sin verdict resolutorio — cerrando el
 // ciclo humano → IA sin intervención manual.
 //
-// Reglas (4):
+// Reglas (5):
 //   1. Status=plan sin PlanVerdict            → che validate <IssueNumber>
 //   2. Status=plan + PlanVerdict=changes-req  → che iterate  <IssueNumber>
 //   3. Status=executed sin PRVerdict          → che validate <PRNumber>
 //   4. Status=executed + PRVerdict=changes-req→ che iterate  <PRNumber>
+//   5. Status=validated + PlanVerdict=approve → che execute  <IssueNumber>
+//      (issue-only; sin PR previo. Cierra el gap post-validate plan:
+//       un plan aprobado automáticamente pasa a ejecución.)
 //
 // Stop conditions por entity:
 //   - verdict=approve        → done (feliz), no dispatch.
@@ -35,9 +38,10 @@
 //     `--validators` default = "opus", 1 validador).
 //   - iterate:  1x opus  — `che iterate` no tiene `--agent`, es opus por
 //     diseño del flow.
-//   - execute:  1x opus  — `che execute` default de `--agent` es opus,
-//     aunque hoy el auto-loop NO dispatcha execute (sigue siendo decisión
-//     humana por costo/riesgo de agent + worktree + PR).
+//   - execute:  1x opus  — `che execute` default de `--agent` es opus.
+//     El loop dispatcha execute solo via RuleExecutePlan (Status=validated
+//     + PlanVerdict=approve). Es una señal explícita del humano (validar
+//     con approve equivale a "luz verde") — sin approve no hay dispatch.
 // El loop invoca los subcomandos sin flags de agent — heredan estos
 // defaults. Mantener esto sincronizado si los defaults cambien en cmd/.
 package dash
@@ -65,6 +69,12 @@ const (
 	RuleValidatePlan LoopRule = "validate-plan"
 	// RuleIteratePlan: entity en Status=plan con PlanVerdict=changes-requested → iterate.
 	RuleIteratePlan LoopRule = "iterate-plan"
+	// RuleExecutePlan: entity en Status=validated (issue-only) con
+	// PlanVerdict=approve → execute. Cierra el tramo post-validate plan:
+	// si el validador aprobó, automáticamente ejecutamos. Solo issue-only
+	// (KindIssue) — en fused no aplica, ese lado del flow ya implica PR
+	// abierto y execute no corre sobre PRs existentes.
+	RuleExecutePlan LoopRule = "execute-plan"
 	// RuleValidatePR: entity en Status=executed sin PRVerdict → validate.
 	RuleValidatePR LoopRule = "validate-pr"
 	// RuleIteratePR: entity en Status=executed con PRVerdict=changes-requested → iterate.
@@ -72,13 +82,16 @@ const (
 )
 
 // allLoopRules es la allowlist + orden canónico de evaluación. El tick
-// recorre las 4 en este orden para cada entity, primera que matchee gana.
+// recorre las 5 en este orden para cada entity, primera que matchee gana.
 // El orden importa: si una entity tuviera 2 reglas aplicables (no debería
-// pasar — las condiciones son mutuamente exclusivas por verdict), la más
-// "progresiva" (validate antes que iterate) queda primera.
+// pasar — las condiciones son mutuamente exclusivas por status + verdict),
+// la más "progresiva" (validate antes que iterate; execute-plan después
+// de las de plan/status para mantener el flujo natural issue→PR) queda
+// primera dentro de su bloque.
 var allLoopRules = []LoopRule{
 	RuleValidatePlan,
 	RuleIteratePlan,
+	RuleExecutePlan,
 	RuleValidatePR,
 	RuleIteratePR,
 }
@@ -201,6 +214,8 @@ func ruleLabel(r LoopRule) string {
 		return "validate plan (plan sin verdict → validate)"
 	case RuleIteratePlan:
 		return "iterate plan (plan con changes-requested → iterate)"
+	case RuleExecutePlan:
+		return "execute plan (validated + approve → execute)"
 	case RuleValidatePR:
 		return "validate PR (executed sin verdict → validate)"
 	case RuleIteratePR:
@@ -264,6 +279,32 @@ func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, t
 		}
 		if e.PlanVerdict == "changes-requested" && rules[RuleIteratePlan] {
 			return "iterate", e.IssueNumber, "rule:iterate-plan"
+		}
+		return "", 0, "no-rule-match"
+	case "validated":
+		// RuleExecutePlan solo aplica a issue-only: un fused en "validated"
+		// implica PR abierto, donde execute no corre. El humano sigue con
+		// close (fused) o iterate (si verdict PR dice changes-requested).
+		if e.Kind != KindIssue {
+			return "", 0, "validated-not-issue-only"
+		}
+		// PlanVerdict=needs-human → stop (humano debe resolver).
+		if e.PlanVerdict == "needs-human" {
+			return "", 0, "plan-needs-human"
+		}
+		// changes-requested → stop para execute; el usuario tiene que
+		// iterar primero (execute.gate rechaza ese verdict). Esta regla
+		// NO cubre iterate desde validated; si en el futuro se agrega
+		// una RuleIteratePlan-from-validated, va acá.
+		if e.PlanVerdict == "changes-requested" {
+			return "", 0, "plan-changes-requested"
+		}
+		// approve explícito (el único path que habilita execute via loop).
+		// No disparamos sin verdict: un issue en che:validated SIN label
+		// plan-validated:* es un estado raro (snapshot stale, o humano
+		// aplicó che:validated a mano). Preferimos no ejecutar speculativo.
+		if e.PlanVerdict == "approve" && rules[RuleExecutePlan] {
+			return "execute", e.IssueNumber, "rule:execute-plan"
 		}
 		return "", 0, "no-rule-match"
 	case "executed":
@@ -555,15 +596,16 @@ func (s *Server) writeLoopResponse(w http.ResponseWriter) {
 
 // pillLabel devuelve el texto que va en el pill del topbar, fuera del
 // popover. Se expone como template func para que el partial "auto-loop-
-// toggle" lo use. Ejemplos:
+// toggle" lo use. El denominador es len(allLoopRules) — si se agregan
+// reglas nuevas, el label se ajusta solo. Ejemplos:
 //   - master OFF                  → "auto-loop OFF"
-//   - master ON, 0 rules          → "auto-loop ON (0/4)"
-//   - master ON, 3 rules, 2 auto  → "auto-loop ON (3/4) · ⟳ 2"
+//   - master ON, 0 rules          → "auto-loop ON (0/5)"
+//   - master ON, 3 rules, 2 auto  → "auto-loop ON (3/5) · ⟳ 2"
 func pillLabel(data loopPopoverData) string {
 	if !data.Enabled {
 		return "auto-loop OFF"
 	}
-	label := fmt.Sprintf("auto-loop ON (%d/4)", data.ActiveRules)
+	label := fmt.Sprintf("auto-loop ON (%d/%d)", data.ActiveRules, len(allLoopRules))
 	return label
 }
 

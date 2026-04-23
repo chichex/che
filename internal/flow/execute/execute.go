@@ -692,16 +692,21 @@ func fetchIssue(ctx context.Context, ref string) (*Issue, error) {
 // gate valida las precondiciones para ejecutar:
 //   - Issue OPEN.
 //   - Tiene label ct:plan.
-//   - Tiene che:idea O che:plan (acepta ambos: el humano puede saltar
-//     explore y ejecutar directo desde idea).
+//   - Tiene che:idea, che:plan O che:validated (los 3 son puntos válidos
+//     de entrada al executor: el humano puede saltar explore y ejecutar
+//     directo desde idea; puede ejecutar el plan sin validarlo; o puede
+//     ejecutar un plan ya validado post-approve).
 //   - NO tiene labels más avanzados (executing/executed/validating/
-//     validated/closing/closed).
-//   - NO tiene plan-validated:changes-requested / :needs-human.
+//     closing/closed).
+//   - NO tiene plan-validated:changes-requested / :needs-human (si un
+//     validate dejó feedback de cambios o escaló a humano, iterar/resolver
+//     antes; no forzamos execute sobre un plan que se sabe no aprobado).
 //
-// plan-validated:approve o ausencia de cualquier plan-validated:* = green
-// light. El humano decide si correr `che validate` antes de ejecutar; si
-// no lo hace, execute pasa sin verdict y confía en el plan consolidado
-// que dejó explore.
+// plan-validated:approve, ausencia de cualquier plan-validated:*, o un
+// issue en che:validated con verdict approve = green light. El humano
+// decide si correr `che validate` antes de ejecutar; si no lo hace,
+// execute pasa sin verdict y confía en el plan consolidado que dejó
+// explore.
 func gate(i *Issue) error {
 	if i.State != "OPEN" {
 		return fmt.Errorf("issue #%d is closed", i.Number)
@@ -712,10 +717,13 @@ func gate(i *Issue) error {
 	if i.HasLabel(labels.CheExecuting) {
 		return fmt.Errorf("issue #%d ya está en che:executing — otro run en curso o quedó colgado; quitá el label a mano si es lo segundo", i.Number)
 	}
+	// "Más avanzado" post che:validated: estados donde execute no tiene
+	// sentido porque ya hay PR abierto / mergeado / issue cerrado. NO
+	// incluimos CheValidated: ese es un punto de entrada válido al flow
+	// post-validate plan (issue con plan-validated:approve).
 	for _, beyond := range []string{
 		labels.CheExecuted,
 		labels.CheValidating,
-		labels.CheValidated,
 		labels.CheClosing,
 		labels.CheClosed,
 	} {
@@ -732,16 +740,24 @@ func gate(i *Issue) error {
 	if i.HasLabel(labels.PlanValidatedNeedsHuman) {
 		return fmt.Errorf("issue #%d tiene plan-validated:needs-human — resolvé a mano antes de ejecutar", i.Number)
 	}
-	if !i.HasLabel(labels.CheIdea) && !i.HasLabel(labels.ChePlan) {
-		return fmt.Errorf("issue #%d no está en che:idea ni che:plan — corré `che explore %d` primero", i.Number, i.Number)
+	if !i.HasLabel(labels.CheIdea) && !i.HasLabel(labels.ChePlan) && !i.HasLabel(labels.CheValidated) {
+		return fmt.Errorf("issue #%d no está en che:idea, che:plan ni che:validated — corré `che explore %d` o `che validate %d` según el flow", i.Number, i.Number, i.Number)
 	}
 	return nil
 }
 
 // fromState devuelve el estado de origen del issue al momento del gate
-// (che:idea o che:plan). Si tiene ambos (no debería, pero defensa) prefiere
-// che:plan que es el path normal post-explore.
+// (che:idea, che:plan o che:validated). Prioridad en caso de ambigüedad
+// (issues con más de un label che:* — no debería pasar post-transición,
+// pero defensa): validated > plan > idea. El más avanzado gana para que
+// el rollback restaure el estado más útil y la transición de lock parta
+// de una clave válida en validTransitions. Los 3 tienen entry en la
+// máquina: che:idea → executing, che:plan → executing, che:validated →
+// executing; y los 3 rollbacks inversos.
 func fromState(i *Issue) string {
+	if i.HasLabel(labels.CheValidated) {
+		return labels.CheValidated
+	}
 	if i.HasLabel(labels.ChePlan) {
 		return labels.ChePlan
 	}

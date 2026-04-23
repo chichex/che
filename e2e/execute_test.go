@@ -113,8 +113,8 @@ func TestExecute_GoldenPath(t *testing.T) {
 	}
 }
 
-// TestExecute_IssueNotStatusPlan_Exit3: issue sin che:idea ni che:plan
-// (avanzado más allá o nunca clasificado) → exit 3.
+// TestExecute_IssueNotStatusPlan_Exit3: issue sin che:idea, che:plan ni
+// che:validated (avanzado más allá o nunca clasificado) → exit 3.
 func TestExecute_IssueNotStatusPlan_Exit3(t *testing.T) {
 	env := setupExecuteEnv(t)
 	scriptExecutePrechecks(env)
@@ -124,7 +124,7 @@ func TestExecute_IssueNotStatusPlan_Exit3(t *testing.T) {
 	if r.ExitCode != 3 {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
-	harness.AssertContains(t, r.Stderr, "che:idea ni che:plan")
+	harness.AssertContains(t, r.Stderr, "che:idea, che:plan ni che:validated")
 	env.Invocations().AssertNotCalled(t, "claude")
 }
 

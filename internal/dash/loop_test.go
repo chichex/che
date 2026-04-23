@@ -115,6 +115,49 @@ func TestNextDispatch_RuleTable(t *testing.T) {
 			wantFlow:   "",
 			wantSubstr: "executed-without-pr",
 		},
+		{
+			name:       "rule5: validated issue-only + approve + rule ON → execute",
+			e:          Entity{Kind: KindIssue, IssueNumber: 122, Status: "validated", PlanVerdict: "approve"},
+			rules:      map[LoopRule]bool{RuleExecutePlan: true},
+			wantFlow:   "execute",
+			wantRef:    122,
+			wantSubstr: "execute-plan",
+		},
+		{
+			name:       "rule5 OFF: validated + approve sin regla → no-rule-match",
+			e:          Entity{Kind: KindIssue, IssueNumber: 122, Status: "validated", PlanVerdict: "approve"},
+			rules:      map[LoopRule]bool{},
+			wantFlow:   "",
+			wantSubstr: "no-rule-match",
+		},
+		{
+			name:       "rule5 exige approve explícito: sin verdict → no dispatch",
+			e:          Entity{Kind: KindIssue, IssueNumber: 122, Status: "validated"},
+			rules:      map[LoopRule]bool{RuleExecutePlan: true},
+			wantFlow:   "",
+			wantSubstr: "no-rule-match",
+		},
+		{
+			name:       "rule5: validated + changes-requested → stop (necesita iterate)",
+			e:          Entity{Kind: KindIssue, IssueNumber: 122, Status: "validated", PlanVerdict: "changes-requested"},
+			rules:      map[LoopRule]bool{RuleExecutePlan: true},
+			wantFlow:   "",
+			wantSubstr: "plan-changes-requested",
+		},
+		{
+			name:       "rule5: validated + needs-human → stop (humano)",
+			e:          Entity{Kind: KindIssue, IssueNumber: 122, Status: "validated", PlanVerdict: "needs-human"},
+			rules:      map[LoopRule]bool{RuleExecutePlan: true},
+			wantFlow:   "",
+			wantSubstr: "plan-needs-human",
+		},
+		{
+			name:       "rule5: validated + approve pero fused → skip (execute no corre sobre fused)",
+			e:          Entity{Kind: KindFused, IssueNumber: 122, PRNumber: 140, Status: "validated", PlanVerdict: "approve"},
+			rules:      map[LoopRule]bool{RuleExecutePlan: true},
+			wantFlow:   "",
+			wantSubstr: "validated-not-issue-only",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -564,8 +607,8 @@ func TestTopbarPillLabel_AfterToggle(t *testing.T) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	got := string(body)
-	if !strings.Contains(got, "auto-loop ON (2/4)") {
-		t.Errorf("topbar debería decir 'auto-loop ON (2/4)'; got head: %s", got[:min(500, len(got))])
+	if !strings.Contains(got, "auto-loop ON (2/5)") {
+		t.Errorf("topbar debería decir 'auto-loop ON (2/5)'; got head: %s", got[:min(500, len(got))])
 	}
 }
 
@@ -629,8 +672,11 @@ func TestRunTick_AutoChipInDrawer(t *testing.T) {
 }
 
 // Comprobación redundante del orden de allLoopRules (fija el contrato).
+// RuleExecutePlan va entre IteratePlan y ValidatePR: mantiene el bloque
+// "todas las reglas issue-side primero, todas las PR-side después" para
+// que el matcher no tenga sorpresas al leer el orden.
 func TestAllLoopRules_OrderStable(t *testing.T) {
-	want := []LoopRule{RuleValidatePlan, RuleIteratePlan, RuleValidatePR, RuleIteratePR}
+	want := []LoopRule{RuleValidatePlan, RuleIteratePlan, RuleExecutePlan, RuleValidatePR, RuleIteratePR}
 	if len(allLoopRules) != len(want) {
 		t.Fatalf("allLoopRules len: got %d want %d", len(allLoopRules), len(want))
 	}
@@ -642,22 +688,80 @@ func TestAllLoopRules_OrderStable(t *testing.T) {
 }
 
 // Mini-assert del pillLabel para fijar el contrato del texto — tests del
-// frontend (dash.js) + del server.go lo dan por asumido.
+// frontend (dash.js) + del server.go lo dan por asumido. El denominador
+// es len(allLoopRules) — si se agregan reglas, este test debe cambiar
+// junto con la constante.
 func TestPillLabel(t *testing.T) {
 	cases := []struct {
 		data loopPopoverData
 		want string
 	}{
 		{loopPopoverData{Enabled: false}, "auto-loop OFF"},
-		{loopPopoverData{Enabled: true, ActiveRules: 0}, "auto-loop ON (0/4)"},
-		{loopPopoverData{Enabled: true, ActiveRules: 3}, "auto-loop ON (3/4)"},
-		{loopPopoverData{Enabled: true, ActiveRules: 4}, "auto-loop ON (4/4)"},
+		{loopPopoverData{Enabled: true, ActiveRules: 0}, "auto-loop ON (0/5)"},
+		{loopPopoverData{Enabled: true, ActiveRules: 3}, "auto-loop ON (3/5)"},
+		{loopPopoverData{Enabled: true, ActiveRules: 5}, "auto-loop ON (5/5)"},
 	}
 	for _, tc := range cases {
 		got := pillLabel(tc.data)
 		if got != tc.want {
 			t.Errorf("pillLabel(%+v): got %q want %q", tc.data, got, tc.want)
 		}
+	}
+}
+
+// TestTick_ExecutePlanDispatches: issue-only en validated+approve + rule ON
+// → el tick dispatcha execute sobre IssueNumber. Cubre el happy path del
+// nuevo gap que la regla cierra: post-validate-approve, el loop sigue
+// solo hasta execute sin esperar click humano.
+func TestTick_ExecutePlanDispatches(t *testing.T) {
+	ents := []Entity{
+		{Kind: KindIssue, IssueNumber: 122, Status: "validated", PlanVerdict: "approve", IssueTitle: "approved"},
+	}
+	s, fr := newLoopServer(t, ents)
+	s.loop.enabled = true
+	s.loop.rules[RuleExecutePlan] = true
+
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick: got %d want 1", n)
+	}
+	if fr.count() != 1 {
+		t.Errorf("runner calls: got %d want 1", fr.count())
+	}
+	got := fr.last()
+	if got.Flow != "execute" {
+		t.Errorf("flow: got %q want 'execute'", got.Flow)
+	}
+	if got.TargetRef != 122 || got.EntityKey != 122 {
+		t.Errorf("ref mapping: got target=%d key=%d want target=122 key=122", got.TargetRef, got.EntityKey)
+	}
+}
+
+// TestTick_ExecutePlanSkipsFused: un fused en validated+approve no es
+// elegible (execute rechaza PRs; el loop tampoco debe dispatchar).
+func TestTick_ExecutePlanSkipsFused(t *testing.T) {
+	ents := []Entity{
+		{Kind: KindFused, IssueNumber: 122, PRNumber: 140, Status: "validated", PlanVerdict: "approve"},
+	}
+	s, fr := newLoopServer(t, ents)
+	s.loop.enabled = true
+	s.loop.rules[RuleExecutePlan] = true
+
+	if n := s.runTick(); n != 0 {
+		t.Errorf("tick sobre fused: got %d want 0 (execute-plan no aplica)", n)
+	}
+	if fr.count() != 0 {
+		t.Errorf("runner NO debería ser llamado; got %d", fr.count())
+	}
+}
+
+// TestRuleLabel_ExecutePlan fija el texto del popover para la regla nueva.
+func TestRuleLabel_ExecutePlan(t *testing.T) {
+	got := ruleLabel(RuleExecutePlan)
+	if !strings.Contains(got, "execute plan") {
+		t.Errorf("ruleLabel(RuleExecutePlan): got %q; esperaba que contenga 'execute plan'", got)
+	}
+	if !strings.Contains(got, "approve") {
+		t.Errorf("ruleLabel(RuleExecutePlan): debería mencionar el trigger 'approve'; got %q", got)
 	}
 }
 

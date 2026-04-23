@@ -46,6 +46,20 @@ func TestGate(t *testing.T) {
 			wantErr: "",
 		},
 		{
+			name: "ok validated + plan-validated:approve (post-validate path)",
+			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
+				{Name: "ct:plan"}, {Name: "che:validated"}, {Name: "plan-validated:approve"},
+			}},
+			wantErr: "",
+		},
+		{
+			name: "ok validated sin plan-validated:* explícito (defensa)",
+			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
+				{Name: "ct:plan"}, {Name: "che:validated"},
+			}},
+			wantErr: "",
+		},
+		{
 			name:    "closed",
 			issue:   Issue{Number: 1, State: "CLOSED"},
 			wantErr: "closed",
@@ -70,9 +84,38 @@ func TestGate(t *testing.T) {
 			wantErr: "che:executed",
 		},
 		{
+			name: "already validating (otro flow en curso)",
+			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
+				{Name: "ct:plan"}, {Name: "che:validating"},
+			}},
+			wantErr: "che:validating",
+		},
+		{
+			name: "already closing",
+			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
+				{Name: "ct:plan"}, {Name: "che:closing"},
+			}},
+			wantErr: "che:closing",
+		},
+		{
+			name: "already closed",
+			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
+				{Name: "ct:plan"}, {Name: "che:closed"},
+			}},
+			wantErr: "che:closed",
+		},
+		{
 			name: "plan-validated:changes-requested blocks",
 			issue: Issue{Number: 42, State: "OPEN", Labels: []Label{
 				{Name: "ct:plan"}, {Name: "che:plan"},
+				{Name: "plan-validated:changes-requested"},
+			}},
+			wantErr: "plan-validated:changes-requested",
+		},
+		{
+			name: "plan-validated:changes-requested blocks incluso en validated",
+			issue: Issue{Number: 42, State: "OPEN", Labels: []Label{
+				{Name: "ct:plan"}, {Name: "che:validated"},
 				{Name: "plan-validated:changes-requested"},
 			}},
 			wantErr: "plan-validated:changes-requested",
@@ -86,11 +129,11 @@ func TestGate(t *testing.T) {
 			wantErr: "plan-validated:needs-human",
 		},
 		{
-			name: "not idea nor plan",
+			name: "not idea nor plan nor validated",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
 				{Name: "ct:plan"},
 			}},
-			wantErr: "no está en che:idea ni che:plan",
+			wantErr: "no está en che:idea, che:plan ni che:validated",
 		},
 	}
 	for _, c := range cases {
@@ -126,6 +169,62 @@ func TestGate_ChangesRequestedErrorMentionsIterate(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "che iterate 42") {
 		t.Errorf("expected error to mention `che iterate 42`; got: %v", err)
+	}
+}
+
+// TestFromState cubre la prioridad del estado de origen capturado para
+// rollback. Orden de prioridad: validated > plan > idea. La razón es que
+// un issue puede tener CheValidated + (en runs viejos, theoretically)
+// restos de ChePlan/CheIdea — preferimos siempre el más avanzado. En la
+// práctica las transiciones los limpian, pero la defensa cuesta poco.
+func TestFromState(t *testing.T) {
+	cases := []struct {
+		name   string
+		issue  Issue
+		wantFr string
+	}{
+		{
+			name:   "solo idea",
+			issue:  Issue{Labels: []Label{{Name: "che:idea"}}},
+			wantFr: "che:idea",
+		},
+		{
+			name:   "solo plan",
+			issue:  Issue{Labels: []Label{{Name: "che:plan"}}},
+			wantFr: "che:plan",
+		},
+		{
+			name:   "solo validated",
+			issue:  Issue{Labels: []Label{{Name: "che:validated"}}},
+			wantFr: "che:validated",
+		},
+		{
+			name:   "validated gana sobre plan",
+			issue:  Issue{Labels: []Label{{Name: "che:plan"}, {Name: "che:validated"}}},
+			wantFr: "che:validated",
+		},
+		{
+			name:   "validated gana sobre idea",
+			issue:  Issue{Labels: []Label{{Name: "che:idea"}, {Name: "che:validated"}}},
+			wantFr: "che:validated",
+		},
+		{
+			name:   "plan gana sobre idea",
+			issue:  Issue{Labels: []Label{{Name: "che:idea"}, {Name: "che:plan"}}},
+			wantFr: "che:plan",
+		},
+		{
+			name:   "default idea si no hay ninguno (defensa, no debería pasar post-gate)",
+			issue:  Issue{Labels: []Label{}},
+			wantFr: "che:idea",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := fromState(&c.issue); got != c.wantFr {
+				t.Errorf("fromState: got %q want %q", got, c.wantFr)
+			}
+		})
 	}
 }
 

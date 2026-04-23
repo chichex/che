@@ -964,6 +964,127 @@ func TestDrawerDisablesWhenRunning(t *testing.T) {
 	}
 }
 
+// TestDrawerIssueOnlyValidated_ApprovedShowsExecute: rama issue-only
+// Status=validated con PlanVerdict=approve (o vacío) — el siguiente paso
+// es execute. El botón de re-validación (validate) sigue disponible por
+// si el humano quiere otra ronda. iterate NO aparece en este caso
+// (nada que iterar con un approve).
+func TestDrawerIssueOnlyValidated_ApprovedShowsExecute(t *testing.T) {
+	for _, verdict := range []string{"approve", ""} {
+		name := verdict
+		if name == "" {
+			name = "no-verdict"
+		}
+		t.Run(name, func(t *testing.T) {
+			src := &fixedSource{snap: Snapshot{
+				NWO:    "demo/che",
+				LastOK: time.Now(),
+				Entities: []Entity{
+					{Kind: KindIssue, IssueNumber: 122, IssueTitle: "approved plan", Status: "validated", PlanVerdict: verdict},
+				},
+			}}
+			s := NewServer(src, "che-cli", 15)
+			ts := httptest.NewServer(s)
+			defer ts.Close()
+
+			resp, err := http.Get(ts.URL + "/drawer/122")
+			if err != nil {
+				t.Fatalf("GET: %v", err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			got := string(body)
+
+			if !strings.Contains(got, `hx-post="/action/execute/122"`) {
+				t.Errorf("validated+%s: missing execute button", verdict)
+			}
+			if !strings.Contains(got, `hx-post="/action/validate/122"`) {
+				t.Errorf("validated+%s: missing re-validate button", verdict)
+			}
+			if strings.Contains(got, `hx-post="/action/iterate/122"`) {
+				t.Errorf("validated+%s: no debe haber iterate (solo changes-requested)", verdict)
+			}
+			// close tampoco — close aplica sobre PR fused, no issue-only.
+			if strings.Contains(got, `hx-post="/action/close/122"`) {
+				t.Errorf("validated+%s: close no aplica en issue-only", verdict)
+			}
+		})
+	}
+}
+
+// TestDrawerIssueOnlyValidated_ChangesRequestedShowsIterate: rama issue-only
+// Status=validated + PlanVerdict=changes-requested → iterate es el próximo
+// paso obligatorio (aplicar los findings). NO mostramos execute (execute
+// rechaza con ese verdict — el gate está explícito en execute.go).
+func TestDrawerIssueOnlyValidated_ChangesRequestedShowsIterate(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		NWO:    "demo/che",
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 122, IssueTitle: "rework", Status: "validated", PlanVerdict: "changes-requested"},
+		},
+	}}
+	s := NewServer(src, "che-cli", 15)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/drawer/122")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	got := string(body)
+
+	if !strings.Contains(got, `hx-post="/action/iterate/122"`) {
+		t.Errorf("validated+changes-requested: missing iterate button")
+	}
+	if strings.Contains(got, `hx-post="/action/execute/122"`) {
+		t.Errorf("validated+changes-requested: execute no debe ofrecerse (el gate lo rechaza)")
+	}
+	if strings.Contains(got, `hx-post="/action/validate/122"`) {
+		t.Errorf("validated+changes-requested: re-validate no debe ofrecerse (iterar primero)")
+	}
+}
+
+// TestDrawerIssueOnlyValidated_NeedsHumanShowsHint: rama issue-only
+// Status=validated + PlanVerdict=needs-human → no mostramos ningún botón
+// de flow; el humano tiene que resolver a mano. El hint aparece en lugar.
+func TestDrawerIssueOnlyValidated_NeedsHumanShowsHint(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		NWO:    "demo/che",
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 122, IssueTitle: "esc", Status: "validated", PlanVerdict: "needs-human"},
+		},
+	}}
+	s := NewServer(src, "che-cli", 15)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/drawer/122")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	got := string(body)
+
+	// Ningún hx-post de flows (iterate/execute/validate) en el drawer body.
+	for _, forbidden := range []string{
+		`hx-post="/action/iterate/122"`,
+		`hx-post="/action/execute/122"`,
+		`hx-post="/action/validate/122"`,
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("validated+needs-human: encontré %s — no debería haber botones de flow", forbidden)
+		}
+	}
+	if !strings.Contains(got, "needs-human") {
+		t.Errorf("validated+needs-human: hint en el DOM ausente")
+	}
+}
+
 // min es un helper — Go tiene builtin min en 1.21+ pero lo aliaseamos
 // por claridad en el error message del happy path.
 func min(a, b int) int {
