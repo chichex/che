@@ -155,6 +155,10 @@ type ghIssue struct {
 	// Body es el markdown del issue. Se expone en el tab "Issue" del drawer
 	// para entidades fused (contexto histórico). Puede estar vacío.
 	Body string `json:"body"`
+	// CreatedAt alimenta Entity.CreatedAt para la priorización del auto-loop
+	// (más viejo primero). gh devuelve RFC3339, que encoding/json mapea a
+	// time.Time nativamente.
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 type ghCloseRef struct {
@@ -179,6 +183,9 @@ type ghPR struct {
 	Labels                  []ghLabel    `json:"labels"`
 	ClosingIssuesReferences []ghCloseRef `json:"closingIssuesReferences"`
 	StatusCheckRollup       []ghCheck    `json:"statusCheckRollup"`
+	// CreatedAt alimenta Entity.CreatedAt. Para entidades fused tomamos la
+	// más reciente entre issue.createdAt y pr.createdAt (ver combineEntities).
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // refresh es un poll único. Lanza cuatro queries en paralelo (issues open,
@@ -273,7 +280,7 @@ func (g *GhSource) fetchIssues(ctx context.Context) ([]ghIssue, error) {
 	cmd := exec.CommandContext(ctx, "gh", "issue", "list",
 		"--state", "open",
 		"--limit", "100",
-		"--json", "number,title,labels,state,body",
+		"--json", "number,title,labels,state,body,createdAt",
 	)
 	if g.repoDir != "" {
 		cmd.Dir = g.repoDir
@@ -304,7 +311,7 @@ func (g *GhSource) fetchClosedIssues(ctx context.Context) ([]ghIssue, error) {
 		"--state", "closed",
 		"--label", labels.CheClosed,
 		"--limit", fmt.Sprintf("%d", limit),
-		"--json", "number,title,labels,state,body",
+		"--json", "number,title,labels,state,body,createdAt",
 	)
 	if g.repoDir != "" {
 		cmd.Dir = g.repoDir
@@ -324,7 +331,7 @@ func (g *GhSource) fetchPRs(ctx context.Context) ([]ghPR, error) {
 	cmd := exec.CommandContext(ctx, "gh", "pr", "list",
 		"--state", "open",
 		"--limit", "100",
-		"--json", "number,title,labels,state,headRefName,headRefOid,closingIssuesReferences,statusCheckRollup",
+		"--json", "number,title,labels,state,headRefName,headRefOid,closingIssuesReferences,statusCheckRollup,createdAt",
 	)
 	if g.repoDir != "" {
 		cmd.Dir = g.repoDir
@@ -354,7 +361,7 @@ func (g *GhSource) fetchClosedPRs(ctx context.Context) ([]ghPR, error) {
 	cmd := exec.CommandContext(ctx, "gh", "pr", "list",
 		"--state", "closed",
 		"--limit", fmt.Sprintf("%d", limit),
-		"--json", "number,title,labels,state,headRefName,headRefOid,closingIssuesReferences,statusCheckRollup",
+		"--json", "number,title,labels,state,headRefName,headRefOid,closingIssuesReferences,statusCheckRollup,createdAt",
 	)
 	if g.repoDir != "" {
 		cmd.Dir = g.repoDir
@@ -426,6 +433,10 @@ func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 			issueLabels = i.Labels
 			issueBody = i.Body
 		}
+		var issueCreatedAt time.Time
+		if i, ok := issueByNumber[issueNum]; ok {
+			issueCreatedAt = i.CreatedAt
+		}
 		e := Entity{
 			Kind:        KindFused,
 			IssueNumber: issueNum,
@@ -435,6 +446,10 @@ func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 			PRTitle:     p.Title,
 			Branch:      p.HeadRefName,
 			SHA:         shortSHA(p.HeadRefOid),
+			// Para fused, la fecha efectiva es max(issue, PR): si iteraste el
+			// PR hace poco, la entity "envejece" menos y el loop la posterga
+			// respecto a otras más viejas.
+			CreatedAt: laterOf(issueCreatedAt, p.CreatedAt),
 		}
 		// Labels del issue alimentan Type/Size/Status/PlanVerdict.
 		applyLabels(&e, issueLabels)
@@ -461,6 +476,7 @@ func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 			IssueNumber: i.Number,
 			IssueTitle:  i.Title,
 			IssueBody:   i.Body,
+			CreatedAt:   i.CreatedAt,
 		}
 		applyLabels(&e, i.Labels)
 		if e.Status == "" {
@@ -469,6 +485,21 @@ func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 		out = append(out, e)
 	}
 	return out
+}
+
+// laterOf devuelve la más reciente entre dos time.Time. Un zero se trata como
+// "sin dato" — gana el otro. Si ambos son zero, devuelve zero.
+func laterOf(a, b time.Time) time.Time {
+	if a.IsZero() {
+		return b
+	}
+	if b.IsZero() {
+		return a
+	}
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 // applyLabels rellena los campos de Entity derivados de labels: Type, Size,

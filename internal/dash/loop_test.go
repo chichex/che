@@ -765,6 +765,85 @@ func TestRuleLabel_ExecutePlan(t *testing.T) {
 	}
 }
 
+// TestTick_PrefersOldestFirst: con varias entidades elegibles del mismo side
+// y un único slot, el tick debe dispatchar la más vieja primero. Sin este
+// orden, el default de `gh list` (most-recent-first) hacía que un item con
+// días esperando quedara detrás del recién creado.
+func TestTick_PrefersOldestFirst(t *testing.T) {
+	now := time.Now()
+	ents := []Entity{
+		// Orden en el slice: más nuevo primero (simula gh list default).
+		{Kind: KindIssue, IssueNumber: 3, Status: "plan", CreatedAt: now.Add(-1 * time.Hour)},
+		{Kind: KindIssue, IssueNumber: 2, Status: "plan", CreatedAt: now.Add(-24 * time.Hour)},
+		{Kind: KindIssue, IssueNumber: 1, Status: "plan", CreatedAt: now.Add(-72 * time.Hour)},
+	}
+	s, fr := newLoopServer(t, ents)
+	s.loop.enabled = true
+	s.loop.rules[RuleValidatePlan] = true
+
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick dispatches: got %d want 1", n)
+	}
+	if got := fr.last().EntityKey; got != 1 {
+		t.Errorf("oldest-first: primer dispatch debe ser #1 (72h); got #%d", got)
+	}
+
+	// Liberar y resolver #1 con approve (sale del loop). Próximo tick debe
+	// tomar #2 (24h), no #3.
+	s.clearRunning(1)
+	s.source.(*fixedSource).snap.Entities[2].PlanVerdict = "approve"
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick #2 dispatches: got %d want 1", n)
+	}
+	if got := fr.last().EntityKey; got != 2 {
+		t.Errorf("oldest-first tras #1 done: segundo dispatch debe ser #2 (24h); got #%d", got)
+	}
+}
+
+// TestTick_ZeroCreatedAtKeepsOriginalOrder: entidades con CreatedAt zero
+// (fixtures viejos, mocks sin poblar) empatan y caen en orden del slice por
+// ser sort stable. Fija el contrato: no cambiamos el orden observable de
+// tests existentes que usan Entity sin CreatedAt.
+func TestTick_ZeroCreatedAtKeepsOriginalOrder(t *testing.T) {
+	ents := []Entity{
+		{Kind: KindIssue, IssueNumber: 10, Status: "plan"},
+		{Kind: KindIssue, IssueNumber: 20, Status: "plan"},
+	}
+	s, fr := newLoopServer(t, ents)
+	s.loop.enabled = true
+	s.loop.rules[RuleValidatePlan] = true
+
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick: got %d want 1", n)
+	}
+	if got := fr.last().EntityKey; got != 10 {
+		t.Errorf("stable sort con empates zero: got #%d want #10 (orden original)", got)
+	}
+}
+
+// TestLaterOf fija la semántica del helper max-date con zero como "sin dato".
+func TestLaterOf(t *testing.T) {
+	now := time.Now()
+	older := now.Add(-24 * time.Hour)
+	var zero time.Time
+
+	if got := laterOf(now, older); !got.Equal(now) {
+		t.Errorf("max(now, older): got %v want %v", got, now)
+	}
+	if got := laterOf(older, now); !got.Equal(now) {
+		t.Errorf("max(older, now): got %v want %v", got, now)
+	}
+	if got := laterOf(zero, now); !got.Equal(now) {
+		t.Errorf("max(zero, now): got %v want %v (zero debe tratarse como 'sin dato')", got, now)
+	}
+	if got := laterOf(now, zero); !got.Equal(now) {
+		t.Errorf("max(now, zero): got %v want %v", got, now)
+	}
+	if got := laterOf(zero, zero); !got.IsZero() {
+		t.Errorf("max(zero, zero): got %v want zero", got)
+	}
+}
+
 // TestEntitySide fija la clasificación por Kind.
 func TestEntitySide(t *testing.T) {
 	if got := entitySide(Entity{Kind: KindIssue}); got != "issue" {

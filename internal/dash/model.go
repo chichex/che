@@ -8,6 +8,8 @@
 // posteriores los completará un poller que lea labels de gh api.
 package dash
 
+import "time"
+
 // EntityKind distingue una entidad "issue suelto" (sin PR aún) de una
 // "fusionada" issue+PR (vinculados via close-keywords). El dispatcher de
 // columna ya NO usa Kind (solo Status decide la columna), pero el render
@@ -58,6 +60,13 @@ type Entity struct {
 	RunningFlow string // "explore" | "execute" | "iterate" | "validate" | "close" — vacío = idle
 	RunIter     int    // iteración actual (1-based)
 	RunMax      int    // max iteraciones del loop
+
+	// CreatedAt se usa para priorizar el auto-loop (ver loop.go): más viejo
+	// primero, así un item que lleva tiempo en el board no queda atrás del
+	// recién creado. Para fused (issue + PR) guardamos la más reciente de
+	// las dos fechas — si iteraste el PR hace poco, la entity baja en la
+	// cola. Zero si el poller no pudo resolverla (mocks, fixtures viejos).
+	CreatedAt time.Time
 
 	ChecksOK      int
 	ChecksPending int

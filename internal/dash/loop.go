@@ -50,6 +50,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"sync"
 	"time"
 )
@@ -378,6 +379,18 @@ func (s *Server) runTick() int {
 	}
 
 	snap := s.source.Snapshot()
+	// Priorizar más viejo → más nuevo. Con concurrency 1 issue-side + 1
+	// PR-side, sin este orden el que llegó último gana el slot en cada
+	// tick (gh list default es most-recent-first) y un item que lleva
+	// días esperando queda rezagado. Para fused usamos max(issue, PR)
+	// como CreatedAt (ver combineEntities) — un PR recién iterado baja
+	// en la cola. Stable para que empates (p.ej. todos zero en tests
+	// existentes) respeten el orden original del snapshot.
+	ents := make([]Entity, len(snap.Entities))
+	copy(ents, snap.Entities)
+	sort.SliceStable(ents, func(i, j int) bool {
+		return ents[i].CreatedAt.Before(ents[j].CreatedAt)
+	})
 	// Clasificar slots ya ocupados: si hay flows en curso (overlay local
 	// o snapshot), reservamos el slot para que no dispatchemos arriba.
 	// Reutilizamos la lógica de overlayRunning: buildData hace eso en
@@ -391,7 +404,7 @@ func (s *Server) runTick() int {
 		localRunning[k] = v
 	}
 	s.mu.Unlock()
-	for _, e := range snap.Entities {
+	for _, e := range ents {
 		running := e.RunningFlow != "" || localRunning[e.IssueNumber] != ""
 		if !running {
 			continue
@@ -404,7 +417,7 @@ func (s *Server) runTick() int {
 	}
 
 	dispatches := 0
-	for _, e := range snap.Entities {
+	for _, e := range ents {
 		// Si ambos slots ocupados, salir del loop (nada más por hacer).
 		if issueSlotBusy && prSlotBusy {
 			break
