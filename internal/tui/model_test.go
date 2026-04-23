@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/chichex/che/internal/flow/validate"
+	"github.com/chichex/che/internal/startup"
 )
 
 // key arma un KeyMsg a partir del string que el Update espera via
@@ -138,10 +139,10 @@ func TestValidateItemAt_PlanVsPR(t *testing.T) {
 		},
 	}
 	cases := []struct {
-		idx       int
-		wantNum   int
-		wantURL   string
-		wantIsPR  bool
+		idx      int
+		wantNum  int
+		wantURL  string
+		wantIsPR bool
 	}{
 		{0, 42, "u1", false},
 		{1, 43, "u2", false},
@@ -262,9 +263,9 @@ func TestIterateItemAt_PlanVsPR(t *testing.T) {
 
 func TestMaybeAdvanceIterate_AmbasVaciasEmptyState(t *testing.T) {
 	m := Model{
-		screen:              screenIterateLoading,
-		iteratePlansLoaded:  true,
-		iteratePRsLoaded:    true,
+		screen:             screenIterateLoading,
+		iteratePlansLoaded: true,
+		iteratePRsLoaded:   true,
 	}
 	out, _ := m.maybeAdvanceIterate()
 	got := out.(Model)
@@ -604,6 +605,182 @@ func TestRenderMenu_IdeaSinRefNoImprimeHash(t *testing.T) {
 	// Idea sin ref no debería imprimir "#" (el único "#" del menú es en el item de ref).
 	if strings.Contains(out, "#") {
 		t.Errorf("idea sin ref no debería imprimir '#': %s", out)
+	}
+}
+
+// ---- startup checks: arranque y dispatch ----
+
+// Sin checks triggered, transicionamos directo al menú (cero ruido en
+// happy path).
+func TestStartupChecksLoaded_SinTriggeredVaAlMenu(t *testing.T) {
+	m := Model{screen: screenStartupChecksLoading}
+	out, _ := m.Update(startupChecksLoadedMsg{
+		results: []startup.Result{
+			{Name: startup.CheckMigrateLabels, Triggered: false},
+			{Name: startup.CheckVersion, Triggered: false},
+			{Name: startup.CheckLocks, Triggered: false},
+		},
+	})
+	got := out.(Model)
+	if got.screen != screenMenu {
+		t.Errorf("sin checks triggered debería ir al menú, got %v", got.screen)
+	}
+	if len(got.startupChecks) != 0 {
+		t.Errorf("startupChecks debería quedar vacío, got %d", len(got.startupChecks))
+	}
+}
+
+// Con al menos un check triggered, mostramos la pantalla y filtramos
+// los no-triggered.
+func TestStartupChecksLoaded_FiltreaSoloTriggered(t *testing.T) {
+	m := Model{screen: screenStartupChecksLoading}
+	out, _ := m.Update(startupChecksLoadedMsg{
+		results: []startup.Result{
+			{Name: startup.CheckMigrateLabels, Triggered: true, OldLabels: []string{"status:idea"}},
+			{Name: startup.CheckVersion, Triggered: false},
+			{Name: startup.CheckLocks, Triggered: true, Locks: []startup.LockedItem{{Number: 42}}},
+		},
+	})
+	got := out.(Model)
+	if got.screen != screenStartupChecks {
+		t.Fatalf("debería ir a screenStartupChecks, got %v", got.screen)
+	}
+	if len(got.startupChecks) != 2 {
+		t.Errorf("debería filtrar a los 2 triggered, got %d", len(got.startupChecks))
+	}
+	if got.startupCursor != 0 {
+		t.Errorf("cursor debería arrancar en 0, got %d", got.startupCursor)
+	}
+}
+
+// "n" avanza al próximo check sin persistir nada.
+func TestStartupChecksKey_NoEstaVez(t *testing.T) {
+	m := Model{
+		screen:        screenStartupChecks,
+		startupChecks: []startup.Result{{Name: startup.CheckVersion, Triggered: true}},
+		startupCursor: 0,
+	}
+	m = step(m, "n")
+	// Sin más checks: vuelve al menú.
+	if m.screen != screenMenu {
+		t.Errorf("después del último check 'n' debería ir al menú, got %v", m.screen)
+	}
+}
+
+// "esc" sale de la pantalla de chequeos.
+func TestStartupChecksKey_EscSaltaTodos(t *testing.T) {
+	m := Model{
+		screen: screenStartupChecks,
+		startupChecks: []startup.Result{
+			{Name: startup.CheckVersion, Triggered: true},
+			{Name: startup.CheckLocks, Triggered: true},
+		},
+	}
+	m = step(m, "esc")
+	if m.screen != screenMenu {
+		t.Errorf("esc debería ir al menú, got %v", m.screen)
+	}
+	if len(m.startupChecks) != 0 {
+		t.Errorf("esc debería limpiar la lista, got %d", len(m.startupChecks))
+	}
+}
+
+// "n" sobre 2 checks avanza primero al segundo, después al menú.
+func TestStartupChecksKey_NoAvanzaSecuencial(t *testing.T) {
+	m := Model{
+		screen: screenStartupChecks,
+		startupChecks: []startup.Result{
+			{Name: startup.CheckMigrateLabels, Triggered: true},
+			{Name: startup.CheckVersion, Triggered: true},
+		},
+	}
+	m = step(m, "n")
+	if m.screen != screenStartupChecks {
+		t.Errorf("después de 1 'n' con 2 checks, debería seguir en checks, got %v", m.screen)
+	}
+	if m.startupCursor != 1 {
+		t.Errorf("cursor debería ser 1, got %d", m.startupCursor)
+	}
+	m = step(m, "n")
+	if m.screen != screenMenu {
+		t.Errorf("después del 2do 'n' debería ir al menú, got %v", m.screen)
+	}
+}
+
+// "s" sobre el check de locks salta directo a screenLocksLoading.
+func TestStartupChecksKey_SiLocksSaltaAPantallaDeLocks(t *testing.T) {
+	m := Model{
+		screen: screenStartupChecks,
+		startupChecks: []startup.Result{
+			{Name: startup.CheckLocks, Triggered: true, Locks: []startup.LockedItem{{Number: 42}}},
+		},
+	}
+	out, _ := m.handleStartupChecksKey(key("s"))
+	got := out.(Model)
+	if got.screen != screenLocksLoading {
+		t.Errorf("'s' sobre locks debería ir a screenLocksLoading, got %v", got.screen)
+	}
+}
+
+func TestRenderStartupChecks_IncluyeMensajeYOpciones(t *testing.T) {
+	m := Model{
+		startupChecks: []startup.Result{{
+			Name:           startup.CheckVersion,
+			Triggered:      true,
+			CurrentVersion: "0.0.49",
+			LatestVersion:  "v0.0.50",
+		}},
+	}
+	out := renderStartupChecks(m)
+	if !strings.Contains(out, "0.0.49") || !strings.Contains(out, "v0.0.50") {
+		t.Errorf("debería incluir versiones: %s", out)
+	}
+	if !strings.Contains(out, "[s]") || !strings.Contains(out, "[N]") {
+		t.Errorf("debería incluir opciones [s]/[N]: %s", out)
+	}
+	if !strings.Contains(out, "che upgrade") {
+		t.Errorf("debería sugerir 'che upgrade': %s", out)
+	}
+}
+
+func TestFormatStartupCheckMessage_PorTipo(t *testing.T) {
+	cases := []struct {
+		name string
+		c    startup.Result
+		want string
+	}{
+		{
+			"migrate-labels",
+			startup.Result{Name: startup.CheckMigrateLabels, OldLabels: []string{"status:idea", "status:plan"}},
+			"migrate-labels",
+		},
+		{
+			"version",
+			startup.Result{Name: startup.CheckVersion, CurrentVersion: "0.0.1", LatestVersion: "v0.0.2"},
+			"upgrade",
+		},
+		{
+			"locks",
+			startup.Result{Name: startup.CheckLocks, Locks: []startup.LockedItem{{Number: 42}, {Number: 7}}},
+			"#42",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := formatStartupCheckMessage(c.c)
+			if !strings.Contains(got, c.want) {
+				t.Errorf("mensaje no incluye %q: %s", c.want, got)
+			}
+		})
+	}
+}
+
+// NewWithOptions con RunStartupChecks=false debe arrancar directo en el
+// menú, sin pasar por screenStartupChecksLoading.
+func TestNewWithOptions_NoChecksArrancaEnMenu(t *testing.T) {
+	m := NewWithOptions("0.0.1", nil, Options{RunStartupChecks: false})
+	if m.screen != screenMenu {
+		t.Errorf("con RunStartupChecks=false debería arrancar en menú, got %v", m.screen)
 	}
 }
 
