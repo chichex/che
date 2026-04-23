@@ -85,21 +85,32 @@
     }
   });
 
-  // Countdown al próximo poll en el status-chip. El chip tiene data-last-ok-ms
-  // (unix ms del último poll exitoso) y data-poll-interval (segundos). Cada
-  // segundo calculamos remaining = interval - (now - lastOk) y lo rendereamos
-  // en .chip-text. Cuando remaining llega a 0 mostramos "polling…" hasta que
-  // htmx swappee con los data-attrs frescos.
+  // Countdown al próximo poll en el status-chip. El chip tiene
+  // data-poll-interval (segundos) que usamos como baseline.
   //
-  // Solo aplica cuando el chip está en modo "ok" (tiene los data-attrs);
+  // Baseline del countdown: Date.now() en el cliente cuando HTMX terminó de
+  // swappear /board — NO el data-last-ok-ms del server. El timestamp del
+  // server marca cuándo terminó el refresh de gh, pero el cliente recibe
+  // el swap 1-2s después (roundtrip + render). Usar el server-side hacía
+  // que el primer tick post-swap arrancara con elapsed=1-2s y el countdown
+  // saltara de "next in 15s" a "next in 13s" en 0.5s. Con Date.now() en el
+  // cliente, el countdown arranca en 15 y baja monotonic de a uno por segundo.
+  //
+  // Solo aplica cuando el chip está en modo "ok" (tiene data-poll-interval);
   // en mock/stale/connecting el texto es estático.
+  var clientLastOk = Date.now();
+  document.body.addEventListener("htmx:afterOnLoad", function (e) {
+    var path = e && e.detail && e.detail.requestConfig && e.detail.requestConfig.path;
+    if (path === "/board") {
+      clientLastOk = Date.now();
+    }
+  });
   setInterval(function () {
     var chip = document.getElementById("status-chip");
     if (!chip) return;
-    var lastOk = parseInt(chip.dataset.lastOkMs || "0", 10);
     var interval = parseInt(chip.dataset.pollInterval || "0", 10);
-    if (!lastOk || !interval) return;
-    var elapsed = Math.floor((Date.now() - lastOk) / 1000);
+    if (!interval) return;
+    var elapsed = Math.floor((Date.now() - clientLastOk) / 1000);
     var remaining = Math.max(0, interval - elapsed);
     var textEl = chip.querySelector(".chip-text");
     if (!textEl) return;
