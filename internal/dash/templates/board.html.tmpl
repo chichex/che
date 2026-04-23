@@ -1,0 +1,92 @@
+{{/* board.html.tmpl — partial swappeado por HTMX cada PollInterval segundos.
+
+     Define dos templates:
+       - "board-partial": respuesta del endpoint /board. Incluye el chip
+         de status (con hx-swap-oob="outerHTML" para que se actualice fuera
+         del target del swap principal) + las columnas.
+       - "board-columns": las 6 columnas. Invocable desde dashboard.html.tmpl
+         en el render inicial (para no depender de un primer poll antes de
+         ver algo en la UI).
+
+     Recibe pageData: .Columns, .Snapshot, .PollInterval, .Repo. */}}
+
+{{define "status-chip"}}
+  <span id="status-chip" hx-swap-oob="outerHTML"
+        class="status-chip {{if .Snapshot.Mock}}mock{{else if .Snapshot.Stale}}err{{else if .Snapshot.LastOK.IsZero}}connecting{{else}}ok{{end}}"
+        {{- if and (not .Snapshot.Mock) (not .Snapshot.Stale) (not .Snapshot.LastOK.IsZero)}}
+        data-last-ok-ms="{{.Snapshot.LastOK.UnixMilli}}"
+        data-poll-interval="{{.PollInterval}}"
+        {{- end}}>
+    ● <span class="chip-text">{{if .Snapshot.Mock}}mock mode
+      {{- else if .Snapshot.Stale}}stale · {{errShort .Snapshot.LastErr}}
+      {{- else if .Snapshot.LastOK.IsZero}}connecting…
+      {{- else}}next in {{.PollInterval}}s{{end}}</span>
+  </span>
+{{end}}
+
+{{define "auto-loop-toggle"}}
+  <div id="auto-loop-toggle" hx-swap-oob="outerHTML"
+       class="auto-loop-toggle" title="⌘. para toggle (step 6)">
+    <div class="switch"></div>
+    <span class="label">auto-loop OFF</span>
+    {{if gt .ActiveLoops 0}}<span class="count">· {{.ActiveLoops}} activo{{if gt .ActiveLoops 1}}s{{end}}</span>{{end}}
+  </div>
+{{end}}
+
+{{define "board-columns"}}
+  {{range .Columns}}
+    <div class="col" data-status="{{.Key}}">
+      <div class="col-hdr"><b>{{.Title}}</b><span class="count{{if .Hot}} hot{{end}}">{{len .Entities}}</span></div>
+      <div class="cards">
+        {{range .Entities}}
+          <div class="card"
+               data-entity="{{.IssueNumber}}"
+               hx-get="/drawer/{{.IssueNumber}}"
+               hx-target="#drawer-slot"
+               hx-swap="innerHTML">
+            {{if eq .Kind 1}}
+              {{/* Fused: ref dual clickable (issue → PR). stopPropagation es
+                   crítico — sin él, click en el <a> bubblea y dispara el hx-get
+                   de la card, abriendo el drawer al tiempo que se abre la tab. */}}
+              <div class="card-ref">
+                <a class="ref-issue" href="https://github.com/{{$.NWO}}/issues/{{.IssueNumber}}" target="_blank" rel="noopener" onclick="event.stopPropagation()">#{{.IssueNumber}}</a><span class="ref-sep">→</span><a class="ref-pr" href="https://github.com/{{$.NWO}}/pull/{{.PRNumber}}" target="_blank" rel="noopener" onclick="event.stopPropagation()">!{{.PRNumber}}</a>
+              </div>
+              <div class="card-breadcrumb">
+                <span class="bc-ct">ct:plan</span>
+                {{- if .Type}} <span class="bc-sep">·</span> <span class="bc-type-{{.Type}}">type:{{.Type}}</span>{{end}}
+                {{- if .Size}} <span class="bc-sep">·</span> <span class="bc-size">size:{{.Size}}</span>{{end}}
+              </div>
+              <div class="card-title">{{if .PRTitle}}{{.PRTitle}}{{else}}{{.IssueTitle}}{{end}}</div>
+              <div class="card-chips">
+                {{if .PRVerdict}}<span class="chip {{verdictChipClass .PRVerdict}}">validated:{{.PRVerdict}}</span>{{end}}
+                {{if checksLabel . }}<span class="chip {{checksChipClass .}}">{{checksLabel .}}</span>{{end}}
+                {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
+                {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+              </div>
+            {{else}}
+              {{/* Issue-only: ref del issue (clickable) + título del issue */}}
+              <div class="card-ref issue-only">
+                <a href="https://github.com/{{$.NWO}}/issues/{{.IssueNumber}}" target="_blank" rel="noopener" onclick="event.stopPropagation()">#{{.IssueNumber}}</a>
+              </div>
+              <div class="card-title">{{.IssueTitle}}</div>
+              <div class="card-chips">
+                <span class="chip chip-cyan">ct:plan</span>
+                {{if .Type}}<span class="chip {{typeChipClass .Type}}">type:{{.Type}}</span>{{end}}
+                {{if .Size}}<span class="chip">size:{{.Size}}</span>{{end}}
+                {{if .PlanVerdict}}<span class="chip {{verdictChipClass .PlanVerdict}}">plan-validated:{{.PlanVerdict}}</span>{{end}}
+                {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
+                {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+              </div>
+            {{end}}
+          </div>
+        {{end}}
+      </div>
+    </div>
+  {{end}}
+{{end}}
+
+{{define "board-partial"}}
+{{template "status-chip" .}}
+{{template "auto-loop-toggle" .}}
+{{template "board-columns" .}}
+{{end}}

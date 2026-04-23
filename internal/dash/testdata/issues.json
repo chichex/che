@@ -1,0 +1,88 @@
+[
+  {
+    "number": 7,
+    "title": "che dash web local",
+    "state": "OPEN",
+    "labels": [
+      {"name": "ct:plan"},
+      {"name": "type:feature"},
+      {"name": "size:l"},
+      {"name": "status:idea"}
+    ]
+  },
+  {
+    "number": 38,
+    "title": "rollback en che idea",
+    "state": "OPEN",
+    "labels": [
+      {"name": "ct:plan"},
+      {"name": "type:feature"},
+      {"name": "size:m"},
+      {"name": "status:plan"},
+      {"name": "plan-validated:approve"}
+    ]
+  },
+  {
+    "number": 61,
+    "title": "pagination en /api/runs",
+    "state": "OPEN",
+    "labels": [
+      {"name": "ct:plan"},
+      {"name": "type:feature"},
+      {"name": "size:m"},
+      {"name": "status:idea"}
+    ]
+  },
+  {
+    "number": 33,
+    "title": "refactor logger unificado",
+    "state": "OPEN",
+    "labels": [
+      {"name": "ct:plan"},
+      {"name": "type:mejora"},
+      {"name": "size:l"},
+      {"name": "status:executing"},
+      {"name": "che:locked"}
+    ]
+  },
+  {
+    "number": 42,
+    "title": "fusion entidad issue+PR en dash",
+    "state": "OPEN",
+    "body": "## Contexto\nEl dashboard trata issue y PR como entidades separadas; necesitamos fusionarlas cuando hay close-keyword.",
+    "labels": [
+      {"name": "ct:plan"},
+      {"name": "type:feature"},
+      {"name": "size:l"},
+      {"name": "status:executed"}
+    ]
+  },
+  {
+    "number": 22,
+    "title": "listar ideas sin clasificar en TUI",
+    "state": "OPEN",
+    "labels": [
+      {"name": "ct:plan"},
+      {"name": "type:feature"},
+      {"name": "size:s"},
+      {"name": "status:executed"}
+    ]
+  },
+  {
+    "number": 99,
+    "title": "issue externo sin ct:plan (debería ser excluido)",
+    "state": "OPEN",
+    "labels": [
+      {"name": "bug"},
+      {"name": "type:fix"}
+    ]
+  },
+  {
+    "number": 100,
+    "title": "idea sin clasificar aún (ct:plan solo)",
+    "state": "OPEN",
+    "labels": [
+      {"name": "ct:plan"}
+    ]
+  }
+]

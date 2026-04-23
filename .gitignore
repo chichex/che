@@ -3,3 +3,8 @@ dist/
 .claude/
 .omx/
 .worktrees/
+
+# Playwright / screenshots locales
+.playwright-mcp/
+snapshot-*.yml
+che-dash-*.png

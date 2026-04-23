@@ -1,0 +1,78 @@
+[
+  {
+    "number": 48,
+    "title": "refactor logger unificado",
+    "state": "OPEN",
+    "headRefName": "feat/logger-unif",
+    "headRefOid": "3c12aa8b29d1e8f4a6c0b2d4e1f3a9c7b8e2d1a0",
+    "labels": [
+      {"name": "che:locked"}
+    ],
+    "closingIssuesReferences": [
+      {"number": 33, "repository": {"name": "che", "owner": {"login": "chichex"}}}
+    ],
+    "statusCheckRollup": [
+      {"__typename": "CheckRun", "name": "test", "conclusion": "SUCCESS", "status": "COMPLETED"},
+      {"__typename": "CheckRun", "name": "lint", "conclusion": "", "status": "IN_PROGRESS"}
+    ]
+  },
+  {
+    "number": 55,
+    "title": "fusion entidad issue+PR en dash",
+    "state": "OPEN",
+    "headRefName": "feat/dash-fusion",
+    "headRefOid": "a8f3c21b7e2d4f1a9c6b0d3e8f5a2c7b1d4e9a0c",
+    "labels": [
+      {"name": "validated:changes-requested"}
+    ],
+    "closingIssuesReferences": [
+      {"number": 42, "repository": {"name": "che", "owner": {"login": "chichex"}}}
+    ],
+    "statusCheckRollup": [
+      {"__typename": "CheckRun", "name": "test", "conclusion": "SUCCESS", "status": "COMPLETED"},
+      {"__typename": "CheckRun", "name": "build", "conclusion": "SUCCESS", "status": "COMPLETED"},
+      {"__typename": "CheckRun", "name": "vet", "conclusion": "SUCCESS", "status": "COMPLETED"},
+      {"__typename": "CheckRun", "name": "format", "conclusion": "SUCCESS", "status": "COMPLETED"},
+      {"__typename": "CheckRun", "name": "deps", "conclusion": "SUCCESS", "status": "COMPLETED"},
+      {"__typename": "CheckRun", "name": "integration", "conclusion": "SUCCESS", "status": "COMPLETED"},
+      {"__typename": "CheckRun", "name": "e2e", "conclusion": "SUCCESS", "status": "COMPLETED"},
+      {"__typename": "CheckRun", "name": "docs", "conclusion": "SUCCESS", "status": "COMPLETED"},
+      {"__typename": "CheckRun", "name": "coverage", "status": "QUEUED"}
+    ]
+  },
+  {
+    "number": 40,
+    "title": "listar ideas sin clasificar en TUI",
+    "state": "OPEN",
+    "headRefName": "feat/list-unclassified",
+    "headRefOid": "77e210d4c8b5a9f1e3d7b2c0a6f8e4d1b9c3a5e2",
+    "labels": [
+      {"name": "validated:approve"}
+    ],
+    "closingIssuesReferences": [
+      {"number": 22, "repository": {"name": "che", "owner": {"login": "chichex"}}}
+    ],
+    "statusCheckRollup": [
+      {"__typename": "CheckRun", "name": "test", "conclusion": "SUCCESS", "status": "COMPLETED"},
+      {"__typename": "CheckRun", "name": "build", "conclusion": "SUCCESS", "status": "COMPLETED"},
+      {"__typename": "CheckRun", "name": "vet", "conclusion": "SUCCESS", "status": "COMPLETED"},
+      {"__typename": "StatusContext", "context": "legacy-ci", "state": "SUCCESS"}
+    ]
+  },
+  {
+    "number": 44,
+    "title": "timeout config por flow",
+    "state": "OPEN",
+    "headRefName": "feat/timeout-cfg",
+    "headRefOid": "ff4e9b2c7a8d0b5e3f1c6d9a2b4e7f8c1a0d3b5e",
+    "labels": [
+      {"name": "validated:needs-human"}
+    ],
+    "closingIssuesReferences": [],
+    "statusCheckRollup": [
+      {"__typename": "CheckRun", "name": "test", "conclusion": "SUCCESS", "status": "COMPLETED"},
+      {"__typename": "CheckRun", "name": "lint", "conclusion": "FAILURE", "status": "COMPLETED"},
+      {"__typename": "StatusContext", "context": "external-scan", "state": "ERROR"}
+    ]
+  }
+]

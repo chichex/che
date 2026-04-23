@@ -1,0 +1,209 @@
+{{/* drawer.html.tmpl — partial swappeado por hx-get="/drawer/{id}".
+
+     Recibe drawerData ({Entity, NWO}). Adapta contenido según Kind:
+       - Fused (Kind=1): tabs "PR | Issue" — el tab PR tiene todo el contenido
+         operacional (meta, actions, logs); el tab Issue muestra el body del
+         issue original como contexto histórico.
+       - Issue-only: vista única con el contenido actual + body al pie si lo hay.
+
+     Setea data-entity y data-tab en el root para que dash.js pueda sincronizar
+     body[data-selected] + togglear tabs delegando el click. */}}
+<div class="drawer" data-entity="{{.IssueNumber}}" data-tab="pr">
+
+  {{if eq .Kind 1}}
+    {{/* ============= FUSED: tabs PR | Issue ============= */}}
+    <div class="drawer-tabs">
+      <button type="button" class="tab tab-pr" data-tab="pr">PR !{{.PRNumber}}</button>
+      <button type="button" class="tab tab-issue" data-tab="issue">Issue #{{.IssueNumber}}</button>
+    </div>
+
+    <div class="pane pane-pr">
+      <div class="drawer-hdr">
+        <div class="drawer-hdr-top">
+          <div class="entity-row">
+            from <a href="https://github.com/{{.NWO}}/issues/{{.IssueNumber}}" target="_blank" rel="noopener"><b>#{{.IssueNumber}}</b></a> · <a href="https://github.com/{{.NWO}}/pull/{{.PRNumber}}" target="_blank" rel="noopener"><b>!{{.PRNumber}}</b></a>
+            {{- if .Branch}} · {{.Branch}}{{end -}}
+            {{- if .SHA}} · {{.SHA}}{{end -}}
+          </div>
+          <button class="drawer-close"
+                  hx-get="/drawer/close"
+                  hx-target="#drawer-slot"
+                  hx-swap="innerHTML"
+                  title="cerrar (Esc)">×</button>
+        </div>
+        <h3>{{if .PRTitle}}{{.PRTitle}}{{else}}{{.IssueTitle}}{{end}}</h3>
+        <div class="sub">
+          {{.Column}}
+          {{- if .LoopSpec}} · loop {{.LoopSpec}}{{end -}}
+        </div>
+        <div class="drawer-chips">
+          <span class="chip">ct:plan</span>
+          {{if .Type}}<span class="chip">type:{{.Type}}</span>{{end}}
+          {{if .Size}}<span class="chip">size:{{.Size}}</span>{{end}}
+          {{if .PRVerdict}}<span class="chip {{verdictChipClass .PRVerdict}}">validated:{{.PRVerdict}}</span>{{end}}
+          {{/* Pasamos .Entity explícito porque las funcs del template (checksLabel,
+               checksChipClass, hasChecks) reciben dash.Entity y el dato de acá
+               es drawerData (wrapper con NWO). Los campos sueltos sí se promueven
+               gracias al embedding. */}}
+          {{if checksLabel .Entity }}<span class="chip {{checksChipClass .Entity}}">{{checksLabel .Entity}}</span>{{end}}
+          {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
+          {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+        </div>
+      </div>
+
+      <div class="drawer-meta">
+        {{if .LoopSpec}}<dt>loop</dt><dd class="loop-line">{{.LoopSpec}}</dd>{{end}}
+        {{if .LastAction}}<dt>última</dt><dd>{{.LastAction}}</dd>{{end}}
+        {{if .NextAction}}<dt>next</dt><dd>{{.NextAction}}</dd>{{end}}
+        {{if hasChecks .Entity}}
+          <dt>checks</dt>
+          <dd>
+            {{if .ChecksOK}}<span style="color:var(--green)">{{.ChecksOK}} ok</span>{{end}}
+            {{if .ChecksPending}}{{if .ChecksOK}} · {{end}}<span style="color:var(--orange)">{{.ChecksPending}} pending</span>{{end}}
+            {{if .ChecksFail}}{{if or .ChecksOK .ChecksPending}} · {{end}}<span style="color:var(--red)">{{.ChecksFail}} fail</span>{{end}}
+          </dd>
+        {{end}}
+        {{if .PRVerdict}}<dt>verdict</dt><dd style="color:{{verdictColor .PRVerdict}}">validated:{{.PRVerdict}}</dd>{{end}}
+      </div>
+
+      <div class="drawer-actions">
+        <button class="btn primary" disabled title="step 2: inerte">iterate</button>
+        <button class="btn warn" disabled title="step 2: inerte">validate</button>
+        <button class="btn ghost" style="margin-left:auto" disabled title="step 2: inerte">ver en GH</button>
+      </div>
+
+      <div class="drawer-logs">
+        <div class="drawer-logs-hdr">
+          <span><b>stream</b>{{if .RunningFlow}} · claude {{.RunningFlow}} · run {{.RunIter}}{{end}}</span>
+          <div class="ctl">
+            <span class="on">● auto-scroll</span>
+            <span>pause</span>
+            <span>clear</span>
+          </div>
+        </div>
+        <div class="drawer-logs-body">
+          {{if .LogRuns}}
+            {{range .LogRuns}}
+              <div class="run-sep">{{.Label}}</div>
+              {{range .Entries}}
+                <div>
+                  <span class="t">{{.Time}}</span>
+                  {{- if .Class}} <span class="{{.Class}}">{{.Text}}</span>{{else}} {{.Text}}{{end -}}
+                </div>
+              {{end}}
+            {{end}}
+            {{if .RunningFlow}}<div><span class="cursor">&nbsp;</span></div>{{end}}
+          {{else}}
+            <div style="color:var(--muted)">sin logs todavía — step 4 trae las acciones, step 5 el stream.</div>
+          {{end}}
+        </div>
+      </div>
+    </div>
+
+    <div class="pane pane-issue">
+      {{/* Tab Issue: header con ref del issue + body. Sin acciones (las
+           acciones del issue viven en el PR ahora que están fused).
+           html/template autoescapa el body — no usamos template.HTML. */}}
+      <div class="drawer-hdr">
+        <div class="drawer-hdr-top">
+          <div class="entity-row">
+            <a href="https://github.com/{{.NWO}}/issues/{{.IssueNumber}}" target="_blank" rel="noopener"><b>#{{.IssueNumber}}</b></a>
+          </div>
+          <button class="drawer-close"
+                  hx-get="/drawer/close"
+                  hx-target="#drawer-slot"
+                  hx-swap="innerHTML"
+                  title="cerrar (Esc)">×</button>
+        </div>
+        <h3>{{.IssueTitle}}</h3>
+      </div>
+      <div class="drawer-issue-body">
+        {{if .IssueBody}}
+          <pre>{{.IssueBody}}</pre>
+        {{else}}
+          <div style="color:var(--muted); padding: 12px 16px;">issue sin descripción</div>
+        {{end}}
+      </div>
+    </div>
+
+  {{else}}
+    {{/* ============= ISSUE-ONLY: vista única ============= */}}
+    <div class="drawer-hdr">
+      <div class="drawer-hdr-top">
+        <div class="entity-row">
+          <a href="https://github.com/{{.NWO}}/issues/{{.IssueNumber}}" target="_blank" rel="noopener"><b>#{{.IssueNumber}}</b></a>
+          {{- if .Branch}} · {{.Branch}}{{end -}}
+          {{- if .SHA}} · {{.SHA}}{{end -}}
+        </div>
+        <button class="drawer-close"
+                hx-get="/drawer/close"
+                hx-target="#drawer-slot"
+                hx-swap="innerHTML"
+                title="cerrar (Esc)">×</button>
+      </div>
+      <h3>{{.IssueTitle}}</h3>
+      <div class="sub">
+        {{.Column}}
+        {{- if .LoopSpec}} · loop {{.LoopSpec}}{{end -}}
+      </div>
+      <div class="drawer-chips">
+        <span class="chip">ct:plan</span>
+        {{if .Type}}<span class="chip">type:{{.Type}}</span>{{end}}
+        {{if .Size}}<span class="chip">size:{{.Size}}</span>{{end}}
+        {{if .PlanVerdict}}<span class="chip {{verdictChipClass .PlanVerdict}}">plan-validated:{{.PlanVerdict}}</span>{{end}}
+        {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
+        {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+      </div>
+    </div>
+
+    <div class="drawer-meta">
+      {{if .LoopSpec}}<dt>loop</dt><dd class="loop-line">{{.LoopSpec}}</dd>{{end}}
+      {{if .LastAction}}<dt>última</dt><dd>{{.LastAction}}</dd>{{end}}
+      {{if .NextAction}}<dt>next</dt><dd>{{.NextAction}}</dd>{{end}}
+      {{if .PlanVerdict}}<dt>verdict</dt><dd style="color:{{verdictColor .PlanVerdict}}">plan-validated:{{.PlanVerdict}}</dd>{{end}}
+    </div>
+
+    <div class="drawer-actions">
+      {{if eq .Status "idea"}}
+        <button class="btn primary" disabled title="step 2: inerte">explore</button>
+      {{else if eq .Status "plan"}}
+        <button class="btn primary" disabled title="step 2: inerte">execute</button>
+        <button class="btn warn" disabled title="step 2: inerte">validate</button>
+      {{end}}
+      <button class="btn ghost" style="margin-left:auto" disabled title="step 2: inerte">ver en GH</button>
+    </div>
+
+    <div class="drawer-logs">
+      <div class="drawer-logs-hdr">
+        <span><b>stream</b>{{if .RunningFlow}} · claude {{.RunningFlow}} · run {{.RunIter}}{{end}}</span>
+        <div class="ctl">
+          <span class="on">● auto-scroll</span>
+          <span>pause</span>
+          <span>clear</span>
+        </div>
+      </div>
+      <div class="drawer-logs-body">
+        {{if .LogRuns}}
+          {{range .LogRuns}}
+            <div class="run-sep">{{.Label}}</div>
+            {{range .Entries}}
+              <div>
+                <span class="t">{{.Time}}</span>
+                {{- if .Class}} <span class="{{.Class}}">{{.Text}}</span>{{else}} {{.Text}}{{end -}}
+              </div>
+            {{end}}
+          {{end}}
+          {{if .RunningFlow}}<div><span class="cursor">&nbsp;</span></div>{{end}}
+        {{else}}
+          <div style="color:var(--muted)">sin logs todavía — step 4 trae las acciones, step 5 el stream.</div>
+        {{end}}
+      </div>
+    </div>
+
+    {{if .IssueBody}}
+      {{/* Issue-only: mostrar body abajo (no hay tabs — es la vista única). */}}
+      <div class="drawer-issue-body"><pre>{{.IssueBody}}</pre></div>
+    {{end}}
+  {{end}}
+
+</div>

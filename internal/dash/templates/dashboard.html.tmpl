@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>che dash — {{.Repo}}</title>
+<style>
+  :root {
+    --bg: #282A36;
+    --panel: #21222C;
+    --elevated: #1E1F29;
+    --text: #F8F8F2;
+    --muted: #6272A4;
+    --cyan: #00D7FF;
+    --magenta: #FF79C6;
+    --green: #50FA7B;
+    --orange: #FFB86C;
+    --red: #FF5555;
+    --border-muted: #44475A;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.5;
+    padding: 12px;
+  }
+
+  /* ==================== Dashboard root ==================== */
+  .dash {
+    font-family: "JetBrains Mono","Fira Code",ui-monospace,monospace;
+    background: var(--bg);
+    color: var(--text);
+    border-radius: 8px;
+    font-size: 12px;
+    height: calc(100vh - 24px);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--elevated);
+    position: relative;
+  }
+
+  /* ==================== Topbar ==================== */
+  .dash-top { display: flex; gap: 10px; align-items: center; }
+  .dash-top .repo { color: var(--cyan); font-weight: bold; margin-right: 6px; font-size: 13px; }
+  .dash-top .filter {
+    background: var(--panel);
+    border: 1px solid var(--elevated);
+    color: var(--text);
+    padding: 6px 10px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 12px;
+    flex: 1;
+  }
+  .dash-top .hint { color: var(--muted); font-size: 11px; }
+  .dash-top kbd {
+    background: var(--elevated);
+    padding: 1px 6px;
+    border-radius: 3px;
+    border: 1px solid var(--border-muted);
+    color: var(--text);
+    font-family: inherit;
+    font-size: 10px;
+  }
+  .auto-loop-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    background: var(--panel);
+    border: 1px solid var(--elevated);
+    border-radius: 16px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .auto-loop-toggle .switch {
+    width: 28px;
+    height: 14px;
+    background: var(--border-muted);
+    border-radius: 8px;
+    position: relative;
+    transition: background 0.15s;
+  }
+  .auto-loop-toggle .switch::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 10px;
+    height: 10px;
+    background: var(--text);
+    border-radius: 50%;
+    transition: left 0.15s;
+  }
+  .auto-loop-toggle.on .switch { background: var(--green); }
+  .auto-loop-toggle.on .switch::after { left: 16px; }
+  .auto-loop-toggle .label { color: var(--muted); }
+  .auto-loop-toggle.on .label { color: var(--green); }
+  .auto-loop-toggle .count {
+    color: var(--magenta);
+    margin-left: 2px;
+    font-weight: bold;
+  }
+
+  /* ==================== Status chip (conexión al repo) ==================== */
+  .status-chip {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: var(--panel);
+    border: 1px solid var(--elevated);
+    white-space: nowrap;
+  }
+  .status-chip.ok { color: var(--green); }
+  .status-chip.mock { color: var(--magenta); }
+  .status-chip.err { color: var(--red); }
+  .status-chip.connecting { color: var(--muted); }
+
+  /* ==================== Workspace layout ====================
+     Sin drawer abierto: una sola columna (board ocupa todo el ancho).
+     Con drawer: 1fr | 520px.
+     :has() está soportado por Safari/Chrome/Firefox modernos; el board sirve
+     como mockup local así que no nos preocupa IE/legacy. */
+  .dash-workspace {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    min-height: 0;
+  }
+  .dash-workspace:has(#drawer-slot .drawer) {
+    grid-template-columns: 1fr 520px;
+  }
+  /* drawer-slot vacío no debe ocupar ancho ni huecos visuales. */
+  #drawer-slot:empty { display: none; }
+
+  /* ==================== Board ==================== */
+  .dash-board {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 8px;
+    overflow: hidden;
+    min-width: 0;
+  }
+  .col {
+    background: var(--panel);
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .col-hdr {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--elevated);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+  }
+  .col-hdr b { text-transform: uppercase; letter-spacing: 0.5px; color: var(--text); }
+  .col-hdr .count {
+    background: var(--elevated);
+    color: var(--muted);
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 10px;
+  }
+  .col-hdr .count.hot {
+    background: var(--magenta);
+    color: var(--bg);
+    animation: pulse 1.4s infinite;
+  }
+  @keyframes pulse { 50% { opacity: 0.55; } }
+  .col[data-status="exploring"] .col-hdr b,
+  .col[data-status="executing"] .col-hdr b,
+  .col[data-status="validating"] .col-hdr b { color: var(--orange); }
+  .col[data-status="approved"] .col-hdr b { color: var(--green); }
+
+  .cards {
+    padding: 6px;
+    overflow: auto;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  /* ==================== Card (chips semánticos) ==================== */
+  .card {
+    background: var(--elevated);
+    padding: 10px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    border: 1px solid var(--elevated);
+    color: var(--text);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+  .card:hover { border-color: var(--border-muted); }
+  /* Highlight de la card seleccionada. body[data-selected] lo setea dash.js
+     después de que htmx swappea el drawer; el CSS hace el resto. */
+  body[data-selected] .card[data-entity] { /* placeholder para selectores específicos abajo */ }
+
+  .card-breadcrumb {
+    color: var(--muted);
+    font-size: 10px;
+    margin-bottom: 4px;
+    letter-spacing: 0.3px;
+  }
+  /* Spacing entre ref dual y breadcrumb en fused cards. */
+  .card-ref + .card-breadcrumb { margin-top: 4px; }
+  .card-ref {
+    color: var(--cyan);
+    font-size: 12px;
+    font-weight: 600;
+    font-family: "JetBrains Mono","Fira Code",ui-monospace,monospace;
+  }
+  .card-ref.issue-only { color: var(--text); }
+  .card-title {
+    color: var(--text);
+    font-size: 12px;
+    margin: 2px 0 8px;
+    line-height: 1.35;
+  }
+  .card-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .chip {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: var(--panel);
+    color: var(--muted);
+    letter-spacing: 0.2px;
+  }
+  .chip-green { background: rgba(80,250,123,0.12); color: var(--green); }
+  .chip-orange { background: rgba(255,184,108,0.12); color: var(--orange); }
+  .chip-red { background: rgba(255,85,85,0.14); color: var(--red); }
+  .chip-magenta { background: rgba(255,121,198,0.12); color: var(--magenta); }
+  .chip-cyan { background: rgba(0,215,255,0.18); color: var(--cyan); }
+
+  /* Dual-ref line en fused cards: #issue → !pr.
+     Ambos prominentes; el arrow es separador muted. */
+  .card-ref .ref-issue { color: var(--text); font-weight: 600; }
+  .card-ref .ref-sep   { color: var(--muted); margin: 0 4px; font-weight: 400; }
+  .card-ref .ref-pr    { color: var(--cyan); font-weight: 600; }
+  .chip-lock { background: rgba(255,85,85,0.18); color: var(--red); }
+
+  /* Breadcrumb coloreado de fused cards: each segment has its own color. */
+  .card-breadcrumb .bc-from { color: var(--muted); }
+  .card-breadcrumb .bc-ref  { color: var(--cyan); }
+  .card-breadcrumb .bc-ct   { color: var(--cyan); }
+  .card-breadcrumb .bc-type-feature { color: var(--magenta); }
+  .card-breadcrumb .bc-type-fix     { color: var(--red); }
+  .card-breadcrumb .bc-type-mejora  { color: var(--orange); }
+  .card-breadcrumb .bc-type-ux      { color: var(--green); }
+  .card-breadcrumb .bc-size { color: var(--muted); }
+  .card-breadcrumb .bc-sep  { color: var(--border-muted); margin: 0 2px; }
+
+  /* ==================== Drawer ==================== */
+  /* El drawer ahora puede tener tabs (fused) o ir directo al contenido
+     (issue-only). Usamos flex column en vez de grid fijo a 4 filas — el
+     pane-pr tiene su propio grid interno si hace falta, y el pane-issue
+     es una vista de body que puede scrollear. */
+  .drawer {
+    background: var(--panel);
+    border-radius: 6px;
+    border: 1px solid var(--elevated);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-height: 0;
+  }
+  /* Un pane del drawer ocupa todo el espacio restante y es su propio
+     contenedor flex column para que el header quede fijo y los logs/body
+     puedan scrollear. */
+  .drawer .pane {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+  }
+  .drawer-hdr {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--elevated);
+    background: linear-gradient(180deg, rgba(255,121,198,0.06), transparent);
+  }
+  .drawer-hdr-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .drawer-close {
+    background: transparent;
+    border: 1px solid var(--border-muted);
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1;
+    width: 22px;
+    height: 22px;
+    border-radius: 3px;
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+  }
+  .drawer-close:hover { color: var(--text); border-color: var(--text); }
+  .drawer-hdr .entity-row {
+    color: var(--muted);
+    font-size: 11px;
+    margin-bottom: 4px;
+    letter-spacing: 0.3px;
+    flex: 1;
+    min-width: 0;
+    word-break: break-all;
+  }
+  .drawer-hdr .entity-row b { color: var(--cyan); }
+  .drawer-hdr h3 {
+    margin: 0 0 6px 0;
+    font-size: 14px;
+    color: var(--text);
+    font-weight: normal;
+  }
+  .drawer-hdr .sub { color: var(--muted); font-size: 11px; }
+  .drawer-hdr .drawer-chips { display: flex; gap: 4px; margin-top: 10px; flex-wrap: wrap; }
+
+  .drawer-meta {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--elevated);
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    gap: 3px 10px;
+    font-size: 11.5px;
+    background: var(--elevated);
+  }
+  .drawer-meta dt { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .drawer-meta dd { margin: 0; color: var(--text); }
+  .drawer-meta .loop-line { color: var(--magenta); }
+
+  .drawer-actions {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--elevated);
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    align-items: center;
+  }
+  .btn {
+    background: var(--elevated);
+    color: var(--text);
+    border: 1px solid var(--border-muted);
+    padding: 5px 10px;
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+  .btn.primary { background: var(--cyan); color: var(--bg); border-color: var(--cyan); }
+  .btn.success { border-color: var(--green); color: var(--green); background: transparent; }
+  .btn.warn { border-color: var(--orange); color: var(--orange); background: transparent; }
+  .btn.danger { border-color: var(--red); color: var(--red); background: transparent; }
+  .btn.ghost { border-color: var(--muted); color: var(--muted); background: transparent; }
+
+  .drawer-logs { display: flex; flex-direction: column; min-height: 0; background: #15161b; }
+  .drawer-logs-hdr {
+    padding: 6px 14px;
+    border-bottom: 1px solid var(--elevated);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 10px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: var(--panel);
+  }
+  .drawer-logs-hdr b { color: var(--orange); }
+  .drawer-logs-hdr .ctl {
+    display: flex;
+    gap: 8px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-size: 10px;
+  }
+  .drawer-logs-hdr .ctl span { cursor: pointer; }
+  .drawer-logs-hdr .ctl span.on { color: var(--green); }
+  .drawer-logs-body {
+    flex: 1;
+    padding: 10px 14px;
+    overflow: auto;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--text);
+  }
+  .drawer-logs-body .t { color: var(--muted); }
+  .drawer-logs-body .tool { color: var(--magenta); }
+  .drawer-logs-body .ok { color: var(--green); }
+  .drawer-logs-body .warn { color: var(--orange); }
+  .drawer-logs-body .err { color: var(--red); }
+  .drawer-logs-body .info { color: var(--cyan); }
+  .drawer-logs-body .run-sep {
+    border-top: 1px dashed var(--elevated);
+    padding-top: 6px;
+    margin-top: 6px;
+    color: var(--muted);
+    font-size: 10px;
+  }
+  .cursor {
+    display: inline-block;
+    width: 7px;
+    background: var(--text);
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* ==================== Refs clickables (cards + drawer) ====================
+     Los <a> dentro de .card-ref y .entity-row heredan el color del contenedor
+     (las clases ref-issue/ref-pr ya llevan color explícito, así que
+     `color: inherit` preserva ese tono). Subrayado solo al hover para no
+     competir visualmente con las columnas. */
+  .card-ref a, .entity-row a {
+    color: inherit;
+    text-decoration: none;
+    cursor: pointer;
+  }
+  .card-ref a:hover, .entity-row a:hover {
+    text-decoration: underline;
+  }
+
+  /* ==================== Drawer tabs (fused: PR | Issue) ====================
+     El toggle es via atributo data-tab en .drawer (pr|issue). Sin JS activo
+     el drawer arranca en "pr" (default en el template) — los selectores de
+     abajo ocultan el pane que no corresponde. */
+  .drawer-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 12px 16px 0;
+    border-bottom: 1px solid var(--elevated);
+    flex-shrink: 0;
+  }
+  .drawer-tabs .tab {
+    background: transparent;
+    border: none;
+    color: var(--muted);
+    font: inherit;
+    padding: 8px 14px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .drawer-tabs .tab:hover { color: var(--text); }
+  .drawer[data-tab="pr"] .tab-pr,
+  .drawer[data-tab="issue"] .tab-issue {
+    color: var(--cyan);
+    border-bottom-color: var(--cyan);
+  }
+  .drawer[data-tab="pr"] .pane-issue { display: none; }
+  .drawer[data-tab="issue"] .pane-pr { display: none; }
+
+  /* Cuerpo del tab Issue (y body al pie del issue-only). Scroll interno
+     para que el body largo no rompa el alto del drawer. */
+  .drawer-issue-body {
+    padding: 12px 16px;
+    overflow: auto;
+    flex: 1;
+    min-height: 0;
+  }
+  .drawer-issue-body pre {
+    margin: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text);
+  }
+</style>
+</head>
+<body>
+
+<div class="dash">
+
+  <!-- Topbar -->
+  <div class="dash-top">
+    <span class="repo">{{.Repo}}</span>
+    <input class="filter" placeholder="filter: type:feature, author:@me, label:urgent" value="">
+    {{template "auto-loop-toggle" .}}
+    {{template "status-chip" .}}
+    <span class="hint"><kbd>/</kbd> buscar · <kbd>Esc</kbd> cerrar</span>
+  </div>
+
+  <div class="dash-workspace">
+
+    <!-- ==== BOARD ==== -->
+    {{/* El wrapper persiste; HTMX hace polling cada PollInterval segundos y
+         swappea solo el innerHTML con la respuesta de /board (que trae el
+         status-chip via hx-swap-oob + las columnas). */}}
+    <div class="dash-board"
+         hx-get="/board"
+         hx-trigger="every {{.PollInterval}}s"
+         hx-swap="innerHTML">
+      {{template "board-columns" .}}
+    </div>
+
+    <!-- ==== DRAWER (slot vacío al cargar; htmx lo llena al clickear una card) ==== -->
+    <div id="drawer-slot"></div>
+
+  </div>
+</div>
+
+<style>
+  /* Highlight de la card abierta. Generado dinámicamente por id no es
+     posible en CSS estático, así que usamos un selector de atributo
+     suficientemente específico. data-selected en body es seteado por
+     dash.js al recibir el htmx:afterSwap del drawer. */
+  body[data-selected] .card[data-entity] { /* base no-op, overridden vía JS abajo */ }
+</style>
+
+<script src="/static/htmx.min.js"></script>
+<script src="/static/dash.js"></script>
+<script>
+  // Highlight dinámico vía hoja de estilos inyectada cada vez que cambia
+  // body[data-selected]. Más simple que mantener una clase en la card.
+  (function () {
+    var styleEl = document.createElement("style");
+    document.head.appendChild(styleEl);
+    function syncHighlight() {
+      var sel = document.body.dataset.selected;
+      if (!sel) {
+        styleEl.textContent = "";
+        return;
+      }
+      // Escape básico — sel viene de un IssueNumber numérico, pero blindamos.
+      var safe = sel.replace(/[^0-9a-zA-Z_-]/g, "");
+      styleEl.textContent =
+        '.card[data-entity="' + safe + '"] {' +
+        '  border-color: var(--cyan);' +
+        '  box-shadow: 0 0 0 1px var(--cyan);' +
+        '}';
+    }
+    // MutationObserver sobre body[data-selected]. Más limpio que escuchar
+    // cada htmx:afterSwap y mantener dos handlers en sync.
+    var mo = new MutationObserver(syncHighlight);
+    mo.observe(document.body, { attributes: true, attributeFilter: ["data-selected"] });
+    syncHighlight();
+  })();
+</script>
+
+</body>
+</html>
