@@ -73,14 +73,21 @@
         {{/* Botones fire-and-forget: hx-post lanza el subcomando y swapea
              el modal con el drawer refreshado (ya muestra ⟳ y botones
              disabled). Si RunningFlow != "", toda la row entra disabled
-             para evitar doble dispatch mientras corre el flow. */}}
+             para evitar doble dispatch mientras corre el flow.
+
+             Fused (hay PR): iterate/validate corren contra el PR, no el
+             issue. `che validate <N>` / `che iterate <N>` hacen
+             gh api issues/N para detectar si N es PR o issue — pasarle
+             el issue number en che:executed haría que valide el plan
+             (fallaría porque el issue ya pasó che:plan). Pasamos el
+             PRNumber para que detectTarget caiga en TargetPR. */}}
         <button class="btn primary"
-                hx-post="/action/iterate/{{.IssueNumber}}"
+                hx-post="/action/iterate/{{.PRNumber}}"
                 hx-target="#modal-slot"
                 hx-swap="innerHTML"
-                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="iterate #{{.IssueNumber}}"{{end}}>iterate</button>
+                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="iterate !{{.PRNumber}}"{{end}}>iterate</button>
         <button class="btn warn"
-                hx-post="/action/validate/{{.IssueNumber}}"
+                hx-post="/action/validate/{{.PRNumber}}"
                 hx-target="#modal-slot"
                 hx-swap="innerHTML"
                 {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate !{{.PRNumber}}"{{end}}>validate</button>

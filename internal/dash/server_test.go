@@ -719,9 +719,12 @@ func TestDrawerRendersActionButtons(t *testing.T) {
 }
 
 // TestDrawerRendersActionButtons_Fused verifica el variant Kind=1: los
-// botones iterate/validate apuntan al IssueNumber (los subcomandos che
-// iterate/validate aceptan ref de issue y resuelven el PR internamente),
-// y "ver en GH" linkea al PR.
+// botones iterate/validate apuntan al PRNumber. `che validate <N>` y
+// `che iterate <N>` hacen gh api issues/N para decidir si N es PR o
+// issue — pasarle el issue en che:executed haría que valide el plan
+// y rechazaría porque el issue ya no está en che:plan. El PR sí
+// dispara el modo PR (validate diff / iterate sobre branch).
+// "ver en GH" linkea al PR.
 func TestDrawerRendersActionButtons_Fused(t *testing.T) {
 	src := &fixedSource{snap: Snapshot{
 		NWO:    "demo/che",
@@ -742,11 +745,18 @@ func TestDrawerRendersActionButtons_Fused(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	got := string(body)
 
-	if !strings.Contains(got, `hx-post="/action/iterate/42"`) {
-		t.Errorf("fused drawer missing hx-post=/action/iterate/42")
+	if !strings.Contains(got, `hx-post="/action/iterate/55"`) {
+		t.Errorf("fused drawer missing hx-post=/action/iterate/55 (PRNumber)")
 	}
-	if !strings.Contains(got, `hx-post="/action/validate/42"`) {
-		t.Errorf("fused drawer missing hx-post=/action/validate/42")
+	if !strings.Contains(got, `hx-post="/action/validate/55"`) {
+		t.Errorf("fused drawer missing hx-post=/action/validate/55 (PRNumber)")
+	}
+	// defensa: el IssueNumber NO debería aparecer como target de iterate/validate.
+	if strings.Contains(got, `hx-post="/action/iterate/42"`) {
+		t.Errorf("fused drawer iterate should target PR (55), not issue (42)")
+	}
+	if strings.Contains(got, `hx-post="/action/validate/42"`) {
+		t.Errorf("fused drawer validate should target PR (55), not issue (42)")
 	}
 	// "ver en GH" del fused apunta al PR (es la vista principal del tab pr).
 	if !strings.Contains(got, `href="https://github.com/demo/che/pull/55"`) {
