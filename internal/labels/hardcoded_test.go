@@ -26,6 +26,18 @@ func TestNoHardcodedLabelsOutsideThisPackage(t *testing.T) {
 		`"` + StatusExecuting + `"`,
 		`"` + StatusExecuted + `"`,
 		`"` + CtPlan + `"`,
+		// Máquina nueva (prefix `che:*`). Aunque PR1 todavía no migra los
+		// flows, dejamos los 9 ya bloqueados para que PR2..PR5 estén
+		// forzados a usar las constantes desde el día 1.
+		`"` + CheIdea + `"`,
+		`"` + ChePlanning + `"`,
+		`"` + ChePlan + `"`,
+		`"` + CheExecuting + `"`,
+		`"` + CheExecuted + `"`,
+		`"` + CheValidating + `"`,
+		`"` + CheValidated + `"`,
+		`"` + CheClosing + `"`,
+		`"` + CheClosed + `"`,
 	}
 
 	var violations []string
