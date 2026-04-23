@@ -560,6 +560,81 @@
     line-height: 1.5;
     color: var(--text);
   }
+
+  /* ==================== Markdown rendering (.md) ====================
+     GFM del body del issue renderizado por goldmark. Paleta Dracula;
+     code spans y fences en --elevated; tipografía sans-serif para texto
+     corrido y mono solo en code/pre. */
+  .md {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--text);
+  }
+  .md h1, .md h2, .md h3, .md h4, .md h5, .md h6 {
+    color: var(--text);
+    margin: 18px 0 8px;
+    line-height: 1.3;
+  }
+  .md h1 { font-size: 20px; border-bottom: 1px solid var(--elevated); padding-bottom: 6px; }
+  .md h2 { font-size: 17px; border-bottom: 1px solid var(--elevated); padding-bottom: 4px; }
+  .md h3 { font-size: 15px; }
+  .md h4, .md h5, .md h6 { font-size: 13px; color: var(--muted); }
+  .md p { margin: 8px 0; }
+  .md a { color: var(--cyan); text-decoration: none; }
+  .md a:hover { text-decoration: underline; }
+  .md ul, .md ol { margin: 8px 0; padding-left: 24px; }
+  .md li { margin: 3px 0; }
+  .md li > p { margin: 2px 0; }
+  .md strong, .md b { color: var(--text); font-weight: 600; }
+  .md em, .md i { color: var(--text); }
+  .md code {
+    font-family: "JetBrains Mono","Fira Code",ui-monospace,monospace;
+    background: var(--elevated);
+    color: var(--magenta);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 12px;
+  }
+  .md pre {
+    background: var(--elevated);
+    border: 1px solid var(--border-muted);
+    border-radius: 4px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    margin: 10px 0;
+  }
+  .md pre code {
+    background: transparent;
+    color: var(--text);
+    padding: 0;
+    font-size: 12px;
+  }
+  .md blockquote {
+    border-left: 3px solid var(--border-muted);
+    margin: 10px 0;
+    padding: 2px 12px;
+    color: var(--muted);
+  }
+  .md hr {
+    border: none;
+    border-top: 1px solid var(--elevated);
+    margin: 16px 0;
+  }
+  .md table {
+    border-collapse: collapse;
+    margin: 10px 0;
+    font-size: 12px;
+  }
+  .md th, .md td {
+    border: 1px solid var(--elevated);
+    padding: 6px 10px;
+    text-align: left;
+  }
+  .md th { background: var(--elevated); color: var(--text); font-weight: 600; }
+  .md img { max-width: 100%; border-radius: 4px; }
+  .md input[type="checkbox"] { margin-right: 6px; }
+  .md del { color: var(--muted); }
 </style>
 </head>
 <body>
