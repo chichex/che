@@ -130,6 +130,7 @@
     flex: 1;
     display: grid;
     grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
     gap: 12px;
     min-height: 0;
   }
@@ -148,6 +149,7 @@
     overflow-x: auto;
     overflow-y: hidden;
     min-width: 0;
+    min-height: 0;
     /* min-width del contenido: 9 columnas con un piso razonable (~110px)
        más gaps. Si el viewport es más chico, scrolleamos en X en vez de
        comprimir las cards. */
@@ -161,6 +163,8 @@
     display: flex;
     flex-direction: column;
     min-width: 110px;
+    min-height: 0;
+    overflow: hidden;
   }
   .col-hdr {
     padding: 8px 10px;
@@ -169,6 +173,7 @@
     justify-content: space-between;
     align-items: center;
     font-size: 11px;
+    flex-shrink: 0;
   }
   .col-hdr b { text-transform: uppercase; letter-spacing: 0.5px; color: var(--text); }
   .col-hdr .count {
@@ -184,6 +189,48 @@
     animation: pulse 1.4s infinite;
   }
   @keyframes pulse { 50% { opacity: 0.55; } }
+
+  /* ==================== Board loading state ====================
+     Se muestra dentro de .dash-board cuando aún no hubo primer poll
+     exitoso (Snapshot.LastOK.IsZero). Rompe el grid con
+     grid-column: 1 / -1 para ocupar las 9 columnas y centra spinner +
+     mensaje. Se reemplaza por las columnas reales en el primer
+     /board exitoso (HTMX swap a 200ms del page load). */
+  .board-loading {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 60px 20px;
+    color: var(--muted);
+    text-align: center;
+  }
+  .board-loading-text {
+    color: var(--text);
+    font-size: 13px;
+  }
+  .board-loading-sub {
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .board-loading code {
+    background: var(--elevated);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 10px;
+  }
+  .spinner {
+    width: 28px;
+    height: 28px;
+    border: 3px solid var(--elevated);
+    border-top-color: var(--cyan);
+    border-radius: 50%;
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
   /* Transient (los 4 *ing) en orange; validated en green; closed en muted. */
   .col[data-status="planning"] .col-hdr b,
   .col[data-status="executing"] .col-hdr b,
@@ -533,10 +580,13 @@
     <!-- ==== BOARD ==== -->
     {{/* El wrapper persiste; HTMX hace polling cada PollInterval segundos y
          swappea solo el innerHTML con la respuesta de /board (que trae el
-         status-chip via hx-swap-oob + las columnas). */}}
+         status-chip via hx-swap-oob + las columnas). El trigger "load
+         delay:200ms" pide /board apenas la página carga (no esperar el
+         primer ticker de PollInterval segundos para reemplazar el spinner
+         inicial). */}}
     <div class="dash-board"
          hx-get="/board"
-         hx-trigger="every {{.PollInterval}}s"
+         hx-trigger="load delay:200ms, every {{.PollInterval}}s"
          hx-swap="innerHTML">
       {{template "board-columns" .}}
     </div>

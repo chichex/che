@@ -34,7 +34,25 @@
   </div>
 {{end}}
 
+{{define "board-loading"}}
+  {{/* Loading state: se muestra mientras el primer poll de gh no termina.
+       El wrapper .dash-board ya tiene grid-template-columns repeat(9,1fr);
+       este overlay rompe el grid con grid-column: 1 / -1 para ocupar el
+       ancho completo. */}}
+  <div class="board-loading">
+    <div class="spinner" aria-hidden="true"></div>
+    <div class="board-loading-text">cargando issues y PRs del repo…</div>
+    <div class="board-loading-sub">primer poll a <code>gh</code> en curso</div>
+  </div>
+{{end}}
+
 {{define "board-columns"}}
+  {{/* Si todavía no hubo primer poll exitoso (LastOK.IsZero) y no estamos
+       en mock mode, mostrar spinner en vez de las 9 columnas vacías —
+       evita que se vea "no hay nada" durante los primeros segundos. */}}
+  {{if and (not .Snapshot.Mock) .Snapshot.LastOK.IsZero (not .Snapshot.Stale)}}
+    {{template "board-loading" .}}
+  {{else}}
   {{range .Columns}}
     <div class="col" data-status="{{.Key}}">
       <div class="col-hdr"><b>{{.Title}}</b><span class="count{{if .Hot}} hot{{end}}">{{len .Entities}}</span></div>
@@ -83,6 +101,7 @@
         {{end}}
       </div>
     </div>
+  {{end}}
   {{end}}
 {{end}}
 
