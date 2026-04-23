@@ -18,9 +18,11 @@
 package dash
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
@@ -152,6 +154,12 @@ type Server struct {
 	// dispatch y pinta el badge ⟳ instantáneo sin esperar al próximo poll.
 	mu      sync.Mutex
 	running map[int]string // IssueNumber → flow corriendo
+
+	// logs es el buffer pub/sub de los logs del subproceso. Populado por
+	// spawnChe (o por tests) y consumido por el handler SSE /stream/{id}.
+	// Separado del lock `mu` porque el dominio es distinto y el RWMutex
+	// interno del LogStore admite múltiples readers (Snapshot) en paralelo.
+	logs *LogStore
 }
 
 // allowedFlows es la allowlist de flows disparables desde el dashboard. Se
@@ -178,6 +186,7 @@ func NewServer(source Source, repoName string, pollInterval int) *Server {
 		repoName:     repoName,
 		pollInterval: pollInterval,
 		running:      map[int]string{},
+		logs:         NewLogStore(),
 	}
 	s.runAction = s.spawnChe
 	tmpl := template.New("dash").Funcs(s.templateFuncs())
@@ -323,7 +332,11 @@ func (s *Server) templateFuncs() template.FuncMap {
 			}
 			return "var(--text)"
 		},
-		// checksLabel sintetiza el chip "8✓ 1·" / "5✓ 2✗" / "" según los counts.
+		// checksLabel sintetiza el chip "CI 8✓ 1·" / "CI 5✓ 2✗" / "" según
+		// los counts. El prefijo "CI" es explícito para que no se confunda
+		// con el task-list (checkboxes markdown) del body del issue —
+		// estos son check runs de GitHub Actions, vienen de
+		// `statusCheckRollup` del PR.
 		"checksLabel": func(e Entity) string {
 			out := ""
 			if e.ChecksOK > 0 {
@@ -341,7 +354,10 @@ func (s *Server) templateFuncs() template.FuncMap {
 				}
 				out += fmt.Sprintf("%d✗", e.ChecksFail)
 			}
-			return out
+			if out == "" {
+				return ""
+			}
+			return "CI " + out
 		},
 		// checksChipClass colorea el chip según el peor estado: fail > pending > ok.
 		"checksChipClass": func(e Entity) string {
@@ -529,6 +545,12 @@ func (s *Server) clearRunning(id int) {
 // recién compilado (ver project_local_binary_staleness.md): si dash corre
 // desde un binario puesto en dist/ o via go run, queremos re-ejecutar el
 // mismo bin, no el que brew linkea en /opt/homebrew/bin.
+//
+// stdout/stderr se tee-ean a (a) os.Stderr del dashboard para que el
+// operador siga viendo el trace en la consola y (b) el LogStore per-id
+// para que el modal del browser lo stremee vía SSE. Cada stream tiene su
+// propia goroutine leyendo con bufio.Scanner (buffer expandido a 1 MiB
+// para tolerar tool-use JSON line-terminated largos).
 func (s *Server) spawnChe(flow string, id int, repo string) error {
 	bin, err := os.Executable()
 	if err != nil || bin == "" {
@@ -542,23 +564,207 @@ func (s *Server) spawnChe(flow string, id int, repo string) error {
 	if repo != "" {
 		cmd.Dir = repo
 	}
-	// stdout/stderr van al mismo io del dashboard para que queden en
-	// la consola donde corre `che dash`. El operador ve la traza del
-	// subflow sin abrir otra terminal. No capturamos acá el stream —
-	// eso es step 5.
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start che %s %d: %w", flow, id, err)
+	return s.runCmdWithLogs(cmd, id, fmt.Sprintf("che %s %d (en %s)", flow, id, repo))
+}
+
+// runCmdWithLogs setea pipes en cmd, arranca el proceso, tee-ea stdout/
+// stderr al LogStore (y a os.Stderr como mirror), y cierra el run cuando
+// los pipes se drenan. Extraído de spawnChe para poder testear el pipeline
+// con un subproceso arbitrario (sh -c "echo ...") sin depender del
+// binario che.
+func (s *Server) runCmdWithLogs(cmd *exec.Cmd, id int, banner string) error {
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe: %w", err)
 	}
-	// Wait en goroutine: al terminar, liberamos la reserva local. El
-	// exit code del subproceso no nos interesa acá — el próximo poll
-	// del Source va a reflejar el estado final (labels che:*).
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("stderr pipe: %w", err)
+	}
+
+	// Reset de la historia: cada dispatch arranca con buffer limpio. Si
+	// quedaban subscribers del run anterior, ResetRun les cierra el canal.
+	s.logs.ResetRun(id)
+	// Marcador de inicio en el buffer — útil para el cliente que abre el
+	// modal mid-run y ve desde dónde empieza.
+	s.logs.Append(id, LogLine{
+		Time:   time.Now(),
+		Stream: "meta",
+		Text:   "--- " + banner + " ---",
+	})
+
+	if err := cmd.Start(); err != nil {
+		// Cerrar el run abierto por ResetRun para que los subscribers
+		// eventuales no queden colgados esperando líneas que no vendrán.
+		s.logs.Append(id, LogLine{Time: time.Now(), Stream: "meta", Text: fmt.Sprintf("--- spawn falló: %v ---", err)})
+		s.logs.CloseRun(id)
+		return fmt.Errorf("start %s: %w", banner, err)
+	}
+
+	// Dos goroutines para leer los pipes — corren hasta EOF (el subproceso
+	// cierra sus fds al salir). WaitGroup sincroniza con cmd.Wait para que
+	// el CloseRun se dispare recién cuando ambos streams drenaron.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go streamPipeToLog(&wg, stdoutPipe, os.Stderr, s.logs, id, "stdout")
+	go streamPipeToLog(&wg, stderrPipe, os.Stderr, s.logs, id, "stderr")
+
+	// Wait en goroutine: al terminar, liberamos la reserva local y
+	// cerramos el run en el LogStore (EOF dispara `event: done` en los
+	// clientes SSE conectados).
 	go func() {
-		_ = cmd.Wait()
+		waitErr := cmd.Wait()
+		wg.Wait()
+		exitMsg := "--- flow terminó OK ---"
+		if waitErr != nil {
+			exitMsg = fmt.Sprintf("--- flow terminó con error: %v ---", waitErr)
+		}
+		s.logs.Append(id, LogLine{Time: time.Now(), Stream: "meta", Text: exitMsg})
+		s.logs.CloseRun(id)
 		s.clearRunning(id)
 	}()
 	return nil
+}
+
+// streamPipeToLog lee líneas del pipe del subproceso, las escribe a `mirror`
+// (os.Stderr por default — el operador en la consola sigue viendo todo) y
+// las apendea al LogStore etiquetadas con el stream. Usa bufio.Scanner con
+// MaxScanTokenSize = 1 MiB para tolerar líneas largas de tool-use (stream-
+// json de claude puede emitir objetos grandes en una sola línea). Si aún
+// así se excede, el Scanner termina sin error — emitimos un marker meta
+// para que el cliente se entere.
+func streamPipeToLog(wg *sync.WaitGroup, r io.Reader, mirror io.Writer, store *LogStore, id int, stream string) {
+	defer wg.Done()
+	sc := bufio.NewScanner(r)
+	// 1 MiB: safety net para tool-use con output largo. El default de
+	// bufio.Scanner es 64 KiB y líneas largas rompen silenciosamente.
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		txt := sc.Text()
+		if mirror != nil {
+			// Mantener la traza en la consola del operador. Ignoramos el
+			// error — si stderr del dashboard se rompió tenemos problemas
+			// más grandes que un log perdido.
+			fmt.Fprintln(mirror, txt)
+		}
+		store.Append(id, LogLine{
+			Time:   time.Now(),
+			Stream: stream,
+			Text:   txt,
+		})
+	}
+	if err := sc.Err(); err != nil {
+		store.Append(id, LogLine{
+			Time:   time.Now(),
+			Stream: "meta",
+			Text:   fmt.Sprintf("--- %s reader error: %v ---", stream, err),
+		})
+	}
+}
+
+// sseLine es el payload que se emite como `event: line` al cliente SSE.
+// JSON-encoded porque el texto crudo puede contener newlines o caracteres
+// que rompan el wire format de SSE (`\n\n` separa eventos). Con JSON el
+// cliente parsea con JSON.parse y lista.
+type sseLine struct {
+	Time   string `json:"t"` // RFC3339Nano — el JS formatea a hh:mm:ss
+	Stream string `json:"s"` // "stdout" | "stderr" | "meta"
+	Text   string `json:"x"`
+}
+
+// handleStream es el handler GET /stream/{id}. Streamea el buffer histórico
+// + futuras líneas como Server-Sent Events. Corre hasta que el cliente se
+// desconecta (r.Context().Done) o el flow termina (canal cerrado).
+func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported (no Flusher)", http.StatusInternalServerError)
+		return
+	}
+
+	// Si nunca se disparó un flow para este id, 404. Evita tener clientes
+	// suscritos a ids inexistentes consumiendo slots en el LogStore.
+	if !s.logs.Exists(id) {
+		http.Error(w, "no log stream for id", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "keep-alive")
+	// Defensa contra proxies que bufferan responses (nginx con gzip, etc.).
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	// 1. Snapshot: mandamos la historia actual. Si el cliente abrió el
+	//    modal mid-run, ve todo lo emitido antes + lo que siga.
+	for _, ln := range s.logs.Snapshot(id) {
+		if err := writeSSELine(w, ln); err != nil {
+			return
+		}
+	}
+	flusher.Flush()
+
+	// 2. Subscribe. Si el run ya terminó, Subscribe devuelve canal cerrado
+	//    → mandamos done y salimos inmediatamente.
+	ch, cancel := s.logs.Subscribe(id)
+	defer cancel()
+
+	// 3. Heartbeat. Ticker local que cada 15s escribe un comentario SSE
+	//    (`:` prefijo = comment, el browser lo ignora) para mantener viva
+	//    la conexión y detectar cortes tempranos. Cheap — 1 write cada 15s.
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			// Cliente cerró la conexión (modal close, navegación, reload).
+			// cancel() del defer libera el slot en el LogStore.
+			return
+		case ln, open := <-ch:
+			if !open {
+				// Flow terminó: canal cerrado por CloseRun. Mandamos done.
+				_, _ = w.Write([]byte("event: done\ndata:\n\n"))
+				flusher.Flush()
+				return
+			}
+			if err := writeSSELine(w, ln); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-heartbeat.C:
+			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+// writeSSELine serializa una LogLine al wire format de SSE como un `event:
+// line`. Devuelve error si el write falla (cliente desconectado). JSON es
+// safe contra newlines en el payload.
+func writeSSELine(w io.Writer, ln LogLine) error {
+	b, err := json.Marshal(sseLine{
+		Time:   ln.Time.Format(time.RFC3339Nano),
+		Stream: ln.Stream,
+		Text:   ln.Text,
+	})
+	if err != nil {
+		// JSON de un struct con strings no debería fallar — defensivo.
+		return err
+	}
+	_, err = fmt.Fprintf(w, "event: line\ndata: %s\n\n", b)
+	return err
 }
 
 func (s *Server) buildMux() *http.ServeMux {
@@ -671,6 +877,15 @@ func (s *Server) buildMux() *http.ServeMux {
 			return
 		}
 	})
+
+	// GET /stream/{id} — Server-Sent Events del log en vivo del subproceso
+	// `che <flow> <id>` disparado desde el dashboard. Flujo:
+	//   1. Snapshot de la historia actual → evento `line` por cada entry.
+	//   2. Subscribe al canal → cada LogLine nueva → evento `line`.
+	//   3. Cuando el canal se cierra (flow terminó) → evento `done` y sale.
+	//   4. Heartbeat cada 15s (SSE comment `: ping`) para detectar conexiones
+	//      cortadas y mantener viva la conexión frente a proxies inquietos.
+	mux.HandleFunc("GET /stream/{id}", s.handleStream)
 
 	// Static. Servimos directo desde el embed FS.
 	staticSub, err := fs.Sub(staticFS, "static")

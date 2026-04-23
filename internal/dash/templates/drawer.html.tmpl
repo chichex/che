@@ -59,7 +59,7 @@
         {{if .LastAction}}<dt>última</dt><dd>{{.LastAction}}</dd>{{end}}
         {{if .NextAction}}<dt>next</dt><dd>{{.NextAction}}</dd>{{end}}
         {{if hasChecks .Entity}}
-          <dt>checks</dt>
+          <dt>checks (CI)</dt>
           <dd>
             {{if .ChecksOK}}<span style="color:var(--green)">{{.ChecksOK}} ok</span>{{end}}
             {{if .ChecksPending}}{{if .ChecksOK}} · {{end}}<span style="color:var(--orange)">{{.ChecksPending}} pending</span>{{end}}
@@ -98,7 +98,11 @@
             <span>clear</span>
           </div>
         </div>
-        <div class="drawer-logs-body">
+        {{/* Cuerpo del stream: logs históricos del snapshot (si los hay) +
+             mount point `.live-log` donde dash.js vuelca los eventos SSE
+             en tiempo real. El placeholder `.live-empty` desaparece apenas
+             llega la primera línea (lo esconde el JS). */}}
+        <div class="drawer-logs-body" data-entity="{{.IssueNumber}}">
           {{if .LogRuns}}
             {{range .LogRuns}}
               <div class="run-sep">{{.Label}}</div>
@@ -109,10 +113,10 @@
                 </div>
               {{end}}
             {{end}}
-            {{if .RunningFlow}}<div><span class="cursor">&nbsp;</span></div>{{end}}
-          {{else}}
-            <div style="color:var(--muted)">sin logs todavía — step 4 trae las acciones, step 5 el stream.</div>
           {{end}}
+          <div class="live-log"></div>
+          <div class="live-empty" style="color:var(--muted)">sin logs todavía — dispará un flow desde los botones de arriba para ver el stream en vivo.</div>
+          {{if .RunningFlow}}<div class="live-cursor"><span class="cursor">&nbsp;</span></div>{{end}}
         </div>
       </div>
     </div>
@@ -217,7 +221,7 @@
           <span>clear</span>
         </div>
       </div>
-      <div class="drawer-logs-body">
+      <div class="drawer-logs-body" data-entity="{{.IssueNumber}}">
         {{if .LogRuns}}
           {{range .LogRuns}}
             <div class="run-sep">{{.Label}}</div>
@@ -228,10 +232,10 @@
               </div>
             {{end}}
           {{end}}
-          {{if .RunningFlow}}<div><span class="cursor">&nbsp;</span></div>{{end}}
-        {{else}}
-          <div style="color:var(--muted)">sin logs todavía — step 4 trae las acciones, step 5 el stream.</div>
         {{end}}
+        <div class="live-log"></div>
+        <div class="live-empty" style="color:var(--muted)">sin logs todavía — dispará un flow desde los botones de arriba para ver el stream en vivo.</div>
+        {{if .RunningFlow}}<div class="live-cursor"><span class="cursor">&nbsp;</span></div>{{end}}
       </div>
     </div>
 
