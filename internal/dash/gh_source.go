@@ -397,6 +397,10 @@ func parsePRs(data []byte) ([]ghPR, error) {
 //     PRs con `closes #N`; uno huérfano no es parte del flow).
 //  3. Issue sin ct:plan → skip (no es gestionado por che).
 //  4. Issue restante (no consumido, con ct:plan) → Kind=Issue.
+//  5. Entidad (Fused o Issue) sin ningún label `che:*` → log + skip. No cae
+//     al default "idea" del board porque enmascara issues mal tageados como
+//     si fueran ideas legítimas. El humano los ve con `gh issue list` si
+//     necesita hacer triage.
 func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 	issueByNumber := make(map[int]ghIssue, len(issues))
 	for _, i := range issues {
@@ -410,7 +414,6 @@ func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 	// queda determinado por groupByColumn (que preserva orden de aparición).
 	for _, p := range prs {
 		if len(p.ClosingIssuesReferences) == 0 {
-			log.Printf("dash: pr #%d sin issue linkeado, omitido", p.Number)
 			continue
 		}
 		issueNum := p.ClosingIssuesReferences[0].Number
@@ -437,6 +440,9 @@ func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 		applyLabels(&e, issueLabels)
 		// Labels del PR alimentan PRVerdict + Locked (override/merge).
 		applyLabels(&e, p.Labels)
+		if e.Status == "" {
+			continue
+		}
 		// Checks del PR.
 		e.ChecksOK, e.ChecksPending, e.ChecksFail = countChecks(p.StatusCheckRollup)
 		out = append(out, e)
@@ -457,6 +463,9 @@ func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 			IssueBody:   i.Body,
 		}
 		applyLabels(&e, i.Labels)
+		if e.Status == "" {
+			continue
+		}
 		out = append(out, e)
 	}
 	return out

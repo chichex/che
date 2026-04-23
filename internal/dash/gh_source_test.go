@@ -514,6 +514,44 @@ func TestApplyLabels_PlanValidatedNotShadowedByValidated(t *testing.T) {
 	}
 }
 
+// TestCombineEntities_SkipsEntitiesWithoutCheLabel garantiza que entidades
+// sin label `che:*` no aparecen en el board. Antes caían al default "idea"
+// de Column() (defensa), lo cual enmascaraba issues mal tageados como si
+// fueran ideas legítimas.
+func TestCombineEntities_SkipsEntitiesWithoutCheLabel(t *testing.T) {
+	// issues.json incluye #100 "idea sin clasificar aún (ct:plan solo)" con
+	// solo ct:plan y sin che:*. Debería estar excluido.
+	issues, err := parseIssues(readFixture(t, "issues.json"))
+	if err != nil {
+		t.Fatalf("parseIssues: %v", err)
+	}
+	prs, err := parsePRs(readFixture(t, "prs.json"))
+	if err != nil {
+		t.Fatalf("parsePRs: %v", err)
+	}
+	entities := combineEntities(issues, prs)
+	for _, e := range entities {
+		if e.IssueNumber == 100 {
+			t.Errorf("issue #100 (ct:plan sin che:*) debería estar excluido; got %+v", e)
+		}
+	}
+
+	// Fused: si un PR cierra un issue pero ni el issue ni el PR tienen
+	// che:*, también se omite.
+	synthIssues := []ghIssue{
+		{Number: 200, Title: "issue sin che:*", Labels: []ghLabel{{Name: "ct:plan"}}},
+	}
+	synthPRs := []ghPR{
+		{Number: 201, Title: "PR sin che:*", ClosingIssuesReferences: []ghCloseRef{{Number: 200}}},
+	}
+	got := combineEntities(synthIssues, synthPRs)
+	for _, e := range got {
+		if e.IssueNumber == 200 || e.PRNumber == 201 {
+			t.Errorf("fused issue #200 + PR #201 sin che:* debería estar excluido; got %+v", e)
+		}
+	}
+}
+
 // TestCombineEntities_ClosedIssuesIncluded simula el merge de issues open +
 // closed que hace refresh(). El caller real (refresh()) hace `append(open,
 // closed...)` antes de llamar a combineEntities — replicamos eso acá.
