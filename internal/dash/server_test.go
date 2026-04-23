@@ -499,15 +499,16 @@ type fakeRunner struct {
 }
 
 type fakeCall struct {
-	Flow string
-	ID   int
-	Repo string
+	Flow      string
+	TargetRef int // número que recibiría el subcomando (PR o issue según flow+Kind)
+	EntityKey int // IssueNumber canónico usado como clave del overlay y del LogStore
+	Repo      string
 }
 
-func (f *fakeRunner) run(flow string, id int, repo string) error {
+func (f *fakeRunner) run(flow string, targetRef, entityKey int, repo string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, fakeCall{Flow: flow, ID: id, Repo: repo})
+	f.calls = append(f.calls, fakeCall{Flow: flow, TargetRef: targetRef, EntityKey: entityKey, Repo: repo})
 	return f.err
 }
 
@@ -565,13 +566,103 @@ func TestAction_DispatchesFlow(t *testing.T) {
 		t.Fatalf("runner calls: got %d want 1", fr.count())
 	}
 	got := fr.last()
-	if got.Flow != "execute" || got.ID != 42 || got.Repo != "/tmp/fakerepo" {
-		t.Errorf("runner call: got %+v want {execute 42 /tmp/fakerepo}", got)
+	// execute es issue-first: TargetRef=EntityKey=IssueNumber.
+	if got.Flow != "execute" || got.TargetRef != 42 || got.EntityKey != 42 || got.Repo != "/tmp/fakerepo" {
+		t.Errorf("runner call: got %+v want {execute target=42 key=42 /tmp/fakerepo}", got)
 	}
 	// Response carga el drawer con el chip de running (overlay local)
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "⟳ execute") {
 		t.Errorf("drawer response missing running chip '⟳ execute'; body head: %s", string(body[:min(400, len(body))]))
+	}
+}
+
+// TestAction_FusedValidateUsesPR chequea el mapeo clave: POST con el
+// IssueNumber de una entidad fused dispara al subcomando con el PRNumber
+// (resolveTargetRef), pero el overlay/LogStore quedan indexados al
+// IssueNumber (clave canónica que el modal conoce). Regresión: antes
+// pasábamos siempre IssueNumber al subproceso y `che validate <issue>`
+// en che:executed caía al modo Plan y rechazaba con "no está en che:plan".
+func TestAction_FusedValidateUsesPR(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		NWO:    "demo/che",
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindFused, IssueNumber: 122, PRNumber: 140, IssueTitle: "f", Status: "executed"},
+		},
+	}}
+	s := NewServer(src, "che-cli", 15)
+	fr := &fakeRunner{}
+	s.runAction = fr.run
+	s.repoPath = "/tmp/r"
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/validate/122", "", nil)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	got := fr.last()
+	if got.Flow != "validate" {
+		t.Errorf("flow: got %q want validate", got.Flow)
+	}
+	if got.TargetRef != 140 {
+		t.Errorf("TargetRef: got %d want 140 (PR — resolveTargetRef debe mapear fused+validate a PRNumber)", got.TargetRef)
+	}
+	if got.EntityKey != 122 {
+		t.Errorf("EntityKey: got %d want 122 (IssueNumber canónico para overlay/LogStore)", got.EntityKey)
+	}
+
+	// iterate hace el mismo mapeo.
+	fr2 := &fakeRunner{}
+	s.runAction = fr2.run
+	resp2, err := http.Post(ts.URL+"/action/iterate/122", "", nil)
+	if err != nil {
+		t.Fatalf("POST iterate: %v", err)
+	}
+	resp2.Body.Close()
+	// 409 esperado (ya hay un validate en curso del dispatch anterior).
+	// Relajamos: chequeamos que cuando SE dispare (lo liberamos abajo) use PR.
+	s.clearRunning(122)
+	resp3, err := http.Post(ts.URL+"/action/iterate/122", "", nil)
+	if err != nil {
+		t.Fatalf("POST iterate#2: %v", err)
+	}
+	resp3.Body.Close()
+	if fr2.count() == 0 {
+		t.Fatalf("iterate runner not called")
+	}
+	g2 := fr2.last()
+	if g2.TargetRef != 140 || g2.EntityKey != 122 {
+		t.Errorf("iterate mapping: got target=%d key=%d want target=140 key=122", g2.TargetRef, g2.EntityKey)
+	}
+}
+
+// TestAction_IssueOnlyValidateUsesIssue: fused NO aplica (issue-only), así
+// que validate pasa IssueNumber tal cual — no mapea a nada.
+func TestAction_IssueOnlyValidateUsesIssue(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		NWO:    "demo/che",
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, IssueTitle: "i", Status: "plan"},
+		},
+	}}
+	s := NewServer(src, "che-cli", 15)
+	fr := &fakeRunner{}
+	s.runAction = fr.run
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, _ := http.Post(ts.URL+"/action/validate/42", "", nil)
+	resp.Body.Close()
+	got := fr.last()
+	if got.TargetRef != 42 || got.EntityKey != 42 {
+		t.Errorf("issue-only validate: got target=%d key=%d want target=42 key=42", got.TargetRef, got.EntityKey)
 	}
 }
 
@@ -719,11 +810,9 @@ func TestDrawerRendersActionButtons(t *testing.T) {
 }
 
 // TestDrawerRendersActionButtons_Fused verifica el variant Kind=1: los
-// botones iterate/validate apuntan al PRNumber. `che validate <N>` y
-// `che iterate <N>` hacen gh api issues/N para decidir si N es PR o
-// issue — pasarle el issue en che:executed haría que valide el plan
-// y rechazaría porque el issue ya no está en che:plan. El PR sí
-// dispara el modo PR (validate diff / iterate sobre branch).
+// botones iterate/validate apuntan al IssueNumber (clave canónica de
+// modal/LogStore/overlay); el server traduce a PRNumber para el
+// subproceso vía resolveTargetRef — ver TestAction_FusedValidateUsesPR.
 // "ver en GH" linkea al PR.
 func TestDrawerRendersActionButtons_Fused(t *testing.T) {
 	src := &fixedSource{snap: Snapshot{
@@ -745,18 +834,11 @@ func TestDrawerRendersActionButtons_Fused(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	got := string(body)
 
-	if !strings.Contains(got, `hx-post="/action/iterate/55"`) {
-		t.Errorf("fused drawer missing hx-post=/action/iterate/55 (PRNumber)")
+	if !strings.Contains(got, `hx-post="/action/iterate/42"`) {
+		t.Errorf("fused drawer missing hx-post=/action/iterate/42 (IssueNumber canónico)")
 	}
-	if !strings.Contains(got, `hx-post="/action/validate/55"`) {
-		t.Errorf("fused drawer missing hx-post=/action/validate/55 (PRNumber)")
-	}
-	// defensa: el IssueNumber NO debería aparecer como target de iterate/validate.
-	if strings.Contains(got, `hx-post="/action/iterate/42"`) {
-		t.Errorf("fused drawer iterate should target PR (55), not issue (42)")
-	}
-	if strings.Contains(got, `hx-post="/action/validate/42"`) {
-		t.Errorf("fused drawer validate should target PR (55), not issue (42)")
+	if !strings.Contains(got, `hx-post="/action/validate/42"`) {
+		t.Errorf("fused drawer missing hx-post=/action/validate/42 (IssueNumber canónico)")
 	}
 	// "ver en GH" del fused apunta al PR (es la vista principal del tab pr).
 	if !strings.Contains(got, `href="https://github.com/demo/che/pull/55"`) {

@@ -29,19 +29,19 @@ func newStreamServer(t *testing.T, lines []string) (*httptest.Server, *Server) {
 	}}
 	s := NewServer(src, "che-cli", 15)
 	// Stub: reset, append, close. Simula el lifecycle del subproceso.
-	s.runAction = func(flow string, id int, repo string) error {
-		s.logs.ResetRun(id)
+	s.runAction = func(flow string, targetRef, entityKey int, repo string) error {
+		s.logs.ResetRun(entityKey)
 		go func() {
 			for _, ln := range lines {
-				s.logs.Append(id, LogLine{
+				s.logs.Append(entityKey, LogLine{
 					Time:   time.Now(),
 					Stream: "stdout",
 					Text:   ln,
 				})
 				time.Sleep(5 * time.Millisecond)
 			}
-			s.logs.CloseRun(id)
-			s.clearRunning(id)
+			s.logs.CloseRun(entityKey)
+			s.clearRunning(entityKey)
 		}()
 		return nil
 	}
@@ -398,7 +398,7 @@ func TestSpawnChe_StartFailurePath(t *testing.T) {
 		LastOK: time.Now(),
 	}}
 	s := NewServer(src, "t", 15)
-	s.runAction = func(flow string, id int, repo string) error {
+	s.runAction = func(flow string, targetRef, entityKey int, repo string) error {
 		return io.ErrUnexpectedEOF // marker arbitrario
 	}
 	ts := httptest.NewServer(s)

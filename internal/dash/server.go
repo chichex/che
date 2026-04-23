@@ -150,7 +150,13 @@ type Server struct {
 	// poder testear el handler POST /action sin spawnear procesos reales.
 	// Default: spawnChe, que hace exec.Command sobre el mismo binario
 	// (os.Executable()) o el que haya en $PATH.
-	runAction func(flow string, id int, repo string) error
+	//
+	// targetRef = número que recibe el subcomando como argumento (PRNumber
+	// para fused validate/iterate, IssueNumber para el resto — ver
+	// resolveTargetRef). entityKey = IssueNumber de la entidad; se usa como
+	// clave del overlay de running y del LogStore para que el modal y el
+	// stream SSE la encuentren.
+	runAction func(flow string, targetRef, entityKey int, repo string) error
 
 	// mu protege running. El map trackea flows disparados desde el dashboard
 	// que todavía no se reflejan en el snapshot de la Source — evita doble
@@ -176,6 +182,22 @@ var allowedFlows = map[string]bool{
 	"execute":  true,
 	"iterate":  true,
 	"validate": true,
+}
+
+// resolveTargetRef decide qué número pasar al subcomando che. Centraliza la
+// regla: `che validate <N>` y `che iterate <N>` hacen gh api issues/N y
+// enrutan por pull_request != null — para entidades fused (hay PR abierto)
+// queremos el modo PR, no el plan. `che explore` / `che execute` son
+// issue-first por diseño y siempre reciben IssueNumber. La URL del POST
+// sigue siendo con IssueNumber como clave canónica: coincide con data-entity
+// del modal, con el key del LogStore y con el overlay local de running —
+// toda la UI razona en IssueNumber; este helper es el único lugar donde se
+// traduce a PRNumber para el subproceso.
+func resolveTargetRef(e Entity, flow string) int {
+	if e.Kind == KindFused && (flow == "validate" || flow == "iterate") && e.PRNumber > 0 {
+		return e.PRNumber
+	}
+	return e.IssueNumber
 }
 
 // NewServer construye el handler. pollInterval en segundos, mínimo 1 para
@@ -544,19 +566,25 @@ func (s *Server) clearRunning(id int) {
 	s.mu.Unlock()
 }
 
-// spawnChe es el default de s.runAction. Lanza `che <flow> <id>` en
+// spawnChe es el default de s.runAction. Lanza `che <flow> <targetRef>` en
 // background y no bloquea el handler. Prefiere os.Executable() sobre
 // exec.LookPath("che") para evitar la gotcha del brew cask vs el binario
 // recién compilado (ver project_local_binary_staleness.md): si dash corre
 // desde un binario puesto en dist/ o via go run, queremos re-ejecutar el
 // mismo bin, no el que brew linkea en /opt/homebrew/bin.
 //
+// targetRef es el número que recibe el subcomando (PR para fused
+// validate/iterate, issue para el resto — ver resolveTargetRef).
+// entityKey es el IssueNumber que el overlay local y el LogStore usan
+// como clave — el modal/SSE subscriben por IssueNumber, así que el stream
+// de logs tiene que ir a ese slot aunque el subproceso reciba PRNumber.
+//
 // stdout/stderr se tee-ean a (a) os.Stderr del dashboard para que el
-// operador siga viendo el trace en la consola y (b) el LogStore per-id
+// operador siga viendo el trace en la consola y (b) el LogStore per-entityKey
 // para que el modal del browser lo stremee vía SSE. Cada stream tiene su
 // propia goroutine leyendo con bufio.Scanner (buffer expandido a 1 MiB
 // para tolerar tool-use JSON line-terminated largos).
-func (s *Server) spawnChe(flow string, id int, repo string) error {
+func (s *Server) spawnChe(flow string, targetRef, entityKey int, repo string) error {
 	bin, err := os.Executable()
 	if err != nil || bin == "" {
 		// Fallback: che en $PATH.
@@ -565,11 +593,11 @@ func (s *Server) spawnChe(flow string, id int, repo string) error {
 			return fmt.Errorf("no se pudo resolver el binario che: %w", err)
 		}
 	}
-	cmd := exec.Command(bin, flow, strconv.Itoa(id))
+	cmd := exec.Command(bin, flow, strconv.Itoa(targetRef))
 	if repo != "" {
 		cmd.Dir = repo
 	}
-	return s.runCmdWithLogs(cmd, id, fmt.Sprintf("che %s %d (en %s)", flow, id, repo))
+	return s.runCmdWithLogs(cmd, entityKey, fmt.Sprintf("che %s %d (en %s)", flow, targetRef, repo))
 }
 
 // runCmdWithLogs setea pipes en cmd, arranca el proceso, tee-ea stdout/
@@ -862,7 +890,12 @@ func (s *Server) buildMux() *http.ServeMux {
 			http.Error(w, "flow already running for this entity", http.StatusConflict)
 			return
 		}
-		if err := s.runAction(flow, id, s.repoPath); err != nil {
+		// targetRef = número que recibe el subcomando che. Para fused +
+		// validate/iterate pasa a ser PRNumber; para el resto queda
+		// IssueNumber. Ver resolveTargetRef. El id de la URL y del
+		// overlay/LogStore sigue siendo el IssueNumber.
+		targetRef := resolveTargetRef(entity, flow)
+		if err := s.runAction(flow, targetRef, id, s.repoPath); err != nil {
 			// Spawn falló: liberar la reserva para que el usuario pueda
 			// re-intentar después de arreglar el problema (ej: `che` no
 			// está en $PATH, repo path inválido).

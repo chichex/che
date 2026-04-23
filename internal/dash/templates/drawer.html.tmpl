@@ -75,19 +75,17 @@
              disabled). Si RunningFlow != "", toda la row entra disabled
              para evitar doble dispatch mientras corre el flow.
 
-             Fused (hay PR): iterate/validate corren contra el PR, no el
-             issue. `che validate <N>` / `che iterate <N>` hacen
-             gh api issues/N para detectar si N es PR o issue — pasarle
-             el issue number en che:executed haría que valide el plan
-             (fallaría porque el issue ya pasó che:plan). Pasamos el
-             PRNumber para que detectTarget caiga en TargetPR. */}}
+             El id del URL es IssueNumber (clave canónica del modal, del
+             LogStore y del overlay). El server mapea a PRNumber antes de
+             invocar al subcomando para los flows que lo requieren — ver
+             resolveTargetRef en server.go. */}}
         <button class="btn primary"
-                hx-post="/action/iterate/{{.PRNumber}}"
+                hx-post="/action/iterate/{{.IssueNumber}}"
                 hx-target="#modal-slot"
                 hx-swap="innerHTML"
                 {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="iterate !{{.PRNumber}}"{{end}}>iterate</button>
         <button class="btn warn"
-                hx-post="/action/validate/{{.PRNumber}}"
+                hx-post="/action/validate/{{.IssueNumber}}"
                 hx-target="#modal-slot"
                 hx-swap="innerHTML"
                 {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate !{{.PRNumber}}"{{end}}>validate</button>
