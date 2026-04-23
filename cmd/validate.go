@@ -13,13 +13,15 @@ var validateValidatorsFlag string
 var validateCmd = &cobra.Command{
 	Use:   "validate <ref>",
 	Short: "valida un plan (issue) o un PR corriendo validadores (opus/codex/gemini) y postea findings como comments",
-	Long: `validate detecta automáticamente si <ref> apunta a un issue en status:plan
+	Long: `validate detecta automáticamente si <ref> apunta a un issue en che:plan
 o a un PR abierto, y despacha al modo correspondiente:
 
-  che validate 42       # issue en status:plan → valida el plan consolidado del body,
-                        #   postea comments en el issue y aplica plan-validated:*
-  che validate 7        # PR abierto → valida el diff, postea comments en el PR y
-                        #   aplica validated:*
+  che validate 42       # issue en che:plan → valida el plan consolidado del body,
+                        #   postea comments en el issue, aplica plan-validated:*
+                        #   y transiciona che:plan → che:validating → che:validated.
+  che validate 7        # PR abierto en che:executed → valida el diff, postea
+                        #   comments en el PR, aplica validated:* y transiciona
+                        #   che:executed → che:validating → che:validated.
 
 En ambos modos corren 1-3 validadores en paralelo (opus, codex, gemini);
 cada uno postea su análisis como un comment y al final se postea un comment

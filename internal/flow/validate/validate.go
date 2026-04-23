@@ -540,14 +540,14 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 	//     (typically porque alguien editó a mano o corrieron explore dos
 	//     veces). Acción del humano: limpiar el body.
 	//   - Plan parseado pero sin header real ni sub-secciones: el issue tiene
-	//     status:plan pero nunca se consolidó. Acción: correr explore.
+	//     che:plan pero nunca se consolidó. Acción: correr explore.
 	consolidated, parseErr := planpkg.Parse(issue.Body)
 	if parseErr != nil {
 		log.Error(fmt.Sprintf("no pude parsear el plan consolidado del issue #%d: %v", issue.Number, parseErr))
 		return ExitSemantic
 	}
 	if !planpkg.HasConsolidatedHeader(issue.Body) {
-		log.Error(fmt.Sprintf("issue #%d tiene status:plan pero no tiene plan consolidado en el body — corré `che explore %d`", issue.Number, issue.Number))
+		log.Error(fmt.Sprintf("issue #%d tiene che:plan pero no tiene plan consolidado en el body — corré `che explore %d`", issue.Number, issue.Number))
 		return ExitSemantic
 	}
 
@@ -853,7 +853,7 @@ func filterValidatable(raw []PullRequest) []Candidate {
 // el resto delegamos la validación a `gh pr view` / `gh issue view` (si el
 // ref es inválido, gh devuelve error y lo propagamos con contexto).
 //
-// `che validate` lo usa para ambos targets (issue en status:plan o PR); los
+// `che validate` lo usa para ambos targets (issue en che:plan o PR); los
 // flows PR-exclusive (iterate, close) siguen llamándolo — si el usuario
 // pasa un issue a esos, el preflight de `FetchPR` falla con un mensaje
 // claro.
@@ -1539,11 +1539,11 @@ PLAN CONSOLIDADO (parseado del body):
 // ---- list candidates (para TUI PR #6) ----
 
 // PlanCandidate es la vista mínima de un issue listo para validar como plan:
-// abierto, con status:plan, sin plan-validated:approve. La TUI lo consume
+// abierto, con che:plan, sin plan-validated:approve. La TUI lo consume
 // para poblar la lista "plans pending validation". Es un struct dedicado en
 // vez de reusar explore.Candidate porque el set de labels relevantes y los
 // filtros de exclusión son distintos (acá excluimos plan-validated:approve,
-// allá filtramos por ct:plan sin status).
+// allá filtramos por ct:plan sin che:*).
 type PlanCandidate struct {
 	Number int
 	Title  string

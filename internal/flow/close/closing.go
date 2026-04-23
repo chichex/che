@@ -316,7 +316,7 @@ func hasBlockingLabel(p validate.PullRequest) bool {
 //     merge: ese flag hace delete local también, que falla si la branch
 //     está checkouteada en un worktree y arrastra el exit code aunque el
 //     merge remoto haya ocurrido.
-//   - Cerrar issue asociado + transición de labels a status:closed.
+//   - Cerrar issue asociado + transición de labels a che:closed (vía che:closing).
 //   - Cleanup del worktree (ver shouldCleanupWorktree):
 //     · --keep-branch inhibe siempre, aunque el worktree sea propio del run.
 //     · happy path (merge OK): limpia el worktree asociado, sea propio o

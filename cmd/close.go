@@ -31,7 +31,7 @@ var closeCmd = &cobra.Command{
      asociado y la branch local se limpian aparte. Usá --keep-branch para
      opt-out del delete.
   6. Cierra los issues asociados vía "Closes #N" del PR y les aplica la
-     transición de labels status:executed → status:closed.
+     transición de labels che:{executed|validated} → che:closing → che:closed.
 
 close REFUSE mergear si el PR tiene label validated:changes-requested o
 validated:needs-human (verdicts bloqueantes de che validate): exit 3.

@@ -1,13 +1,13 @@
 // Package labels centraliza las constantes de los labels que che aplica sobre
 // issues de GitHub, y la máquina de transiciones entre estados. La idea es
-// tener un único lugar donde definir "qué es status:plan", "cómo se pasa de
-// status:plan a status:executing", etc., para que los distintos flows no
-// inventen strings distintas ni violen reglas de la máquina de estados.
+// tener un único lugar donde definir "qué es che:plan", "cómo se pasa de
+// che:plan a che:executing", etc., para que los distintos flows no inventen
+// strings distintas ni violen reglas de la máquina de estados.
 //
-// Coexiste con los helpers duplicados de `internal/flow/idea/idea.go` y
-// `internal/flow/explore/explore.go` durante la introducción de `execute`; la
-// deuda de extraer esos usos acá queda para un issue futuro (ver issue #6
-// "Fuera de alcance").
+// La máquina actual es de 9 estados con prefix `che:*`
+// (idea/planning/plan/executing/executed/validating/validated/closing/closed)
+// y reemplazó al modelo viejo `status:*` de 5 estados. El renombre in-place
+// de labels viejos vive en `cmd/migrate_labels.go`.
 package labels
 
 import (
@@ -251,7 +251,7 @@ func TransitionFor(from, to string) (Transition, error) {
 // existan en el repo antes de aplicar el edit: `gh issue edit --remove-label X`
 // falla con "not found" si X no está registrado en el repo — aunque el issue
 // no lo tenga aplicado. Esto cubre el caso de issues marcados con `ct:plan` a
-// mano que nunca pasaron por `che idea`, por lo que `status:idea` jamás se
+// mano que nunca pasaron por `che idea`, por lo que `che:idea` jamás se
 // creó en el repo.
 func Apply(ref, from, to string) error {
 	tr, err := TransitionFor(from, to)

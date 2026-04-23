@@ -15,13 +15,15 @@ var executeAgentFlag string
 
 var executeCmd = &cobra.Command{
 	Use:   "execute <issue-ref>",
-	Short: "ejecuta un issue en status:plan: worktree aislado + PR draft contra main",
-	Long: `execute toma la referencia a un issue ya explorado por 'che explore'
-(en status:plan, con ct:plan), parsea la sección "## Plan consolidado" de
-su body, abre un worktree aislado en .worktrees/issue-<N> sobre una branch
-exec/<N>-<slug>, invoca al agente para aplicar el plan, commitea los
-cambios, pushea la branch y abre/actualiza un PR draft contra main. Al
-terminar, transiciona el issue a status:executed.
+	Short: "ejecuta un issue en che:idea o che:plan: worktree aislado + PR draft contra main",
+	Long: `execute toma la referencia a un issue (con ct:plan) en che:idea o
+che:plan — explore es opcional. Si tiene plan consolidado en el body, lo
+parsea (sección "## Plan consolidado"); si no, el agente improvisa desde
+el body crudo. Abre un worktree aislado en .worktrees/issue-<N> sobre una
+branch exec/<N>-<slug>, invoca al agente para aplicar el plan, commitea
+los cambios, pushea la branch y abre/actualiza un PR draft contra main.
+Al terminar, transiciona el issue a che:executed (pasando por che:executing
+durante el run).
 
 Gate: execute NO corre si el issue tiene plan-validated:changes-requested
 o plan-validated:needs-human — esos labels los aplica 'che validate'
