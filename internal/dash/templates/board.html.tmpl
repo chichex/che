@@ -72,6 +72,7 @@
                 {{if checksLabel . }}<span class="chip {{checksChipClass .}}">{{checksLabel .}}</span>{{end}}
                 {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
                 {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+                {{if .CapReached}}<span class="chip chip-cap" title="auto-loop detenido: alcanzó el cap de {{.RunMax}} rondas. Re-corré che manualmente para seguir.">⛔ cap {{.RunMax}}/{{.RunMax}}</span>{{end}}
               </div>
             {{else}}
               {{/* Issue-only: ref del issue (clickable) + título del issue */}}
@@ -86,6 +87,7 @@
                 {{if .PlanVerdict}}<span class="chip {{verdictChipClass .PlanVerdict}}">plan-validated:{{.PlanVerdict}}</span>{{end}}
                 {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
                 {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+                {{if .CapReached}}<span class="chip chip-cap" title="auto-loop detenido: alcanzó el cap de {{.RunMax}} rondas. Re-corré che manualmente para seguir.">⛔ cap {{.RunMax}}/{{.RunMax}}</span>{{end}}
               </div>
             {{end}}
           </div>

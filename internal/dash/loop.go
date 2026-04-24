@@ -60,9 +60,13 @@ import (
 
 // LoopCap es el número máximo de dispatches automáticos + manuales que el
 // loop engine permite para una misma entidad desde que arrancó el server.
-// El contador se resetea al reiniciar (in-memory). 5 es conservador: cubre
-// 2-3 rondas iterate↔validate más algún retry manual antes de cortar.
-const LoopCap = 5
+// El contador se resetea al reiniciar (in-memory). 10 cubre ~5 rondas
+// iterate↔validate — suficiente para un feature que necesita varios pulidos
+// antes de aprobarse, sin entrar en loops infinitos si el validador nunca
+// converge. El handler manual de /action NO consulta este cap (solo gatea
+// el auto-loop engine), así que el humano puede seguir disparando a mano
+// desde el modal después de que el cap se alcance.
+const LoopCap = 10
 
 // LoopRule es el identificador de una de las 4 reglas loopeables. Usado
 // como clave del map del state y en la URL del endpoint POST /loop/rule/...

@@ -60,6 +60,12 @@ type Entity struct {
 	RunningFlow string // "explore" | "execute" | "iterate" | "validate" | "close" — vacío = idle
 	RunIter     int    // iteración actual (1-based)
 	RunMax      int    // max iteraciones del loop
+	// CapReached: el auto-loop dejó de dispatchar sobre este issue porque
+	// rounds[id] ya alcanzó LoopCap. Señal visual para el humano: "no vas a
+	// ver esto moverse solo, decidí algo". Se setea en overlayRunning solo
+	// para entities en status loopable (plan / validated / executed) — en
+	// closing/closed/idea/etc el cap es irrelevante.
+	CapReached bool
 
 	// CreatedAt se usa para priorizar el auto-loop (ver loop.go): más viejo
 	// primero, así un item que lleva tiempo en el board no queda atrás del

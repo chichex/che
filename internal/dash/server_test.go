@@ -1393,3 +1393,48 @@ func TestOverlayRunning_IdleNoOp(t *testing.T) {
 		t.Errorf("idle overlay: expected identity return (no copy), got new slice")
 	}
 }
+
+// TestOverlayRunning_SetsCapReachedWhenIdle: entity idle (sin RunningFlow)
+// cuyo contador de rounds alcanzó LoopCap y está en status loopable debe
+// salir con CapReached=true + RunMax=LoopCap. El auto-loop ya cortó — el
+// humano tiene que ver visualmente que este card no se va a mover solo.
+func TestOverlayRunning_SetsCapReachedWhenIdle(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{LastOK: time.Now()}}
+	s := NewServer(src, "repo", 15)
+	for i := 0; i < LoopCap; i++ {
+		s.loop.incRounds(42)
+	}
+	in := []Entity{
+		{Kind: KindFused, IssueNumber: 42, PRNumber: 100, Status: "executed"},
+	}
+	out := s.overlayRunning(in)
+	if !out[0].CapReached {
+		t.Errorf("out[0].CapReached: got false, want true (rounds=%d >= LoopCap=%d)",
+			s.loop.roundsFor(42), LoopCap)
+	}
+	if out[0].RunMax != LoopCap {
+		t.Errorf("out[0].RunMax: got %d want %d (cap debe inyectarse aunque no haya run)", out[0].RunMax, LoopCap)
+	}
+}
+
+// TestOverlayRunning_CapReachedOnlyInLoopableStatus: si la entity ya
+// cerró (Status=closed) o es una idea pre-plan, el cap no aplica — no
+// queremos contaminar columnas terminales con chips de cap irrelevantes.
+func TestOverlayRunning_CapReachedOnlyInLoopableStatus(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{LastOK: time.Now()}}
+	s := NewServer(src, "repo", 15)
+	for i := 0; i < LoopCap; i++ {
+		s.loop.incRounds(42)
+		s.loop.incRounds(43)
+	}
+	in := []Entity{
+		{Kind: KindIssue, IssueNumber: 42, Status: "closed"},
+		{Kind: KindIssue, IssueNumber: 43, Status: "idea"},
+	}
+	out := s.overlayRunning(in)
+	for i, e := range out {
+		if e.CapReached {
+			t.Errorf("out[%d] Status=%q: CapReached=true, want false (cap irrelevante en este status)", i, e.Status)
+		}
+	}
+}

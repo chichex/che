@@ -52,6 +52,7 @@
           {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
           {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
           {{if and .RunningFlow .Auto}}<span class="chip chip-magenta" title="disparado por el auto-loop engine">auto</span>{{end}}
+          {{if .CapReached}}<span class="chip chip-cap" title="auto-loop detenido: alcanzó el cap de {{.RunMax}} rondas. Re-corré che manualmente para seguir.">⛔ cap {{.RunMax}}/{{.RunMax}}</span>{{end}}
         </div>
       </div>
 
@@ -193,6 +194,7 @@
         {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
         {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
         {{if and .RunningFlow .Auto}}<span class="chip chip-magenta" title="disparado por el auto-loop engine">auto</span>{{end}}
+        {{if .CapReached}}<span class="chip chip-cap" title="auto-loop detenido: alcanzó el cap de {{.RunMax}} rondas. Re-corré che manualmente para seguir.">⛔ cap {{.RunMax}}/{{.RunMax}}</span>{{end}}
       </div>
     </div>
 

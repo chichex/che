@@ -590,18 +590,31 @@ func (s *Server) overlayRunning(in []Entity) []Entity {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	hasOverlay := len(s.running) > 0
-	// Fast path: si no hay overlay Y ninguna entity del snapshot tiene
-	// RunningFlow, no hay nada que mutar. Evita la alocación del out[]
-	// en el caso común idle.
+	// Fast path: si no hay overlay, ninguna entity del snapshot tiene
+	// RunningFlow Y ninguna entity loopable alcanzó el cap, no hay nada
+	// que mutar. Evita la alocación del out[] en el caso común idle.
+	// El chequeo de cap entra en el fast path porque el caso típico es
+	// "entity idle que llegó al cap" (el auto-loop ya cortó y el
+	// RunningFlow volvió a vacío) — sin este chequeo el CapReached nunca
+	// se setearía en ese path.
 	if !hasOverlay {
-		anyRunning := false
+		needsMutation := false
 		for _, e := range in {
 			if e.RunningFlow != "" {
-				anyRunning = true
+				needsMutation = true
 				break
 			}
+			if rounds[e.IssueNumber] >= LoopCap {
+				switch e.Status {
+				case "plan", "validated", "executed":
+					needsMutation = true
+				}
+				if needsMutation {
+					break
+				}
+			}
 		}
-		if !anyRunning {
+		if !needsMutation {
 			return in
 		}
 	}
@@ -623,6 +636,18 @@ func (s *Server) overlayRunning(in []Entity) []Entity {
 		if e.RunningFlow != "" {
 			e.RunIter = rounds[e.IssueNumber]
 			e.RunMax = LoopCap
+		}
+		// Cap-reached chip: rounds >= LoopCap + entity en status loopable.
+		// Gate por status para que cards en closed/closing/idea no prendan
+		// el chip (ahí el cap no tiene sentido — el auto-loop no iba a
+		// dispatchar igual). Sí aplica durante un run (RunningFlow != "")
+		// para cubrir el caso "este run es el #5 y el próximo tick corta".
+		if rounds[e.IssueNumber] >= LoopCap {
+			switch e.Status {
+			case "plan", "validated", "executed":
+				e.CapReached = true
+				e.RunMax = LoopCap
+			}
 		}
 		out[i] = e
 	}
