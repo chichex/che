@@ -9,6 +9,65 @@
 (function () {
   "use strict";
 
+  // ==================== Adopt toggle (localStorage + URL sync) ====================
+  //
+  // El toggle "show untracked PRs" del topbar (.adopt-toggle) controla si
+  // la columna "adopt" se renderea. El estado vive en localStorage (clave
+  // `che.dash.adopt`, valor "1" / "0"); la URL propaga ?adopt=1 cuando
+  // corresponde para que el server devuelva el HTML apropiado.
+  //
+  // Reglas:
+  //   1. On page load: si localStorage dice "1" y la URL no tiene ?adopt=1,
+  //      redirigimos agregando el param. Si localStorage es "0" (o vacío)
+  //      y la URL SÍ tiene ?adopt=1, navegamos sin el param — la fuente de
+  //      verdad es el localStorage, la URL es consecuencia.
+  //   2. On toggle change: seteamos localStorage, navegamos al mismo path
+  //      con/sin ?adopt=1.
+  //
+  // Idempotente: el redirect de arriba solo ocurre si hay desalineación,
+  // así que no entra en loop.
+  var ADOPT_KEY = "che.dash.adopt";
+  function adoptLsEnabled() {
+    try { return localStorage.getItem(ADOPT_KEY) === "1"; }
+    catch (_) { return false; }
+  }
+  function urlHasAdopt() {
+    try {
+      var sp = new URLSearchParams(window.location.search);
+      return sp.get("adopt") === "1";
+    } catch (_) { return false; }
+  }
+  function navigateWithAdopt(on) {
+    try {
+      var url = new URL(window.location.href);
+      if (on) url.searchParams.set("adopt", "1");
+      else url.searchParams.delete("adopt");
+      window.location.replace(url.toString());
+    } catch (_) { /* noop */ }
+  }
+  // Sync inicial ANTES del htmx boot para que el primer render ya traiga
+  // la columna adopt si corresponde (evita un flash sin columna y luego
+  // otro con columna). Si hay desalineación forzamos una navegación —
+  // es un redirect, la página se vuelve a cargar con la query correcta.
+  (function syncAdoptOnLoad() {
+    var want = adoptLsEnabled();
+    var have = urlHasAdopt();
+    if (want !== have) {
+      navigateWithAdopt(want);
+    }
+  })();
+
+  // Listener sobre el checkbox del toggle. Delegado en body por si el
+  // topbar re-renderea en el futuro.
+  document.body.addEventListener("change", function (e) {
+    var t = e.target;
+    if (!(t instanceof HTMLInputElement)) return;
+    if (t.id !== "adopt-toggle-input") return;
+    var on = !!t.checked;
+    try { localStorage.setItem(ADOPT_KEY, on ? "1" : "0"); } catch (_) {}
+    navigateWithAdopt(on);
+  });
+
   // closeModal vacía el slot. Idempotente: si ya estaba cerrado no hace
   // nada raro. El nombre conserva la semántica del flujo aunque el wrapper
   // exterior pasó de "drawer" a "modal". También cierra cualquier
@@ -217,7 +276,12 @@
     currentEntity = entity;
     var es;
     try {
-      es = new EventSource("/stream/" + encodeURIComponent(entity));
+      // Pegamos ?adopt=1 al EventSource si el toggle está ON, para que
+      // cualquier futuro middleware server-side que varíe por flag reciba
+      // el mismo contexto que el resto de los endpoints.
+      var streamURL = "/stream/" + encodeURIComponent(entity);
+      if (adoptLsEnabled()) streamURL += "?adopt=1";
+      es = new EventSource(streamURL);
     } catch (err) {
       // EventSource no disponible (muy viejo) o URL inválida — no hay
       // stream en vivo, pero el modal sigue funcional.

@@ -10,10 +10,78 @@
      sidebar). Las clases internas mantienen prefix drawer-* para minimizar
      churn — solo cambia el envoltorio. data-entity y data-tab viven en .modal
      para que dash.js pueda togglear tabs delegando el click. */}}
+{{/* $key es la clave canónica del routing: IssueNumber para KindIssue/Fused,
+     PRNumber para KindPR (adopt sin issue linkeado). Se usa en hx-post,
+     data-entity y SSE stream. Ver Entity.EntityKey. */}}
+{{$key := .IssueNumber}}{{if eq .Kind 2}}{{$key = .PRNumber}}{{end}}
 <div class="modal-backdrop">
-<div class="modal" data-entity="{{.IssueNumber}}" data-tab="pr">
+<div class="modal" data-entity="{{$key}}" data-tab="pr">
 
-  {{if eq .Kind 1}}
+  {{if eq .Kind 2}}
+    {{/* ============= KindPR (adopt, sin issue linkeado) =============
+         Sin tabs — no hay issue que mostrar. Ref solo al PR. Acciones
+         limitadas a validate/close porque es un PR untracked: iterate
+         no tiene sentido (no hay plan del que iterar), y explore/execute
+         son issue-first. */}}
+    <div class="drawer-hdr">
+      <div class="drawer-hdr-top">
+        <div class="entity-row">
+          <a href="https://github.com/{{.NWO}}/pull/{{.PRNumber}}" target="_blank" rel="noopener"><b>!{{.PRNumber}}</b></a>
+          {{- if .Branch}} · {{.Branch}}{{end -}}
+          {{- if .SHA}} · {{.SHA}}{{end -}}
+        </div>
+        <button class="drawer-close"
+                hx-get="/drawer/close"
+                hx-target="#modal-slot"
+                hx-swap="innerHTML"
+                title="cerrar (Esc)">×</button>
+      </div>
+      <h3>{{.PRTitle}}</h3>
+      <div class="sub">adopt · PR sin issue trackeado</div>
+      <div class="drawer-chips">
+        <span class="chip chip-orange" title="PR no linkeado a ningún issue con labels che:*">adopt</span>
+        {{if checksLabel .Entity }}<span class="chip {{checksChipClass .Entity}}">{{checksLabel .Entity}}</span>{{end}}
+        {{if .PRVerdict}}<span class="chip {{verdictChipClass .PRVerdict}}">validated:{{.PRVerdict}}</span>{{end}}
+        {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+      </div>
+    </div>
+
+    <div class="drawer-actions">
+      {{/* Solo validate y close: los dos flows que pueden operar sobre un
+           PR untracked. validate/close resuelven via stateref fallback al
+           PR cuando el issue no tiene che:* (ver internal/flow/stateref). */}}
+      <button class="btn warn"
+              hx-post="/action/validate/{{$key}}"
+              hx-target="#modal-slot"
+              hx-swap="innerHTML"
+              {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate !{{.PRNumber}}"{{end}}>validate</button>
+      <button class="btn danger"
+              hx-post="/action/close/{{$key}}"
+              hx-target="#modal-slot"
+              hx-swap="innerHTML"
+              {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="close !{{.PRNumber}} (mergea el PR)"{{end}}>close</button>
+      <a class="btn ghost" style="margin-left:auto"
+         href="https://github.com/{{.NWO}}/pull/{{.PRNumber}}"
+         target="_blank" rel="noopener">ver en GH</a>
+    </div>
+
+    <div class="drawer-logs">
+      <div class="drawer-logs-hdr">
+        <span><b>stream</b>{{if .RunningFlow}} · claude {{.RunningFlow}} · run {{.RunIter}}{{end}}</span>
+        <div class="ctl">
+          <span class="on">● auto-scroll</span>
+          <span>pause</span>
+          <span>clear</span>
+        </div>
+      </div>
+      <div class="drawer-logs-body" data-entity="{{$key}}">
+        <div class="live-log"></div>
+        <div class="live-empty" style="color:var(--muted)">sin logs todavía — dispará validate o close para ver el stream en vivo.</div>
+        {{if .RunningFlow}}<div class="live-cursor"><span class="cursor">&nbsp;</span></div>{{end}}
+      </div>
+    </div>
+
+  {{else if eq .Kind 1}}
     {{/* ============= FUSED: tabs PR | Issue ============= */}}
     <div class="drawer-tabs">
       <button type="button" class="tab tab-pr" data-tab="pr">PR !{{.PRNumber}}</button>
@@ -40,7 +108,7 @@
           {{- if .LoopSpec}} · loop {{.LoopSpec}}{{end -}}
         </div>
         <div class="drawer-chips">
-          <span class="chip">ct:plan</span>
+          {{if eq .Status "adopt"}}<span class="chip chip-orange" title="issue linkeado no tiene labels che:* — adoptable desde acá">adopt</span>{{else}}<span class="chip">ct:plan</span>{{end}}
           {{if .Type}}<span class="chip">type:{{.Type}}</span>{{end}}
           {{if .Size}}<span class="chip">size:{{.Size}}</span>{{end}}
           {{if .PRVerdict}}<span class="chip {{verdictChipClass .PRVerdict}}">validated:{{.PRVerdict}}</span>{{end}}
@@ -81,26 +149,41 @@
              LogStore y del overlay). El server mapea a PRNumber antes de
              invocar al subcomando para los flows que lo requieren — ver
              resolveTargetRef en server.go. */}}
-        <button class="btn primary"
-                hx-post="/action/iterate/{{.IssueNumber}}"
-                hx-target="#modal-slot"
-                hx-swap="innerHTML"
-                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="iterate !{{.PRNumber}}"{{end}}>iterate</button>
-        <button class="btn warn"
-                hx-post="/action/validate/{{.IssueNumber}}"
-                hx-target="#modal-slot"
-                hx-swap="innerHTML"
-                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate !{{.PRNumber}}"{{end}}>validate</button>
-        {{/* close visible en che:executed y che:validated (los estados que
-             acepta `che close <pr>`). El comando warnea (no rechaza) si
-             el verdict no es approve — el click ES la decisión humana
-             per memoria feedback_close_no_gate. */}}
-        {{if or (eq .Status "executed") (eq .Status "validated")}}
-        <button class="btn danger"
-                hx-post="/action/close/{{.IssueNumber}}"
-                hx-target="#modal-slot"
-                hx-swap="innerHTML"
-                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="close !{{.PRNumber}} (mergea y cierra el issue)"{{end}}>close</button>
+        {{if eq .Status "adopt"}}
+          {{/* Fused en adopt: el issue linkeado no tiene che:*, así que el
+               lifecycle che no aplica — solo validate/close. */}}
+          <button class="btn warn"
+                  hx-post="/action/validate/{{.IssueNumber}}"
+                  hx-target="#modal-slot"
+                  hx-swap="innerHTML"
+                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate !{{.PRNumber}}"{{end}}>validate</button>
+          <button class="btn danger"
+                  hx-post="/action/close/{{.IssueNumber}}"
+                  hx-target="#modal-slot"
+                  hx-swap="innerHTML"
+                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="close !{{.PRNumber}}"{{end}}>close</button>
+        {{else}}
+          <button class="btn primary"
+                  hx-post="/action/iterate/{{.IssueNumber}}"
+                  hx-target="#modal-slot"
+                  hx-swap="innerHTML"
+                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="iterate !{{.PRNumber}}"{{end}}>iterate</button>
+          <button class="btn warn"
+                  hx-post="/action/validate/{{.IssueNumber}}"
+                  hx-target="#modal-slot"
+                  hx-swap="innerHTML"
+                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate !{{.PRNumber}}"{{end}}>validate</button>
+          {{/* close visible en che:executed y che:validated (los estados que
+               acepta `che close <pr>`). El comando warnea (no rechaza) si
+               el verdict no es approve — el click ES la decisión humana
+               per memoria feedback_close_no_gate. */}}
+          {{if or (eq .Status "executed") (eq .Status "validated")}}
+          <button class="btn danger"
+                  hx-post="/action/close/{{.IssueNumber}}"
+                  hx-target="#modal-slot"
+                  hx-swap="innerHTML"
+                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="close !{{.PRNumber}} (mergea y cierra el issue)"{{end}}>close</button>
+          {{end}}
         {{end}}
         <a class="btn ghost" style="margin-left:auto"
            href="https://github.com/{{.NWO}}/pull/{{.PRNumber}}"
@@ -120,7 +203,7 @@
              mount point `.live-log` donde dash.js vuelca los eventos SSE
              en tiempo real. El placeholder `.live-empty` desaparece apenas
              llega la primera línea (lo esconde el JS). */}}
-        <div class="drawer-logs-body" data-entity="{{.IssueNumber}}">
+        <div class="drawer-logs-body" data-entity="{{$key}}">
           {{if .LogRuns}}
             {{range .LogRuns}}
               <div class="run-sep">{{.Label}}</div>
@@ -270,7 +353,7 @@
           <span>clear</span>
         </div>
       </div>
-      <div class="drawer-logs-body" data-entity="{{.IssueNumber}}">
+      <div class="drawer-logs-body" data-entity="{{$key}}">
         {{if .LogRuns}}
           {{range .LogRuns}}
             <div class="run-sep">{{.Label}}</div>

@@ -1,0 +1,26 @@
+[
+  {
+    "number": 301,
+    "title": "orphan PR, nunca vio che",
+    "state": "OPEN",
+    "headRefName": "fix/hotpatch",
+    "headRefOid": "deadbeef0123456789abcdef0123456789abcdef",
+    "labels": [],
+    "closingIssuesReferences": [],
+    "statusCheckRollup": [
+      {"__typename": "CheckRun", "name": "test", "conclusion": "SUCCESS", "status": "COMPLETED"}
+    ]
+  },
+  {
+    "number": 302,
+    "title": "PR con closes #500 pero issue no tiene che:*",
+    "state": "OPEN",
+    "headRefName": "feat/legacy-module",
+    "headRefOid": "cafebabe0011223344556677889900aabbccddee",
+    "labels": [],
+    "closingIssuesReferences": [
+      {"number": 500, "repository": {"name": "che", "owner": {"login": "chichex"}}}
+    ],
+    "statusCheckRollup": []
+  }
+]

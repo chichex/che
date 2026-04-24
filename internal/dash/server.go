@@ -217,6 +217,13 @@ var allowedFlows = map[string]bool{
 // IssueNumber; este helper es el único lugar donde se traduce a PRNumber
 // para el subproceso.
 func resolveTargetRef(e Entity, flow string) int {
+	if e.Kind == KindPR {
+		// Adopt: no hay issue linkeado, el único ref posible es el PR.
+		// Los flows permitidos en adopt (validate/close) ya operan sobre
+		// PR; validate+iterate+close en stateref.go caen al PR cuando no
+		// encuentran labels che:* en el issue.
+		return e.PRNumber
+	}
 	if e.Kind == KindFused && (flow == "validate" || flow == "iterate" || flow == "close") && e.PRNumber > 0 {
 		return e.PRNumber
 	}
@@ -280,6 +287,13 @@ type pageData struct {
 	// correcto ("auto-loop OFF" / "auto-loop ON (3/4)"). El popover en
 	// sí se renderea sobre /loop (lazy) — acá solo el pill.
 	Loop loopPopoverData
+	// Adopt indica si la columna "adopt" (PRs untracked) está visible. Se
+	// propaga via query param ?adopt=1 desde el handler. El template lo usa
+	// (a) para pintar el toggle del header como checked, (b) para computar
+	// grid-template-columns (10 cols vs 9), (c) para propagar el flag al
+	// hx-get de /board y al EventSource de /stream (reconexión sin perder
+	// el estado del toggle).
+	Adopt bool
 }
 
 // hotPollSec es el intervalo de polling adaptivo cuando hay flows locales
@@ -310,13 +324,16 @@ type columnData struct {
 	Entities []Entity
 }
 
-// columnsOrder fija el orden left-to-right del board. 9 columnas reflejando
-// los 9 estados che:* (PR2). Las 4 transient (planning, executing,
-// validating, closing) se intercalan entre sus pares terminales. closed es
-// terminal y queda capada en el poller (ver ClosedCap en gh_source.go).
+// columnsOrder fija el orden left-to-right del board. 10 columnas: "adopt"
+// (opt-in, al inicio) + los 9 estados che:* (PR2). Las 4 transient (planning,
+// executing, validating, closing) se intercalan entre sus pares terminales.
+// closed es terminal y queda capada en el poller (ver ClosedCap en
+// gh_source.go). adopt agrupa PRs untracked y solo se renderea cuando el
+// toggle del header está ON (buildData filtra cuando adopt=false).
 var columnsOrder = []struct {
 	Key, Title string
 }{
+	{"adopt", "adopt"},
 	{"idea", "idea"},
 	{"planning", "planning"},
 	{"plan", "plan"},
@@ -521,9 +538,27 @@ func errShort(err error) string {
 // Las entidades se overlaye con el estado local (s.running) para que los
 // flows disparados desde el dashboard se reflejen en la UI de inmediato,
 // sin esperar al próximo poll de la Source.
-func (s *Server) buildData() pageData {
+//
+// adopt controla si la columna "adopt" se renderea con PRs untracked. Con
+// adopt=false (default), los Entities con Status="adopt" se filtran del
+// snapshot antes de agrupar — el dash se ve idéntico a pre-adopt-mode.
+// Con adopt=true, esas entities pasan y se agrupan en la columna "adopt".
+func (s *Server) buildData(adopt bool) pageData {
 	snap := s.source.Snapshot()
 	snap.Entities = s.overlayRunning(snap.Entities)
+	if !adopt {
+		// Filtro defensivo antes del group-by: con el toggle OFF no queremos
+		// ni que la columna se renderee vacía, ni que CapReached/ActiveLoops
+		// lleven cuentas de adopts.
+		filtered := make([]Entity, 0, len(snap.Entities))
+		for _, e := range snap.Entities {
+			if e.Status == "adopt" {
+				continue
+			}
+			filtered = append(filtered, e)
+		}
+		snap.Entities = filtered
+	}
 	active := 0
 	for _, e := range snap.Entities {
 		if e.RunningFlow != "" {
@@ -544,9 +579,22 @@ func (s *Server) buildData() pageData {
 	if hot && next > hotPollSec {
 		next = hotPollSec
 	}
+	cols := groupByColumn(snap.Entities)
+	if !adopt {
+		// Con el toggle OFF también dropeamos la columna "adopt" para que el
+		// board quede idéntico a como estaba pre-feature (9 columnas, no 10).
+		withoutAdopt := make([]columnData, 0, len(cols))
+		for _, c := range cols {
+			if c.Key == "adopt" {
+				continue
+			}
+			withoutAdopt = append(withoutAdopt, c)
+		}
+		cols = withoutAdopt
+	}
 	return pageData{
 		Repo:         s.repoName,
-		Columns:      groupByColumn(snap.Entities),
+		Columns:      cols,
 		Snapshot:     snap,
 		PollInterval: s.pollInterval,
 		NextPollSec:  next,
@@ -554,16 +602,20 @@ func (s *Server) buildData() pageData {
 		Version:      s.version,
 		NWO:          snap.NWO,
 		Loop:         s.buildLoopData(),
+		Adopt:        adopt,
 	}
 }
 
-// findEntity busca por IssueNumber en el snapshot actual. Usado por el
+// findEntity busca por EntityKey en el snapshot actual. Usado por el
 // handler `/drawer/{id}`. El resultado lleva el RunningFlow del snapshot
 // merged con s.running (local) — si hay dispatch local pendiente de poll,
 // el drawer lo refleja sin esperar al próximo refresh.
+//
+// Clave canónica: IssueNumber para KindIssue/KindFused, PRNumber para
+// KindPR (adopt sin issue linkeado). Ver Entity.EntityKey.
 func (s *Server) findEntity(id int) (Entity, bool) {
 	for _, e := range s.source.Snapshot().Entities {
-		if e.IssueNumber == id {
+		if e.EntityKey() == id {
 			s.mu.Lock()
 			if flow, ok := s.running[id]; ok && e.RunningFlow == "" {
 				e.RunningFlow = flow
@@ -604,7 +656,7 @@ func (s *Server) overlayRunning(in []Entity) []Entity {
 				needsMutation = true
 				break
 			}
-			if rounds[e.IssueNumber] >= LoopCap {
+			if rounds[e.EntityKey()] >= LoopCap {
 				switch e.Status {
 				case "plan", "validated", "executed":
 					needsMutation = true
@@ -620,13 +672,14 @@ func (s *Server) overlayRunning(in []Entity) []Entity {
 	}
 	out := make([]Entity, len(in))
 	for i, e := range in {
+		key := e.EntityKey()
 		if e.RunningFlow != "" {
 			// Snapshot ya refleja el flow → limpiamos el overlay local.
 			// Evita que s.running crezca sin bound si los handlers no
 			// limpian explícitamente (ej: el subprocess ya terminó y el
 			// label transient apareció en el siguiente poll).
-			delete(s.running, e.IssueNumber)
-		} else if flow, ok := s.running[e.IssueNumber]; ok {
+			delete(s.running, key)
+		} else if flow, ok := s.running[key]; ok {
 			e.RunningFlow = flow
 		}
 		// Inyectar counter de rounds al chip magenta del card. RunMax es
@@ -634,7 +687,7 @@ func (s *Server) overlayRunning(in []Entity) []Entity {
 		// rounds[id]=0 → RunIter=0, lo cual es el estado correcto (el cap
 		// va al renderer igual, para que se vea "⟳ execute 0/5").
 		if e.RunningFlow != "" {
-			e.RunIter = rounds[e.IssueNumber]
+			e.RunIter = rounds[key]
 			e.RunMax = LoopCap
 		}
 		// Cap-reached chip: rounds >= LoopCap + entity en status loopable.
@@ -956,21 +1009,24 @@ func (s *Server) buildMux() *http.ServeMux {
 			http.NotFound(w, r)
 			return
 		}
+		adopt := r.URL.Query().Get("adopt") == "1"
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		if err := s.tmpl.ExecuteTemplate(w, "dashboard.html.tmpl", s.buildData()); err != nil {
+		if err := s.tmpl.ExecuteTemplate(w, "dashboard.html.tmpl", s.buildData(adopt)); err != nil {
 			http.Error(w, "template error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 	})
 
 	// Board partial para HTMX polling. Devuelve el chip de status (oob) + las
-	// 9 columnas. El wrapper `.dash-board` queda en el DOM y su innerHTML se
-	// swappea con el contenido de esta respuesta.
-	mux.HandleFunc("GET /board", func(w http.ResponseWriter, _ *http.Request) {
+	// columnas (9 default, 10 cuando ?adopt=1). El wrapper `.dash-board`
+	// queda en el DOM y su innerHTML se swappea con el contenido de esta
+	// respuesta. El flag adopt se propaga desde el hx-get del wrapper.
+	mux.HandleFunc("GET /board", func(w http.ResponseWriter, r *http.Request) {
+		adopt := r.URL.Query().Get("adopt") == "1"
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		if err := s.tmpl.ExecuteTemplate(w, "board-partial", s.buildData()); err != nil {
+		if err := s.tmpl.ExecuteTemplate(w, "board-partial", s.buildData(adopt)); err != nil {
 			http.Error(w, "template error: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -1028,6 +1084,16 @@ func (s *Server) buildMux() *http.ServeMux {
 		entity, ok := s.findEntity(id)
 		if !ok {
 			http.Error(w, "entity not found", http.StatusNotFound)
+			return
+		}
+		// Defensa server-side: sobre entidades en "adopt" solo permitimos
+		// validate y close. El UI ya oculta los otros botones, pero un
+		// cliente que manipule el POST podría intentar dispararlos; acá
+		// cortamos con 400. iterate/execute/explore sobre un PR/issue sin
+		// estado che:* son no-ops en el mejor caso y arman estado raro en
+		// el peor.
+		if entity.Status == "adopt" && flow != "validate" && flow != "close" {
+			http.Error(w, "flow not allowed in adopt column (only validate/close)", http.StatusBadRequest)
 			return
 		}
 		// Reservar antes de spawnar: si hay un flow ya en curso para

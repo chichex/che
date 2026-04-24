@@ -332,11 +332,11 @@ type fixedSource struct{ snap Snapshot }
 
 func (f *fixedSource) Snapshot() Snapshot { return f.snap }
 
-// TestColumnsOrder fija el contrato del orden left-to-right del board: 9
-// columnas reflejando los 9 estados che:* (PR3). Si alguien reordena el
-// slice o suma/quita una columna, el test rompe.
+// TestColumnsOrder fija el contrato del orden left-to-right del board: 10
+// columnas — "adopt" al inicio (opt-in) + los 9 estados che:* (PR3). Si
+// alguien reordena el slice o suma/quita una columna, el test rompe.
 func TestColumnsOrder(t *testing.T) {
-	want := []string{"idea", "planning", "plan", "executing", "executed", "validating", "validated", "closing", "closed"}
+	want := []string{"adopt", "idea", "planning", "plan", "executing", "executed", "validating", "validated", "closing", "closed"}
 	if len(columnsOrder) != len(want) {
 		t.Fatalf("columnsOrder len: got %d want %d", len(columnsOrder), len(want))
 	}
@@ -1123,7 +1123,7 @@ func (b *bumpableSource) Bump()                { b.bumpCalls.Add(1) }
 func TestBuildData_NextPollSecIsBaselineWhenIdle(t *testing.T) {
 	src := &fixedSource{snap: Snapshot{LastOK: time.Now()}}
 	s := NewServer(src, "repo", 15)
-	data := s.buildData()
+	data := s.buildData(false)
 	if data.NextPollSec != 15 {
 		t.Errorf("idle NextPollSec: got %d want 15", data.NextPollSec)
 	}
@@ -1141,7 +1141,7 @@ func TestBuildData_NextPollSecIsHotWhenRunning(t *testing.T) {
 	s.running[42] = "execute"
 	s.mu.Unlock()
 
-	data := s.buildData()
+	data := s.buildData(false)
 	if data.NextPollSec != hotPollSec {
 		t.Errorf("hot NextPollSec: got %d want %d (hotPollSec)", data.NextPollSec, hotPollSec)
 	}
@@ -1156,7 +1156,7 @@ func TestBuildData_NextPollSecCappedByBaseline(t *testing.T) {
 	s.mu.Lock()
 	s.running[42] = "execute"
 	s.mu.Unlock()
-	data := s.buildData()
+	data := s.buildData(false)
 	if data.NextPollSec != 1 {
 		t.Errorf("baseline < hotPollSec should win: got %d want 1", data.NextPollSec)
 	}
@@ -1436,5 +1436,261 @@ func TestOverlayRunning_CapReachedOnlyInLoopableStatus(t *testing.T) {
 		if e.CapReached {
 			t.Errorf("out[%d] Status=%q: CapReached=true, want false (cap irrelevante en este status)", i, e.Status)
 		}
+	}
+}
+
+// ==================================================================
+// Adopt mode (columna opt-in "adopt")
+// ==================================================================
+
+// TestBuildData_AdoptOff_FiltersAdoptEntities: con adopt=false (toggle off),
+// las entities con Status="adopt" se filtran del snapshot antes del group-by
+// y la columna "adopt" NO aparece entre las Columns resultantes. Cubre el
+// contrato "default sin cambio" — el dash se ve como pre-feature cuando el
+// usuario no opta in.
+func TestBuildData_AdoptOff_FiltersAdoptEntities(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, Status: "plan"},
+			{Kind: KindPR, PRNumber: 301, Status: "adopt"},
+			{Kind: KindFused, IssueNumber: 500, PRNumber: 302, Status: "adopt"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	data := s.buildData(false)
+
+	// Ninguna columna "adopt" en la salida.
+	for _, c := range data.Columns {
+		if c.Key == "adopt" {
+			t.Errorf("adopt OFF: debería NO renderear columna 'adopt'; got %d entries", len(c.Entities))
+		}
+	}
+	// La columna "plan" sigue teniendo el issue #42 (sanity check).
+	var plan *columnData
+	for i := range data.Columns {
+		if data.Columns[i].Key == "plan" {
+			plan = &data.Columns[i]
+		}
+	}
+	if plan == nil || len(plan.Entities) != 1 {
+		t.Errorf("adopt OFF: columna 'plan' debería tener issue #42; got %+v", plan)
+	}
+	if data.Adopt {
+		t.Errorf("data.Adopt: got true want false")
+	}
+}
+
+// TestBuildData_AdoptOn_KeepsAdoptEntities: con adopt=true, las entities
+// adopt se conservan y se agrupan en la columna "adopt".
+func TestBuildData_AdoptOn_KeepsAdoptEntities(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, Status: "plan"},
+			{Kind: KindPR, PRNumber: 301, Status: "adopt", PRTitle: "orphan"},
+			{Kind: KindFused, IssueNumber: 500, PRNumber: 302, Status: "adopt"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	data := s.buildData(true)
+
+	var adopt *columnData
+	for i := range data.Columns {
+		if data.Columns[i].Key == "adopt" {
+			adopt = &data.Columns[i]
+		}
+	}
+	if adopt == nil {
+		t.Fatalf("adopt ON: falta columna 'adopt' en Columns=%+v", data.Columns)
+	}
+	if len(adopt.Entities) != 2 {
+		t.Errorf("adopt ON: got %d entries en columna adopt, want 2", len(adopt.Entities))
+	}
+	if !data.Adopt {
+		t.Errorf("data.Adopt: got false want true")
+	}
+}
+
+// TestAdoptHandler_PropagatesQueryParam: GET / con ?adopt=1 renderea la
+// columna adopt; sin el param, no.
+func TestAdoptHandler_PropagatesQueryParam(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		NWO:    "demo/che",
+		Entities: []Entity{
+			{Kind: KindPR, PRNumber: 301, PRTitle: "orphan PR", Status: "adopt"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	// Sin adopt → la columna no aparece. Buscamos <div class="col"
+	// data-status="adopt"> (render efectivo), no el selector CSS que
+	// contiene la misma string literal.
+	resp, err := http.Get(ts.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(body), `<div class="col" data-status="adopt"`) {
+		t.Errorf("adopt OFF: index no debería renderear la columna <div class=\"col\" data-status=\"adopt\">")
+	}
+	if strings.Contains(string(body), "orphan PR") {
+		t.Errorf("adopt OFF: index no debería contener el PR huérfano")
+	}
+
+	// Con ?adopt=1 → la columna aparece.
+	resp2, err := http.Get(ts.URL + "/?adopt=1")
+	if err != nil {
+		t.Fatalf("GET /?adopt=1: %v", err)
+	}
+	body2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if !strings.Contains(string(body2), `<div class="col" data-status="adopt"`) {
+		t.Errorf("adopt ON: index debería renderear <div class=\"col\" data-status=\"adopt\">; body head=%s", string(body2[:min(600, len(body2))]))
+	}
+	if !strings.Contains(string(body2), "orphan PR") {
+		t.Errorf("adopt ON: index debería contener el título del PR huérfano")
+	}
+	// hx-get del board también debe llevar ?adopt=1 para que los polls
+	// subsiguientes sigan trayendo la columna.
+	if !strings.Contains(string(body2), `hx-get="/board?adopt=1"`) {
+		t.Errorf("adopt ON: hx-get del board debería incluir ?adopt=1")
+	}
+}
+
+// TestAction_AdoptRejectsNonValidateClose: defensa server-side — un POST a
+// un flow distinto de validate/close sobre una entity adopt devuelve 400
+// sin llamar al runner. El UI oculta los botones, pero un cliente
+// manipulado podría intentarlo.
+func TestAction_AdoptRejectsNonValidateClose(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		NWO:    "demo/che",
+		Entities: []Entity{
+			{Kind: KindPR, PRNumber: 301, PRTitle: "orphan", Status: "adopt"},
+			{Kind: KindFused, IssueNumber: 500, PRNumber: 302, Status: "adopt"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	fr := &fakeRunner{}
+	s.runAction = fr.run
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	for _, flow := range []string{"iterate", "execute", "explore"} {
+		// Adopt KindPR: data-entity=PRNumber.
+		resp, err := http.Post(ts.URL+"/action/"+flow+"/301", "", nil)
+		if err != nil {
+			t.Fatalf("POST adopt+%s: %v", flow, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("adopt+%s: got %d want 400", flow, resp.StatusCode)
+		}
+		// Adopt KindFused: data-entity=IssueNumber.
+		resp2, err := http.Post(ts.URL+"/action/"+flow+"/500", "", nil)
+		if err != nil {
+			t.Fatalf("POST adopt-fused+%s: %v", flow, err)
+		}
+		resp2.Body.Close()
+		if resp2.StatusCode != http.StatusBadRequest {
+			t.Errorf("adopt-fused+%s: got %d want 400", flow, resp2.StatusCode)
+		}
+	}
+	if fr.count() != 0 {
+		t.Errorf("runner should not be called for disallowed flows; got %d calls", fr.count())
+	}
+}
+
+// TestAction_AdoptAllowsValidateAndClose: validate y close SÍ pasan sobre
+// adopt. Para KindPR, TargetRef=PRNumber (resolveTargetRef).
+func TestAction_AdoptAllowsValidateAndClose(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		NWO:    "demo/che",
+		Entities: []Entity{
+			{Kind: KindPR, PRNumber: 301, PRTitle: "orphan", Status: "adopt"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	fr := &fakeRunner{}
+	s.runAction = fr.run
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/validate/301", "", nil)
+	if err != nil {
+		t.Fatalf("POST validate/301: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	if fr.count() != 1 {
+		t.Fatalf("runner calls: got %d want 1", fr.count())
+	}
+	got := fr.last()
+	if got.Flow != "validate" || got.TargetRef != 301 || got.EntityKey != 301 {
+		t.Errorf("got %+v want {validate target=301 key=301}", got)
+	}
+}
+
+// TestDrawerAdopt_RendersOnlyValidateAndClose: el drawer de una entidad
+// adopt no debe ofrecer iterate/execute/explore, solo validate y close.
+func TestDrawerAdopt_RendersOnlyValidateAndClose(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		NWO:    "demo/che",
+		Entities: []Entity{
+			{Kind: KindPR, PRNumber: 301, PRTitle: "orphan", Status: "adopt"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/drawer/301")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	got := string(body)
+
+	if !strings.Contains(got, `hx-post="/action/validate/301"`) {
+		t.Errorf("adopt drawer: missing validate button")
+	}
+	if !strings.Contains(got, `hx-post="/action/close/301"`) {
+		t.Errorf("adopt drawer: missing close button")
+	}
+	// iterate/execute/explore no deben aparecer.
+	for _, forbidden := range []string{
+		`hx-post="/action/iterate/301"`,
+		`hx-post="/action/execute/301"`,
+		`hx-post="/action/explore/301"`,
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("adopt drawer: encontré %s (no debería)", forbidden)
+		}
+	}
+	// Ref al PR sí, al issue no.
+	if !strings.Contains(got, `href="https://github.com/demo/che/pull/301"`) {
+		t.Errorf("adopt drawer: missing link al PR")
+	}
+	if strings.Contains(got, "#0") {
+		t.Errorf("adopt drawer: no debería renderear '#0' como issue fantasma")
+	}
+}
+
+// TestColumn_Adopt: Entity.Column() devuelve "adopt" cuando Status=="adopt".
+// Cubierto también en model_test pero duplicado como sanity del dispatcher.
+func TestColumn_Adopt(t *testing.T) {
+	e := Entity{Kind: KindPR, PRNumber: 42, Status: "adopt"}
+	if got := e.Column(); got != "adopt" {
+		t.Errorf("Column(): got %q want adopt", got)
 	}
 }

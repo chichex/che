@@ -81,6 +81,16 @@ func TestColumn(t *testing.T) {
 			in:   Entity{Kind: KindIssue, Status: "frob"},
 			want: "idea",
 		},
+		{
+			name: "PR huérfano status=adopt → adopt",
+			in:   Entity{Kind: KindPR, PRNumber: 301, Status: "adopt"},
+			want: "adopt",
+		},
+		{
+			name: "fused con issue sin che:* status=adopt → adopt",
+			in:   Entity{Kind: KindFused, IssueNumber: 500, PRNumber: 302, Status: "adopt"},
+			want: "adopt",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

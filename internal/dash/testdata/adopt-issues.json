@@ -1,0 +1,19 @@
+[
+  {
+    "number": 500,
+    "title": "legacy issue, solo bug label",
+    "state": "OPEN",
+    "labels": [
+      {"name": "bug"}
+    ]
+  },
+  {
+    "number": 501,
+    "title": "che issue tracked, para caso negativo",
+    "state": "OPEN",
+    "labels": [
+      {"name": "ct:plan"},
+      {"name": "che:plan"}
+    ]
+  }
+]

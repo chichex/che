@@ -26,6 +26,10 @@ const (
 	// Cubre executing / executed / validating / validated / closing / closed.
 	// Validating y validated también pueden contener issues (validate de plan).
 	KindFused
+	// KindPR: PR sin issue linkeado (closingIssuesReferences vacío). Solo
+	// aparece en la columna "adopt" — PRs abiertos por fuera del flow che
+	// que pueden ser adoptados con validate/close. No tiene IssueNumber.
+	KindPR
 )
 
 // Entity es la unidad de datos del board y del drawer. Reúne campos
@@ -114,6 +118,19 @@ type LogEntry struct {
 // Default: "idea" (cualquier issue sin status raro o vacío). Antes era
 // "backlog" pero en el modelo de 9 estados ya no hay backlog separado de
 // idea — todo issue gestionado por che arranca como idea.
+// EntityKey es la clave canónica usada por URLs (`/drawer/{id}`,
+// `/action/{flow}/{id}`), el overlay de running, el LogStore y el SSE.
+// Default: IssueNumber. Para KindPR (adopt — PR sin issue linkeado)
+// devuelve PRNumber porque IssueNumber es 0 y provocaría colisiones
+// entre múltiples adopts. El resto (KindIssue, KindFused) mantiene
+// IssueNumber — no cambia el contrato de los paths ni tests existentes.
+func (e Entity) EntityKey() int {
+	if e.Kind == KindPR {
+		return e.PRNumber
+	}
+	return e.IssueNumber
+}
+
 func (e Entity) Column() string {
 	switch e.Status {
 	case "idea":
@@ -134,6 +151,8 @@ func (e Entity) Column() string {
 		return "closing"
 	case "closed":
 		return "closed"
+	case "adopt":
+		return "adopt"
 	default:
 		// Status vacío o desconocido → idea (defensa, evita que entidades
 		// huérfanas desaparezcan del board).

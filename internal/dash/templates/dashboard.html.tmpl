@@ -76,6 +76,58 @@
     font-family: inherit;
     font-size: 10px;
   }
+  /* Adopt toggle (opt-in). Visual parecido al auto-loop pill para mantener
+     consistencia del topbar. Off → muted; on → orange (el color de la
+     columna "adopt" en el board). */
+  .adopt-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+    background: var(--panel);
+    border: 1px solid var(--elevated);
+    border-radius: 16px;
+    font-size: 11px;
+    cursor: pointer;
+    color: var(--text);
+    font-family: inherit;
+  }
+  .adopt-toggle:hover { border-color: var(--border-muted); }
+  .adopt-toggle input[type="checkbox"] {
+    /* El input real queda oculto — el click cae sobre el <label> padre,
+       que actúa como el toggle. Mantenerlo en el DOM permite que el JS
+       lea .checked al reaccionar al change sin tocar estilos. */
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .adopt-toggle .switch {
+    width: 28px;
+    height: 14px;
+    background: var(--border-muted);
+    border-radius: 8px;
+    position: relative;
+    transition: background 0.15s;
+  }
+  .adopt-toggle .switch::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 10px;
+    height: 10px;
+    background: var(--text);
+    border-radius: 50%;
+    transition: left 0.15s;
+  }
+  .adopt-toggle.on .switch { background: var(--orange); }
+  .adopt-toggle.on .switch::after { left: 16px; }
+  .adopt-toggle .label { color: var(--muted); }
+  .adopt-toggle.on .label { color: var(--orange); }
+  /* Color de cabecera de la columna "adopt" — orange para diferenciarla
+     del resto. */
+  .col[data-status="adopt"] .col-hdr b { color: var(--orange); }
+
   .auto-loop-wrap {
     position: relative;
   }
@@ -213,7 +265,9 @@
      viewports angostos sin que las cards queden ilegibles. */
   .dash-board {
     display: grid;
-    grid-template-columns: repeat(9, 1fr);
+    /* Column count es dinámico: 9 default, 10 cuando el toggle "adopt" está
+       ON. El template inyecta --col-count inline en el wrapper. */
+    grid-template-columns: repeat(var(--col-count, 9), 1fr);
     gap: 8px;
     overflow-x: auto;
     overflow-y: hidden;
@@ -730,6 +784,14 @@
     <span class="repo">{{.Repo}}</span>
     {{if .Version}}<span class="version" title="versión del binario che que está sirviendo este dash">{{.Version}}</span>{{end}}
     <input class="filter" placeholder="filter: type:feature, author:@me, label:urgent" value="">
+    {{/* Adopt toggle (opt-in). On → muestra la columna "adopt" con PRs
+         untracked. Persistencia en localStorage (ver dash.js): recarga de
+         página respeta el estado. */}}
+    <label class="adopt-toggle{{if .Adopt}} on{{end}}" title="muestra la columna 'adopt' con PRs que no están linkeados a issues trackeados por che">
+      <input type="checkbox" id="adopt-toggle-input"{{if .Adopt}} checked{{end}}>
+      <span class="switch"></span>
+      <span class="label">show untracked PRs</span>
+    </label>
     <div class="auto-loop-wrap">
       {{template "auto-loop-toggle" .Loop}}
       <div id="loop-popover" class="loop-popover" aria-hidden="true"></div>
@@ -748,9 +810,11 @@
          hx-trigger — el load no vuelve a correr porque el elemento nuevo
          (con id=dash-board del partial) tiene solo "every NextPollSec s".
          El polling es adaptivo: idle → PollInterval, hot (hay flows locales
-         en curso) → hotPollSec. Ver buildData.NextPollSec. */}}
+         en curso) → hotPollSec. Ver buildData.NextPollSec.
+         --col-count: adopt OFF → 9 columnas, adopt ON → 10. */}}
     <div id="dash-board" class="dash-board"
-         hx-get="/board"
+         style="--col-count: {{if .Adopt}}10{{else}}9{{end}};"
+         hx-get="/board{{if .Adopt}}?adopt=1{{end}}"
          hx-trigger="load delay:200ms, every {{.NextPollSec}}s"
          hx-swap="outerHTML">
       {{template "board-columns" .}}

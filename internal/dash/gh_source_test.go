@@ -177,7 +177,7 @@ func TestCombineEntities_FusesPRsWithClosingRefs(t *testing.T) {
 	}
 }
 
-func TestCombineEntities_SkipsPRsWithoutClosingRefs(t *testing.T) {
+func TestCombineEntities_AdoptsPRsWithoutClosingRefs(t *testing.T) {
 	issues, err := parseIssues(readFixture(t, "issues.json"))
 	if err != nil {
 		t.Fatalf("parseIssues: %v", err)
@@ -188,11 +188,24 @@ func TestCombineEntities_SkipsPRsWithoutClosingRefs(t *testing.T) {
 	}
 	entities := combineEntities(issues, prs)
 
-	// PR #44 no tiene closingIssuesReferences → debería estar excluido.
-	for _, e := range entities {
-		if e.PRNumber == 44 {
-			t.Errorf("PR #44 (sin closing refs) debería estar excluido; got %+v", e)
+	// PR #44 no tiene closingIssuesReferences → cae a adopt (Kind=KindPR,
+	// Status="adopt"). Antes se excluía silenciosamente; ahora aparece en
+	// la columna opt-in "adopt".
+	var pr44 *Entity
+	for i := range entities {
+		if entities[i].PRNumber == 44 && entities[i].Kind == KindPR {
+			pr44 = &entities[i]
+			break
 		}
+	}
+	if pr44 == nil {
+		t.Fatalf("PR #44 (sin closing refs) debería aparecer como KindPR/adopt; got entities=%+v", entities)
+	}
+	if pr44.Status != "adopt" {
+		t.Errorf("PR #44 Status: got %q want adopt", pr44.Status)
+	}
+	if pr44.IssueNumber != 0 {
+		t.Errorf("PR #44 IssueNumber: got %d want 0 (sin issue linkeado)", pr44.IssueNumber)
 	}
 }
 
@@ -516,11 +529,15 @@ func TestApplyLabels_PlanValidatedNotShadowedByValidated(t *testing.T) {
 	}
 }
 
-// TestCombineEntities_SkipsEntitiesWithoutCheLabel garantiza que entidades
+// TestCombineEntities_SkipsIssuesWithoutCheLabel garantiza que issues-only
 // sin label `che:*` no aparecen en el board. Antes caían al default "idea"
 // de Column() (defensa), lo cual enmascaraba issues mal tageados como si
 // fueran ideas legítimas.
-func TestCombineEntities_SkipsEntitiesWithoutCheLabel(t *testing.T) {
+//
+// NOTA: adopt mode NO aplica a issue-only — la columna adopt es solo para
+// PRs untracked. Un issue sin che:* sigue siendo "raro" (el humano lo ve
+// via `gh issue list`), no un candidato a adoptar.
+func TestCombineEntities_SkipsIssuesWithoutCheLabel(t *testing.T) {
 	// issues.json incluye #100 "idea sin clasificar aún (ct:plan solo)" con
 	// solo ct:plan y sin che:*. Debería estar excluido.
 	issues, err := parseIssues(readFixture(t, "issues.json"))
@@ -533,23 +550,8 @@ func TestCombineEntities_SkipsEntitiesWithoutCheLabel(t *testing.T) {
 	}
 	entities := combineEntities(issues, prs)
 	for _, e := range entities {
-		if e.IssueNumber == 100 {
+		if e.IssueNumber == 100 && e.Kind == KindIssue {
 			t.Errorf("issue #100 (ct:plan sin che:*) debería estar excluido; got %+v", e)
-		}
-	}
-
-	// Fused: si un PR cierra un issue pero ni el issue ni el PR tienen
-	// che:*, también se omite.
-	synthIssues := []ghIssue{
-		{Number: 200, Title: "issue sin che:*", Labels: []ghLabel{{Name: "ct:plan"}}},
-	}
-	synthPRs := []ghPR{
-		{Number: 201, Title: "PR sin che:*", ClosingIssuesReferences: []ghCloseRef{{Number: 200}}},
-	}
-	got := combineEntities(synthIssues, synthPRs)
-	for _, e := range got {
-		if e.IssueNumber == 200 || e.PRNumber == 201 {
-			t.Errorf("fused issue #200 + PR #201 sin che:* debería estar excluido; got %+v", e)
 		}
 	}
 }
@@ -792,3 +794,95 @@ func TestCombineEntities_FusedClosedIssueAndPR(t *testing.T) {
 		t.Errorf("issue #121 columna: got %q want closed", got.Column())
 	}
 }
+
+// TestCombineEntities_AdoptPRs cubre el caso "adopt mode" (feature v0.0.71):
+// PRs que antes se descartaban silenciosamente ahora entran como Status=adopt.
+// Dos escenarios:
+//   - PR sin closingIssuesReferences → Kind=KindPR, sin IssueNumber.
+//   - PR con closingIssuesReferences apuntando a un issue que no tiene che:*
+//     → Kind=KindFused (hay issue linkeado), Status=adopt.
+// Caso negativo: PR con issue che-trackeado sigue derivando su Status del
+// label che:* y NO cae a adopt.
+func TestCombineEntities_AdoptPRs(t *testing.T) {
+	issues, err := parseIssues(readFixture(t, "adopt-issues.json"))
+	if err != nil {
+		t.Fatalf("parseIssues: %v", err)
+	}
+	prs, err := parsePRs(readFixture(t, "adopt-prs.json"))
+	if err != nil {
+		t.Fatalf("parsePRs: %v", err)
+	}
+
+	// Agregamos un PR extra (con closing ref a issue #501, que SÍ tiene
+	// che:plan) para probar el caso negativo in-situ.
+	prs = append(prs, ghPR{
+		Number: 303, Title: "PR que cierra issue tracked",
+		HeadRefName:             "feat/tracked",
+		ClosingIssuesReferences: []ghCloseRef{{Number: 501}},
+	})
+
+	entities := combineEntities(issues, prs)
+
+	// Caso 1: PR #301 sin closing refs → KindPR, Status=adopt.
+	var pr301 *Entity
+	for i := range entities {
+		if entities[i].PRNumber == 301 {
+			pr301 = &entities[i]
+		}
+	}
+	if pr301 == nil {
+		t.Fatalf("PR #301 no quedó en entities; got=%+v", entities)
+	}
+	if pr301.Kind != KindPR {
+		t.Errorf("PR #301 Kind: got %v want KindPR (%d)", pr301.Kind, KindPR)
+	}
+	if pr301.Status != "adopt" {
+		t.Errorf("PR #301 Status: got %q want adopt", pr301.Status)
+	}
+	if pr301.IssueNumber != 0 {
+		t.Errorf("PR #301 IssueNumber: got %d want 0", pr301.IssueNumber)
+	}
+	if pr301.Column() != "adopt" {
+		t.Errorf("PR #301 Column: got %q want adopt", pr301.Column())
+	}
+
+	// Caso 2: PR #302 cierra issue #500 (que solo tiene label "bug", sin
+	// che:*) → Kind=KindFused, Status=adopt.
+	var pr302 *Entity
+	for i := range entities {
+		if entities[i].PRNumber == 302 {
+			pr302 = &entities[i]
+		}
+	}
+	if pr302 == nil {
+		t.Fatalf("PR #302 no quedó en entities; got=%+v", entities)
+	}
+	if pr302.Kind != KindFused {
+		t.Errorf("PR #302 Kind: got %v want KindFused (hay issue linkeado)", pr302.Kind)
+	}
+	if pr302.Status != "adopt" {
+		t.Errorf("PR #302 Status: got %q want adopt", pr302.Status)
+	}
+	if pr302.IssueNumber != 500 {
+		t.Errorf("PR #302 IssueNumber: got %d want 500", pr302.IssueNumber)
+	}
+
+	// Caso negativo: PR #303 cierra #501 (che:plan tracked) → Status="plan",
+	// NO adopt.
+	var pr303 *Entity
+	for i := range entities {
+		if entities[i].PRNumber == 303 {
+			pr303 = &entities[i]
+		}
+	}
+	if pr303 == nil {
+		t.Fatalf("PR #303 no quedó en entities; got=%+v", entities)
+	}
+	if pr303.Status == "adopt" {
+		t.Errorf("PR #303 Status: got adopt, want plan (issue #501 SÍ tiene che:plan — no corresponde adoptar)")
+	}
+	if pr303.Status != "plan" {
+		t.Errorf("PR #303 Status: got %q want plan", pr303.Status)
+	}
+}
+

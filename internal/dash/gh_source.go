@@ -16,8 +16,12 @@
 //   - PRs con closingIssuesReferences se fusionan con su issue (Kind=KindFused,
 //     IssueNumber/IssueTitle del primero de la lista). El issue correspondiente
 //     NO se emite como issue-only separado para evitar duplicación en el board.
-//   - PRs sin closingIssuesReferences se omiten — no forman parte del flow de
-//     che (che execute siempre abre PRs con `closes #N`).
+//   - PRs sin closingIssuesReferences entran como Kind=KindPR, Status="adopt"
+//     (columna "adopt" opt-in) para que el humano pueda adoptarlos con
+//     validate/close.
+//   - PRs con closingIssuesReferences apuntando a un issue sin ningún label
+//     che:* también caen a Status="adopt" (Kind=KindFused, hay issue pero no
+//     está trackeado).
 package dash
 
 import (
@@ -466,15 +470,18 @@ func parsePRs(data []byte) ([]ghPR, error) {
 // Reglas:
 //  1. Cada PR con closingIssuesReferences no vacío → Kind=Fused, IssueNumber
 //     del primer close-ref, IssueTitle resuelto de la lista de issues si está.
-//     El issue linkeado queda "consumido" y no se emite separado.
-//  2. PR sin closingIssuesReferences → log + skip (che execute siempre abre
-//     PRs con `closes #N`; uno huérfano no es parte del flow).
+//     El issue linkeado queda "consumido" y no se emite separado. Si el
+//     issue NO tiene ningún label che:* → Status="adopt" (Kind sigue siendo
+//     Fused, hay issue linkeado; solo no está trackeado por che).
+//  2. PR sin closingIssuesReferences → Kind=KindPR, Status="adopt". La
+//     columna "adopt" es opt-in (toggle del header del dash); con el toggle
+//     OFF estos no se ven.
 //  3. Issue sin ct:plan → skip (no es gestionado por che).
 //  4. Issue restante (no consumido, con ct:plan) → Kind=Issue.
-//  5. Entidad (Fused o Issue) sin ningún label `che:*` → log + skip. No cae
-//     al default "idea" del board porque enmascara issues mal tageados como
-//     si fueran ideas legítimas. El humano los ve con `gh issue list` si
-//     necesita hacer triage.
+//  5. Issue (KindIssue) sin ningún label `che:*` → skip. No cae al default
+//     "idea" del board porque enmascara issues mal tageados como si fueran
+//     ideas legítimas. El humano los ve con `gh issue list` si necesita
+//     hacer triage. (Para fused / PR huérfanos usamos adopt en vez de skip.)
 func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 	issueByNumber := make(map[int]ghIssue, len(issues))
 	for _, i := range issues {
@@ -488,6 +495,27 @@ func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 	// queda determinado por groupByColumn (que preserva orden de aparición).
 	for _, p := range prs {
 		if len(p.ClosingIssuesReferences) == 0 {
+			// Adopt mode: PR huérfano (sin close-keyword). Lo emitimos como
+			// Kind=KindPR, Status="adopt" para que aparezca en la columna
+			// "adopt" (visible solo con el toggle opt-in). El humano puede
+			// correrle validate/close desde ahí.
+			e := Entity{
+				Kind:      KindPR,
+				PRNumber:  p.Number,
+				PRTitle:   p.Title,
+				Branch:    p.HeadRefName,
+				SHA:       shortSHA(p.HeadRefOid),
+				Status:    "adopt",
+				CreatedAt: p.CreatedAt,
+			}
+			applyLabels(&e, p.Labels)
+			// applyLabels puede haber seteado Status desde algún label che:*
+			// del PR (raro, pero defensa) — para adopt lo pisamos de nuevo.
+			// El criterio es "no tiene issue che trackeado", no "qué labels
+			// tiene el PR".
+			e.Status = "adopt"
+			e.ChecksOK, e.ChecksPending, e.ChecksFail = countChecks(p.StatusCheckRollup)
+			out = append(out, e)
 			continue
 		}
 		issueNum := p.ClosingIssuesReferences[0].Number
@@ -523,7 +551,11 @@ func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 		// Labels del PR alimentan PRVerdict + Locked (override/merge).
 		applyLabels(&e, p.Labels)
 		if e.Status == "" {
-			continue
+			// Adopt mode: PR con close-keyword pero el issue linkeado no
+			// tiene ningún label che:*. Hay issue → mantenemos KindFused
+			// (drawer puede mostrar el body/ref del issue), pero el status
+			// es "adopt" para que caiga en esa columna.
+			e.Status = "adopt"
 		}
 		// Checks del PR.
 		e.ChecksOK, e.ChecksPending, e.ChecksFail = countChecks(p.StatusCheckRollup)

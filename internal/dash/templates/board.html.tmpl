@@ -39,7 +39,7 @@
 
 {{define "board-columns"}}
   {{/* Si todavía no hubo primer poll exitoso (LastOK.IsZero) y no estamos
-       en mock mode, mostrar spinner en vez de las 9 columnas vacías —
+       en mock mode, mostrar spinner en vez de las 9/10 columnas vacías —
        evita que se vea "no hay nada" durante los primeros segundos. */}}
   {{if and (not .Snapshot.Mock) .Snapshot.LastOK.IsZero (not .Snapshot.Stale)}}
     {{template "board-loading" .}}
@@ -49,9 +49,12 @@
       <div class="col-hdr"><b>{{.Title}}</b><span class="count{{if .Hot}} hot{{end}}">{{len .Entities}}</span></div>
       <div class="cards">
         {{range .Entities}}
+          {{/* Clave canónica para el routing: IssueNumber si hay issue (Kind=0/1),
+               PRNumber si es KindPR (adopt — sin issue linkeado). Ver EntityKey. */}}
+          {{$key := .IssueNumber}}{{if eq .Kind 2}}{{$key = .PRNumber}}{{end}}
           <div class="card"
-               data-entity="{{.IssueNumber}}"
-               hx-get="/drawer/{{.IssueNumber}}"
+               data-entity="{{$key}}"
+               hx-get="/drawer/{{$key}}"
                hx-target="#modal-slot"
                hx-swap="innerHTML">
             {{if eq .Kind 1}}
@@ -68,11 +71,24 @@
               </div>
               <div class="card-title">{{if .PRTitle}}{{.PRTitle}}{{else}}{{.IssueTitle}}{{end}}</div>
               <div class="card-chips">
+                {{if eq .Status "adopt"}}<span class="chip chip-orange" title="PR con close-keyword a un issue sin labels che:* — adoptable desde acá">adopt</span>{{end}}
                 {{if .PRVerdict}}<span class="chip {{verdictChipClass .PRVerdict}}">validated:{{.PRVerdict}}</span>{{end}}
                 {{if checksLabel . }}<span class="chip {{checksChipClass .}}">{{checksLabel .}}</span>{{end}}
                 {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
                 {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
                 {{if .CapReached}}<span class="chip chip-cap" title="auto-loop detenido: alcanzó el cap de {{.RunMax}} rondas. Re-corré che manualmente para seguir.">⛔ cap {{.RunMax}}/{{.RunMax}}</span>{{end}}
+              </div>
+            {{else if eq .Kind 2}}
+              {{/* KindPR (adopt): PR huérfano sin issue linkeado. Solo ref al PR,
+                   título del PR, sin breadcrumb de issue. */}}
+              <div class="card-ref">
+                <a class="ref-pr" href="https://github.com/{{$.NWO}}/pull/{{.PRNumber}}" target="_blank" rel="noopener" onclick="event.stopPropagation()">!{{.PRNumber}}</a>
+              </div>
+              <div class="card-title">{{.PRTitle}}</div>
+              <div class="card-chips">
+                <span class="chip chip-orange" title="PR sin close-keyword — adoptable desde acá (validate / close)">adopt</span>
+                {{if checksLabel . }}<span class="chip {{checksChipClass .}}">{{checksLabel .}}</span>{{end}}
+                {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
               </div>
             {{else}}
               {{/* Issue-only: ref del issue (clickable) + título del issue */}}
@@ -106,11 +122,14 @@
      HTMX identifica el elemento por id="dash-board" entre swaps y
      reinstala el trigger con el valor nuevo. El status-chip y el pill de
      auto-loop salen como OOB swaps — HTMX los aplica aunque el target
-     principal sea outerHTML. */}}
+     principal sea outerHTML. El flag adopt se propaga al hx-get para que
+     el toggle del header no se pierda entre polls. --col-count ajusta el
+     grid-template (9 columnas default, 10 con adopt). */}}
 {{template "status-chip" .}}
 {{template "auto-loop-toggle" .Loop}}
 <div id="dash-board" class="dash-board"
-     hx-get="/board"
+     style="--col-count: {{if .Adopt}}10{{else}}9{{end}};"
+     hx-get="/board{{if .Adopt}}?adopt=1{{end}}"
      hx-trigger="every {{.NextPollSec}}s"
      hx-swap="outerHTML">
   {{template "board-columns" .}}
