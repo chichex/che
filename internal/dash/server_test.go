@@ -1265,6 +1265,63 @@ func TestBoardPartial_HxTriggerIsAdaptive(t *testing.T) {
 	})
 }
 
+// TestStatusChip_UsesNextPollSec: el chip expone data-poll-interval
+// (y el texto "next in Xs" inicial) con NextPollSec — el intervalo real
+// que usa HTMX — no con PollInterval (baseline). Antes usaba PollInterval
+// lo cual producía oscilaciones en el countdown del JS cuando había flows
+// hot: el swap llegaba cada 3s reseteando clientLastOk, pero el contador
+// arrancaba en 15, alcanzando a bajar solo a 13 antes del próximo reset.
+func TestStatusChip_UsesNextPollSec(t *testing.T) {
+	t.Run("idle → data-poll-interval=15", func(t *testing.T) {
+		src := &fixedSource{snap: Snapshot{
+			LastOK:   time.Now(),
+			Entities: []Entity{{Kind: KindIssue, IssueNumber: 42, IssueTitle: "x", Status: "plan"}},
+		}}
+		s := NewServer(src, "repo", 15)
+		ts := httptest.NewServer(s)
+		defer ts.Close()
+		resp, err := http.Get(ts.URL + "/board")
+		if err != nil {
+			t.Fatalf("GET /board: %v", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		got := string(body)
+		if !strings.Contains(got, `data-poll-interval="15"`) {
+			t.Errorf("idle: chip missing data-poll-interval=\"15\"")
+		}
+		if !strings.Contains(got, `next in 15s`) {
+			t.Errorf("idle: chip missing \"next in 15s\" text")
+		}
+	})
+
+	t.Run("hot → data-poll-interval=3", func(t *testing.T) {
+		src := &fixedSource{snap: Snapshot{
+			LastOK:   time.Now(),
+			Entities: []Entity{{Kind: KindIssue, IssueNumber: 42, IssueTitle: "x", Status: "plan"}},
+		}}
+		s := NewServer(src, "repo", 15)
+		s.mu.Lock()
+		s.running[42] = "execute"
+		s.mu.Unlock()
+		ts := httptest.NewServer(s)
+		defer ts.Close()
+		resp, err := http.Get(ts.URL + "/board")
+		if err != nil {
+			t.Fatalf("GET /board: %v", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		got := string(body)
+		if !strings.Contains(got, `data-poll-interval="3"`) {
+			t.Errorf("hot: chip missing data-poll-interval=\"3\" (el counter tiene que coincidir con hx-trigger)")
+		}
+		if !strings.Contains(got, `next in 3s`) {
+			t.Errorf("hot: chip missing \"next in 3s\" text")
+		}
+	})
+}
+
 // TestOverlayRunning_InjectsRoundsCounter: el chip magenta del card muestra
 // ⟳ <flow> <RunIter>/<RunMax>. Esos campos nunca se asignaban, siempre
 // mostraba "0/0". Ahora overlayRunning lee el counter del loopState y el

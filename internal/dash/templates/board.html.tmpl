@@ -16,12 +16,12 @@
         class="status-chip {{if .Snapshot.Mock}}mock{{else if .Snapshot.Stale}}err{{else if .Snapshot.LastOK.IsZero}}connecting{{else}}ok{{end}}"
         {{- if and (not .Snapshot.Mock) (not .Snapshot.Stale) (not .Snapshot.LastOK.IsZero)}}
         data-last-ok-ms="{{.Snapshot.LastOK.UnixMilli}}"
-        data-poll-interval="{{.PollInterval}}"
+        data-poll-interval="{{.NextPollSec}}"
         {{- end}}>
     ● <span class="chip-text">{{if .Snapshot.Mock}}mock mode
       {{- else if .Snapshot.Stale}}stale · {{errShort .Snapshot.LastErr}}
       {{- else if .Snapshot.LastOK.IsZero}}connecting…
-      {{- else}}next in {{.PollInterval}}s{{end}}</span>
+      {{- else}}next in {{.NextPollSec}}s{{end}}</span>
   </span>
 {{end}}
 
