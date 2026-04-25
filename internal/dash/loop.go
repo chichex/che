@@ -124,15 +124,22 @@ type loopState struct {
 	// capNotified trackea qué issueNumbers ya logueamos "cap hit" a stderr
 	// para no spamear cada tick.
 	capNotified map[int]bool
+	// gateNotified trackea qué (id, flow, reason) ya logueamos "gate skip"
+	// a stderr. Mismo patrón que capNotified pero por triple — un mismo
+	// issue puede tener gate skip por flows distintos al mismo tiempo, y
+	// si la razón cambia (ej: estaba locked, se destrabó pero ahora le
+	// falta el body) queremos volver a loguear. La key es "id|flow|reason".
+	gateNotified map[string]bool
 }
 
 // newLoopState devuelve un estado inicial zero-valued pero con los maps
 // instanciados para poder escribir sin chequeos extra.
 func newLoopState() *loopState {
 	return &loopState{
-		rules:       map[LoopRule]bool{},
-		rounds:      map[int]int{},
-		capNotified: map[int]bool{},
+		rules:        map[LoopRule]bool{},
+		rounds:       map[int]int{},
+		capNotified:  map[int]bool{},
+		gateNotified: map[string]bool{},
 	}
 }
 
@@ -233,6 +240,21 @@ func (l *loopState) markCapNotified(id int) bool {
 	defer l.mu.Unlock()
 	was := l.capNotified[id]
 	l.capNotified[id] = true
+	return was
+}
+
+// markGateNotified marca que ya logueamos un gate-skip para el triple
+// (id, flow, reason) y devuelve si ya estaba marcado. Los Reasons cambian
+// con el estado (un issue puede pasar de "locked" a "body sin plan
+// consolidado" a "approved"), así que la key incluye el reason — un cambio
+// merece un log nuevo. La unicidad triple evita spam mientras la causa
+// permanece estable.
+func (l *loopState) markGateNotified(id int, flow, reason string) bool {
+	key := fmt.Sprintf("%d|%s|%s", id, flow, reason)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	was := l.gateNotified[key]
+	l.gateNotified[key] = true
 	return was
 }
 
@@ -385,6 +407,20 @@ func entitySide(e Entity) string {
 	return "issue"
 }
 
+// entityRef devuelve la representación corta de la entity para logs:
+// "#123" para KindIssue/KindFused (referencia el issue) y "!45" para
+// KindPR adopt (referencia el PR). Evita el log "#0" cuando KindPR
+// (IssueNumber=0) cae en algún path de dispatch.
+func entityRef(e Entity) string {
+	if e.Kind == KindPR {
+		return fmt.Sprintf("!%d", e.PRNumber)
+	}
+	if e.Kind == KindFused && e.PRNumber > 0 {
+		return fmt.Sprintf("#%d→!%d", e.IssueNumber, e.PRNumber)
+	}
+	return fmt.Sprintf("#%d", e.IssueNumber)
+}
+
 // ================== Tick ==================
 
 // runTick ejecuta una iteración del loop: lee snapshot, evalúa reglas y
@@ -472,21 +508,47 @@ func (s *Server) runTick() int {
 		if side == "pr" && prSlotBusy {
 			continue
 		}
-		rounds := s.loop.roundsFor(e.IssueNumber)
+		// EntityKey es la clave canónica del overlay/cap/gate maps.
+		// IssueNumber colisiona en KindPR (todos con IssueNumber=0). Las
+		// reglas issue-side y PR-side actuales no matchean KindPR, así
+		// que esto es defensa para cuando se sumen reglas adopt-side.
+		key := e.EntityKey()
+		rounds := s.loop.roundsFor(key)
 		flow, targetRef, reason := nextDispatch(e, rules, rounds)
 		if flow == "" {
 			// Cap hit: log una vez a stderr.
 			if reason == "cap-reached" {
-				if !s.loop.markCapNotified(e.IssueNumber) {
-					fmt.Fprintf(os.Stderr, "dash auto-loop: cap %d reached for #%d — stop\n", LoopCap, e.IssueNumber)
+				if !s.loop.markCapNotified(key) {
+					fmt.Fprintf(os.Stderr, "dash auto-loop: cap %d reached for %s — stop\n", LoopCap, entityRef(e))
 				}
+			}
+			continue
+		}
+		// Doble barrera con preflight gates: nextDispatch ya filtra por
+		// status + verdict (la lógica que vivía exclusivamente en el
+		// matcher), pero las gates agregan chequeos que el matcher no
+		// ve — el más importante es "body con `## Plan consolidado`"
+		// para validate-plan. Sin esto, validate-plan se dispatchaba 10
+		// veces (cap) sobre un issue con body legacy y rollback sucesivo,
+		// gastando ~10 corridas de claude antes de cortar (caso real
+		// #146 dale-que-sale, abril 2026). El gate corta el ciclo a 0
+		// dispatches y loguea una sola vez por (id, flow, reason).
+		//
+		// Las gates se computan a partir de la entity actual del snapshot
+		// (Gates ya viene poblado por overlayRunning, pero acá usamos el
+		// snapshot crudo del Source — overlayRunning no corre en el tick).
+		// computeGates es pura, sin IO; el costo es despreciable.
+		gate := computeGates(e)[flow]
+		if !gate.Available {
+			if !s.loop.markGateNotified(key, flow, gate.Reason) {
+				fmt.Fprintf(os.Stderr, "dash auto-loop: skip %s %s — %s\n", flow, entityRef(e), gate.Reason)
 			}
 			continue
 		}
 		// Reservar slot local. markRunning chequea el snapshot de nuevo
 		// (doble barrera contra races con handler manual que acaba de
 		// disparar y todavía no está en el overlay).
-		if _, ok := s.markRunning(e.IssueNumber, flow); !ok {
+		if _, ok := s.markRunning(key, flow); !ok {
 			// Alguien (handler manual) se nos adelantó entre el
 			// chequeo inicial de issueSlotBusy/prSlotBusy y acá. No
 			// dispatch, no incrementar rounds. Marcar el slot ocupado
@@ -505,12 +567,12 @@ func (s *Server) runTick() int {
 		// dejamos rounds incrementado: es una ronda "intentada" que
 		// cuenta igual, para no entrar en loop infinito si el spawn
 		// falla sistemáticamente.
-		s.loop.incRounds(e.IssueNumber)
-		s.markAutoRunning(e.IssueNumber, true)
-		if err := s.runAction(flow, targetRef, e.IssueNumber, s.repoPath); err != nil {
-			fmt.Fprintf(os.Stderr, "dash auto-loop: spawn %s #%d failed: %v (reason=%s)\n", flow, e.IssueNumber, err, reason)
-			s.clearRunning(e.IssueNumber)
-			s.markAutoRunning(e.IssueNumber, false)
+		s.loop.incRounds(key)
+		s.markAutoRunning(key, true)
+		if err := s.runAction(flow, targetRef, key, s.repoPath); err != nil {
+			fmt.Fprintf(os.Stderr, "dash auto-loop: spawn %s %s failed: %v (reason=%s)\n", flow, entityRef(e), err, reason)
+			s.clearRunning(key)
+			s.markAutoRunning(key, false)
 			continue
 		}
 		dispatches++

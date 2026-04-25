@@ -246,8 +246,22 @@ func TestNextDispatch_RuleTable(t *testing.T) {
 
 // newLoopServer arma un Server con fixedSource mutable + fakeRunner. El
 // tick se dispara explícito con runTick() — no hace falta la goroutine.
+//
+// Pre-populate del IssueBody para entities en che:plan: el preflight gate
+// (preflight.go) requiere un header `## Plan consolidado` para que validate-
+// plan dispatche. La mayoría de los tests del tick no se preocupan por el
+// body (testean matcher + concurrency + cap, no parsing de plan), así que
+// completamos el body cuando falta. Tests que explícitamente quieran
+// validar el comportamiento del gate "body sin plan consolidado" deben
+// pre-setear IssueBody="" pasándolo después de armar el slice (o usar
+// fixedSource directo sin pasar por newLoopServer).
 func newLoopServer(t *testing.T, entities []Entity) (*Server, *fakeRunner) {
 	t.Helper()
+	for i := range entities {
+		if entities[i].Kind == KindIssue && entities[i].Status == "plan" && entities[i].IssueBody == "" {
+			entities[i].IssueBody = "## Plan consolidado\n\n**Resumen:** test fixture\n"
+		}
+	}
 	src := &fixedSource{snap: Snapshot{
 		NWO:      "demo/che",
 		LastOK:   time.Now(),
@@ -270,10 +284,13 @@ func newLoopServer(t *testing.T, entities []Entity) (*Server, *fakeRunner) {
 // terminó su efecto aún). Simulamos el efecto: mutamos snap para marcar
 // #1 como approve (verdict terminal, sale del loop) y así #2 gana.
 func TestTick_ConcurrencyIssueSide(t *testing.T) {
+	// IssueBody con header "## Plan consolidado" para que el preflight gate
+	// de validate-plan deje pasar — testeamos concurrency, no parsing.
+	planBody := "## Plan consolidado\n\n**Resumen:** test\n"
 	ents := []Entity{
-		{Kind: KindIssue, IssueNumber: 1, Status: "plan"},
-		{Kind: KindIssue, IssueNumber: 2, Status: "plan"},
-		{Kind: KindIssue, IssueNumber: 3, Status: "plan"},
+		{Kind: KindIssue, IssueNumber: 1, Status: "plan", IssueBody: planBody},
+		{Kind: KindIssue, IssueNumber: 2, Status: "plan", IssueBody: planBody},
+		{Kind: KindIssue, IssueNumber: 3, Status: "plan", IssueBody: planBody},
 	}
 	src := &fixedSource{snap: Snapshot{NWO: "demo/che", LastOK: time.Now(), Entities: ents}}
 	s := NewServer(src, "che-cli", 15)
@@ -713,6 +730,83 @@ func TestLoopEndpoints_Concurrency(t *testing.T) {
 	// race detector no encuentre nada raro.
 }
 
+// TestRunTick_GateBlocksValidateWithoutBody: un issue en che:plan SIN body
+// con "## Plan consolidado" no recibe dispatch del auto-loop, y el motivo
+// se loguea a stderr. Es el caso real del PR de gates UI: el auto-loop
+// pegaba 10 corridas sobre #146 dale-que-sale antes de que el cap cortara,
+// gastando claude-API. Con el gate, el tick filtra antes de spawnear.
+func TestRunTick_GateBlocksValidateWithoutBody(t *testing.T) {
+	// Construimos el slice manualmente (sin pasar por newLoopServer) para
+	// evitar el auto-fill de IssueBody — el test EXIGE body vacío.
+	ents := []Entity{
+		{Kind: KindIssue, IssueNumber: 146, Status: "plan", IssueTitle: "sin body", IssueBody: ""},
+	}
+	src := &fixedSource{snap: Snapshot{NWO: "demo/che", LastOK: time.Now(), Entities: ents}}
+	s := NewServer(src, "che-cli", 15)
+	fr := &fakeRunner{}
+	s.runAction = fr.run
+	s.repoPath = "/tmp/r"
+	s.loop.enabled = true
+	s.loop.rules[RuleValidatePlan] = true
+
+	if n := s.runTick(); n != 0 {
+		t.Fatalf("gate skip: dispatches got %d want 0", n)
+	}
+	if fr.count() != 0 {
+		t.Errorf("gate skip: runner llamado %d veces, no debería ser llamado nunca", fr.count())
+	}
+	// El contador de rounds NO se incrementa cuando el gate corta — sería
+	// gastar el cap por algo que ni siquiera intentamos. Si el body cambia
+	// (humano arregla el issue), las 10 rounds deben quedar disponibles.
+	if got := s.loop.roundsFor(146); got != 0 {
+		t.Errorf("gate skip: rounds got %d want 0 (gate no debe consumir cap)", got)
+	}
+	// 5 ticks más → sigue sin dispatchar y sigue sin acumular rounds.
+	for i := 0; i < 5; i++ {
+		s.runTick()
+	}
+	if fr.count() != 0 {
+		t.Errorf("gate skip persistente: runner llamado %d veces tras 6 ticks", fr.count())
+	}
+	if got := s.loop.roundsFor(146); got != 0 {
+		t.Errorf("gate skip persistente: rounds got %d want 0", got)
+	}
+}
+
+// TestAction_GateRejects409: POST /action/validate sobre issue#146 (body
+// vacío) → 409 con el Reason humano. Doble barrera del UI: el botón viene
+// disabled, pero un cliente manual (curl) recibe el mismo "no" con motivo.
+func TestAction_GateRejects409(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		NWO:    "demo/che",
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 146, Status: "plan", IssueTitle: "sin body", IssueBody: ""},
+		},
+	}}
+	s := NewServer(src, "che-cli", 15)
+	fr := &fakeRunner{}
+	s.runAction = fr.run
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/validate/146", "", nil)
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 (gate fail)", resp.StatusCode)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "Plan consolidado") {
+		t.Errorf("body del 409 debe contener motivo del gate; got: %q", string(body))
+	}
+	if fr.count() != 0 {
+		t.Errorf("gate 409: runner llamado %d veces, no debería spawnear", fr.count())
+	}
+}
+
 // TestRunTick_AutoChipInDrawer: un dispatch via el tick aparece como chip
 // "auto" en el HTML del drawer; un manual no.
 func TestRunTick_AutoChipInDrawer(t *testing.T) {
@@ -877,11 +971,14 @@ func TestTick_PrefersOldestFirst(t *testing.T) {
 // TestTick_ZeroCreatedAtKeepsOriginalOrder: entidades con CreatedAt zero
 // (fixtures viejos, mocks sin poblar) empatan y caen en orden del slice por
 // ser sort stable. Fija el contrato: no cambiamos el orden observable de
-// tests existentes que usan Entity sin CreatedAt.
+// tests existentes que usan Entity sin CreatedAt. IssueBody con header
+// consolidado para que el preflight gate de validate-plan deje pasar — sin
+// eso, el tick skipea ambas entities con razón "body sin plan consolidado"
+// (caso real que motivó el feature, ver project_dash_preflight_gates).
 func TestTick_ZeroCreatedAtKeepsOriginalOrder(t *testing.T) {
 	ents := []Entity{
-		{Kind: KindIssue, IssueNumber: 10, Status: "plan"},
-		{Kind: KindIssue, IssueNumber: 20, Status: "plan"},
+		{Kind: KindIssue, IssueNumber: 10, Status: "plan", IssueBody: "## Plan consolidado\nx"},
+		{Kind: KindIssue, IssueNumber: 20, Status: "plan", IssueBody: "## Plan consolidado\nx"},
 	}
 	s, fr := newLoopServer(t, ents)
 	s.loop.enabled = true

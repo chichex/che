@@ -479,7 +479,94 @@ func (s *Server) templateFuncs() template.FuncMap {
 		// inicial como en OOB swap. Ambos reciben loopPopoverData.
 		"pillLabel":            pillLabel,
 		"pillLabelHasSpinner":  pillLabelHasSpinner,
+		// Preflight gates (PR de gates UI, abril 2026): resolución del
+		// estado de un botón hx-post a partir de RunningFlow + Gates.
+		// flowBtnState centraliza la prioridad: RunningFlow gana sobre
+		// gate ("flow X en curso" > "body sin plan consolidado") porque
+		// el flow en curso es transient y va a destrabar solo, mientras
+		// que la gate puede requerir acción del humano. El template lo
+		// consume via `{{$btn := flowBtnState "validate" .RunningFlow .Gates "..."}}`.
+		"flowBtnState": flowBtnState,
+		// gateOf devuelve el FlowGate para un flow puntual con un fallback
+		// "Available=true" si gates es nil (no rompe templates pre-gates,
+		// p.ej. tests que arman drawerData a mano).
+		"gateOf": gateOf,
 	}
+}
+
+// FlowBtnState es el resultado de resolver el estado UI de un botón de
+// acción (hx-post) en función de RunningFlow + Gates. Lo arma flowBtnState
+// y lo consume el template para decidir si pone `disabled`, qué `title`
+// poner y si renderear un mensaje de bloqueo bajo el botón.
+type FlowBtnState struct {
+	// Disabled indica que el botón debe ir con atributo disabled. Cubre
+	// dos casos: hay un flow en curso o el gate dice que no aplica.
+	Disabled bool
+	// Title es el texto del atributo title (tooltip nativo del browser).
+	// Siempre se setea — cuando habilitado es el hint de qué hace el flow,
+	// cuando deshabilitado es el motivo del bloqueo.
+	Title string
+	// BlockedReason está poblado SOLO cuando el bloqueo viene de un gate
+	// (no de RunningFlow). El template lo usa para mostrar un mensaje
+	// inline debajo del botón con el motivo legible — feedback explícito
+	// más allá del tooltip. RunningFlow se cubre con el chip ⟳ del header.
+	BlockedReason string
+}
+
+// flowBtnState resuelve el estado UI de un botón de acción. Prioridades:
+//  1. RunningFlow != "" → disabled, title="flow X en curso", sin reason
+//     inline (el chip ⟳ ya cuenta la historia).
+//  2. !Gates[flow].Available → disabled, title=Reason, BlockedReason=Reason
+//     (el template renderea la línea bajo el botón).
+//  3. default → enabled, title=baseTitle.
+//
+// Fallback restrictivo cuando Gates es nil o el flow no está en el map:
+// asumimos "no disponible" en vez de pasar transparente. Razón: si en
+// producción algún path no popula Gates (bug futuro en findEntity /
+// overlayRunning, o un Source nuevo que olvida llamar a computeGates), los
+// botones quedarían habilitados disparando flows que el handler /action
+// igual rechazaría — UX inconsistente. Mejor que fallen visiblemente con
+// "gates no computados" para que el bug se note al toque. Tests legacy
+// que construyen Entity a mano sin pasar por overlayRunning deben llamar
+// `e.Gates = computeGates(e)` explícito o usar los helpers de fixture.
+func flowBtnState(flow, runningFlow string, gates FlowGates, baseTitle string) FlowBtnState {
+	if runningFlow != "" {
+		return FlowBtnState{Disabled: true, Title: "flow " + runningFlow + " en curso — esperá"}
+	}
+	if gates == nil {
+		const reason = "gates no computados (bug del dash — reportar)"
+		return FlowBtnState{Disabled: true, Title: reason, BlockedReason: reason}
+	}
+	g, ok := gates[flow]
+	if !ok {
+		// Flow desconocido (drift entre allowedFlows y allFlows). Mismo
+		// fallback restrictivo — el test TestAllowedFlowsMatchAllFlows
+		// previene este caso, pero defensa en profundidad.
+		reason := fmt.Sprintf("gate ausente para flow=%q (drift entre allowedFlows y allFlows — reportar)", flow)
+		return FlowBtnState{Disabled: true, Title: reason, BlockedReason: reason}
+	}
+	if !g.Available {
+		reason := g.Reason
+		if reason == "" {
+			reason = "no disponible"
+		}
+		return FlowBtnState{Disabled: true, Title: reason, BlockedReason: reason}
+	}
+	return FlowBtnState{Disabled: false, Title: baseTitle}
+}
+
+// gateOf accede a un gate por nombre con fallback restrictivo (Available=
+// false) cuando el map es nil o el flow no está. Mismo principio que
+// flowBtnState: si el snapshot no tiene gates, queremos visibilidad del
+// problema, no que la UI siga renderizando como si todo estuviera ok.
+func gateOf(flow string, gates FlowGates) FlowGate {
+	if gates == nil {
+		return FlowGate{Available: false, Reason: "gates no computados (bug del dash — reportar)"}
+	}
+	if g, ok := gates[flow]; ok {
+		return g
+	}
+	return FlowGate{Available: false, Reason: fmt.Sprintf("gate ausente para flow=%q (reportar)", flow)}
 }
 
 // mdRenderer es el goldmark configurado para GFM. Se construye una vez al
@@ -607,9 +694,11 @@ func (s *Server) buildData(adopt bool) pageData {
 }
 
 // findEntity busca por EntityKey en el snapshot actual. Usado por el
-// handler `/drawer/{id}`. El resultado lleva el RunningFlow del snapshot
-// merged con s.running (local) — si hay dispatch local pendiente de poll,
-// el drawer lo refleja sin esperar al próximo refresh.
+// handler `/drawer/{id}` y por POST /action. El resultado lleva el
+// RunningFlow del snapshot merged con s.running (local) — si hay dispatch
+// local pendiente de poll, el drawer lo refleja sin esperar al próximo
+// refresh — y .Gates poblado para que el template renderee disabled+title
+// correctamente y el handler pueda barrear vía 409 si el gate no aplica.
 //
 // Clave canónica: IssueNumber para KindIssue/KindFused, PRNumber para
 // KindPR (adopt sin issue linkeado). Ver Entity.EntityKey.
@@ -621,6 +710,11 @@ func (s *Server) findEntity(id int) (Entity, bool) {
 				e.RunningFlow = flow
 			}
 			s.mu.Unlock()
+			// Gates se computa post-overlay porque depende del estado
+			// observable (status + verdict + lock + body), no de
+			// RunningFlow per se. Si en el futuro alguna gate consulta
+			// RunningFlow, el orden ya está bien (overlay primero).
+			e.Gates = computeGates(e)
 			return e, true
 		}
 	}
@@ -641,35 +735,13 @@ func (s *Server) overlayRunning(in []Entity) []Entity {
 	rounds := s.loop.roundsSnapshot()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	hasOverlay := len(s.running) > 0
-	// Fast path: si no hay overlay, ninguna entity del snapshot tiene
-	// RunningFlow Y ninguna entity loopable alcanzó el cap, no hay nada
-	// que mutar. Evita la alocación del out[] en el caso común idle.
-	// El chequeo de cap entra en el fast path porque el caso típico es
-	// "entity idle que llegó al cap" (el auto-loop ya cortó y el
-	// RunningFlow volvió a vacío) — sin este chequeo el CapReached nunca
-	// se setearía en ese path.
-	if !hasOverlay {
-		needsMutation := false
-		for _, e := range in {
-			if e.RunningFlow != "" {
-				needsMutation = true
-				break
-			}
-			if rounds[e.EntityKey()] >= LoopCap {
-				switch e.Status {
-				case "plan", "validated", "executed":
-					needsMutation = true
-				}
-				if needsMutation {
-					break
-				}
-			}
-		}
-		if !needsMutation {
-			return in
-		}
-	}
+	// Siempre mutamos: además del overlay/cap chip, computeGates necesita
+	// correr sobre cada entity para que el template tenga `.Gates.<flow>`
+	// disponible al renderar botones disabled+title. El alloc es trivial
+	// (~50 entities en un dash típico). El fast-path "no-overlay + no-cap"
+	// que existía pre-gates ya no aplica: las gates dependen de status +
+	// verdict + body, valores que cambian aunque overlay y cap estén
+	// quietos, así que no hay forma cheap de detectar "nada cambió".
 	out := make([]Entity, len(in))
 	for i, e := range in {
 		key := e.EntityKey()
@@ -702,6 +774,11 @@ func (s *Server) overlayRunning(in []Entity) []Entity {
 				e.RunMax = LoopCap
 			}
 		}
+		// Computamos gates sobre el estado YA mutado (con RunningFlow del
+		// overlay aplicado). Los gates no dependen de RunningFlow per se,
+		// pero si en el futuro alguna regla sí (ej: "no permitir validate
+		// mientras corre iterate") la lógica queda en el lugar correcto.
+		e.Gates = computeGates(e)
 		out[i] = e
 	}
 	return out
@@ -1094,6 +1171,20 @@ func (s *Server) buildMux() *http.ServeMux {
 		// el peor.
 		if entity.Status == "adopt" && flow != "validate" && flow != "close" {
 			http.Error(w, "flow not allowed in adopt column (only validate/close)", http.StatusBadRequest)
+			return
+		}
+		// Doble barrera: el botón ya viene disabled cuando el gate falla
+		// (template lee .Gates), pero un cliente que haga el POST por
+		// fuera del DOM (curl manual, JS modificado, htmx con cache) debe
+		// recibir el mismo "no" con el motivo concreto. 409 Conflict en
+		// vez de 400 porque la entity existe y es válida — solo el flow
+		// no aplica en su estado actual.
+		if g, ok := entity.Gates[flow]; ok && !g.Available {
+			reason := g.Reason
+			if reason == "" {
+				reason = "flow no disponible para esta entity"
+			}
+			http.Error(w, reason, http.StatusConflict)
 			return
 		}
 		// Reservar antes de spawnar: si hay un flow ya en curso para

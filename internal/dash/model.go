@@ -92,6 +92,15 @@ type Entity struct {
 	// sobre por qué se abrió el PR) y debajo del drawer en issue-only. Vacío
 	// si el issue no tiene descripción.
 	IssueBody string
+
+	// Gates es el resultado de computeGates() para esta entity, calculado
+	// en overlayRunning a partir del estado actual (status + verdicts +
+	// lock + body). El template lo lee como `.Gates.<flow>.Available` /
+	// `.Gates.<flow>.Reason` para renderizar botones disabled+title con
+	// motivo humano-legible. POST /action y el auto-loop tick también lo
+	// consultan como doble barrera. Nil cuando la entity vino directo de
+	// la Source sin pasar por overlayRunning (tests legacy).
+	Gates FlowGates
 }
 
 // LogRun agrupa logs de una iteración del loop. El renderer pinta un separador

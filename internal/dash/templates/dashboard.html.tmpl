@@ -566,6 +566,30 @@
     transition: background 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease, transform 80ms ease;
   }
   .btn[disabled] { opacity: 0.5; cursor: not-allowed; }
+  /* Bloque de motivos de bloqueo bajo .drawer-actions: el feedback explícito
+     que pidió el humano cuando un flow no se puede correr. Cada .reason es
+     una línea con el nombre del flow + emoji ⛔ + Reason. Layout discreto
+     pero legible (no hace falta hover sobre el botón disabled). */
+  .drawer-blocked-reasons {
+    padding: 6px 14px 10px;
+    border-bottom: 1px solid var(--elevated);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    background: rgba(255,184,108,0.04);
+  }
+  .drawer-blocked-reasons .reason {
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--muted);
+  }
+  .drawer-blocked-reasons .reason .flow {
+    display: inline-block;
+    min-width: 56px;
+    color: var(--orange);
+    font-weight: 600;
+    text-transform: lowercase;
+  }
   .btn.primary { background: var(--cyan); color: var(--bg); border-color: var(--cyan); }
   .btn.success { border-color: var(--green); color: var(--green); background: transparent; }
   .btn.warn { border-color: var(--orange); color: var(--orange); background: transparent; }

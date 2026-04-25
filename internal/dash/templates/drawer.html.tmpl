@@ -50,20 +50,32 @@
       {{/* Solo validate y close: los dos flows que pueden operar sobre un
            PR untracked. validate/close resuelven via stateref fallback al
            PR cuando el issue no tiene che:* (ver internal/flow/stateref). */}}
+      {{$bv := flowBtnState "validate" .RunningFlow .Gates (printf "validate !%d" .PRNumber)}}
       <button class="btn warn"
               hx-post="/action/validate/{{$key}}"
               hx-target="#modal-slot"
               hx-swap="innerHTML"
-              {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate !{{.PRNumber}}"{{end}}>validate</button>
+              {{if $bv.Disabled}}disabled{{end}} title="{{$bv.Title}}">validate</button>
+      {{$bc := flowBtnState "close" .RunningFlow .Gates (printf "close !%d (mergea el PR)" .PRNumber)}}
       <button class="btn danger"
               hx-post="/action/close/{{$key}}"
               hx-target="#modal-slot"
               hx-swap="innerHTML"
-              {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="close !{{.PRNumber}} (mergea el PR)"{{end}}>close</button>
+              {{if $bc.Disabled}}disabled{{end}} title="{{$bc.Title}}">close</button>
       <a class="btn ghost" style="margin-left:auto"
          href="https://github.com/{{.NWO}}/pull/{{.PRNumber}}"
          target="_blank" rel="noopener">ver en GH</a>
     </div>
+    {{/* Reasons inline: cuando alguna acción está bloqueada por gate (no por
+         RunningFlow), mostramos el motivo bajo la fila de botones. El humano
+         ve EXACTAMENTE por qué no puede ejecutar sin tener que hover sobre
+         cada botón. Si no hay bloqueos, el bloque entero se omite. */}}
+    {{if or $bv.BlockedReason $bc.BlockedReason}}
+    <div class="drawer-blocked-reasons">
+      {{if $bv.BlockedReason}}<div class="reason"><span class="flow">validate</span> ⛔ {{$bv.BlockedReason}}</div>{{end}}
+      {{if $bc.BlockedReason}}<div class="reason"><span class="flow">close</span> ⛔ {{$bc.BlockedReason}}</div>{{end}}
+    </div>
+    {{end}}
 
     <div class="drawer-logs">
       <div class="drawer-logs-hdr">
@@ -148,47 +160,72 @@
              El id del URL es IssueNumber (clave canónica del modal, del
              LogStore y del overlay). El server mapea a PRNumber antes de
              invocar al subcomando para los flows que lo requieren — ver
-             resolveTargetRef en server.go. */}}
+             resolveTargetRef en server.go.
+
+             flowBtnState consulta .Gates para resolver disabled+title con
+             el motivo concreto (locked, status no aplica, body sin plan
+             consolidado, verdict pendiente, etc). */}}
+        {{$showIterate := false}}{{$showClose := false}}
         {{if eq .Status "adopt"}}
           {{/* Fused en adopt: el issue linkeado no tiene che:*, así que el
                lifecycle che no aplica — solo validate/close. */}}
+          {{$bv := flowBtnState "validate" .RunningFlow .Gates (printf "validate !%d" .PRNumber)}}
           <button class="btn warn"
                   hx-post="/action/validate/{{.IssueNumber}}"
                   hx-target="#modal-slot"
                   hx-swap="innerHTML"
-                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate !{{.PRNumber}}"{{end}}>validate</button>
+                  {{if $bv.Disabled}}disabled{{end}} title="{{$bv.Title}}">validate</button>
+          {{$bc := flowBtnState "close" .RunningFlow .Gates (printf "close !%d" .PRNumber)}}
           <button class="btn danger"
                   hx-post="/action/close/{{.IssueNumber}}"
                   hx-target="#modal-slot"
                   hx-swap="innerHTML"
-                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="close !{{.PRNumber}}"{{end}}>close</button>
+                  {{if $bc.Disabled}}disabled{{end}} title="{{$bc.Title}}">close</button>
         {{else}}
+          {{$showIterate = true}}
+          {{$bi := flowBtnState "iterate" .RunningFlow .Gates (printf "iterate !%d" .PRNumber)}}
           <button class="btn primary"
                   hx-post="/action/iterate/{{.IssueNumber}}"
                   hx-target="#modal-slot"
                   hx-swap="innerHTML"
-                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="iterate !{{.PRNumber}}"{{end}}>iterate</button>
+                  {{if $bi.Disabled}}disabled{{end}} title="{{$bi.Title}}">iterate</button>
+          {{$bv := flowBtnState "validate" .RunningFlow .Gates (printf "validate !%d" .PRNumber)}}
           <button class="btn warn"
                   hx-post="/action/validate/{{.IssueNumber}}"
                   hx-target="#modal-slot"
                   hx-swap="innerHTML"
-                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate !{{.PRNumber}}"{{end}}>validate</button>
+                  {{if $bv.Disabled}}disabled{{end}} title="{{$bv.Title}}">validate</button>
           {{/* close visible en che:executed y che:validated (los estados que
                acepta `che close <pr>`). El comando warnea (no rechaza) si
                el verdict no es approve — el click ES la decisión humana
                per memoria feedback_close_no_gate. */}}
           {{if or (eq .Status "executed") (eq .Status "validated")}}
+          {{$showClose = true}}
+          {{$bc := flowBtnState "close" .RunningFlow .Gates (printf "close !%d (mergea y cierra el issue)" .PRNumber)}}
           <button class="btn danger"
                   hx-post="/action/close/{{.IssueNumber}}"
                   hx-target="#modal-slot"
                   hx-swap="innerHTML"
-                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="close !{{.PRNumber}} (mergea y cierra el issue)"{{end}}>close</button>
+                  {{if $bc.Disabled}}disabled{{end}} title="{{$bc.Title}}">close</button>
           {{end}}
         {{end}}
         <a class="btn ghost" style="margin-left:auto"
            href="https://github.com/{{.NWO}}/pull/{{.PRNumber}}"
            target="_blank" rel="noopener">ver en GH</a>
       </div>
+      {{/* Reasons inline para fused. Re-resolvemos los gates acá (sin RunningFlow
+           prefix porque ya no nos interesa "flow X en curso" — eso lo dice el chip ⟳;
+           solo queremos motivos de gate). */}}
+      {{$gv := gateOf "validate" .Gates}}
+      {{$gi := gateOf "iterate" .Gates}}
+      {{$gc := gateOf "close" .Gates}}
+      {{if and (not .RunningFlow) (or (not $gv.Available) (and $showIterate (not $gi.Available)) (and $showClose (not $gc.Available)))}}
+      <div class="drawer-blocked-reasons">
+        {{if not $gv.Available}}<div class="reason"><span class="flow">validate</span> ⛔ {{$gv.Reason}}</div>{{end}}
+        {{if and $showIterate (not $gi.Available)}}<div class="reason"><span class="flow">iterate</span> ⛔ {{$gi.Reason}}</div>{{end}}
+        {{if and $showClose (not $gc.Available)}}<div class="reason"><span class="flow">close</span> ⛔ {{$gc.Reason}}</div>{{end}}
+      </div>
+      {{end}}
 
       <div class="drawer-logs">
         <div class="drawer-logs-hdr">
@@ -289,26 +326,40 @@
     </div>
 
     <div class="drawer-actions">
-      {{/* Issue-only: botones varían por Status. Todos disabled si hay un
-           flow en curso (local o confirmado por el poller). "ver en GH" es
-           un <a> — link directo, sin backend ni hx-post. */}}
+      {{/* Issue-only: botones varían por Status. flowBtnState consulta gates
+           para mostrar disabled+title con el motivo concreto (body sin plan
+           consolidado, locked, status no aplica, etc). RunningFlow tiene
+           prioridad sobre gate (transient > razón estructural). "ver en GH"
+           es un <a> — link directo, sin backend ni hx-post.
+
+           Trackeamos qué botones renderizamos en $shown<flow> para luego
+           rendear los reasons solo para los visibles (no queremos mostrar
+           "iterate ⛔ ..." si el botón iterate ni siquiera se renderiza
+           para este Status). */}}
+      {{$shownExplore := false}}{{$shownExecute := false}}{{$shownValidate := false}}{{$shownIterate := false}}
       {{if eq .Status "idea"}}
+        {{$shownExplore = true}}
+        {{$be := flowBtnState "explore" .RunningFlow .Gates (printf "explore #%d" .IssueNumber)}}
         <button class="btn primary"
                 hx-post="/action/explore/{{.IssueNumber}}"
                 hx-target="#modal-slot"
                 hx-swap="innerHTML"
-                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="explore #{{.IssueNumber}}"{{end}}>explore</button>
+                {{if $be.Disabled}}disabled{{end}} title="{{$be.Title}}">explore</button>
       {{else if eq .Status "plan"}}
+        {{$shownExecute = true}}
+        {{$bx := flowBtnState "execute" .RunningFlow .Gates (printf "execute #%d" .IssueNumber)}}
         <button class="btn primary"
                 hx-post="/action/execute/{{.IssueNumber}}"
                 hx-target="#modal-slot"
                 hx-swap="innerHTML"
-                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="execute #{{.IssueNumber}}"{{end}}>execute</button>
+                {{if $bx.Disabled}}disabled{{end}} title="{{$bx.Title}}">execute</button>
+        {{$shownValidate = true}}
+        {{$bv := flowBtnState "validate" .RunningFlow .Gates (printf "validate #%d" .IssueNumber)}}
         <button class="btn warn"
                 hx-post="/action/validate/{{.IssueNumber}}"
                 hx-target="#modal-slot"
                 hx-swap="innerHTML"
-                {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate #{{.IssueNumber}}"{{end}}>validate</button>
+                {{if $bv.Disabled}}disabled{{end}} title="{{$bv.Title}}">validate</button>
       {{else if eq .Status "validated"}}
         {{/* che:validated issue-only (plan validado). El siguiente paso depende
              del verdict del plan:
@@ -317,32 +368,59 @@
                                      (ej editar el body + re-validar).
                - approve / ""      → execute (o re-validate si querés otra ronda). */}}
         {{if eq .PlanVerdict "changes-requested"}}
+          {{$shownIterate = true}}
+          {{$bi := flowBtnState "iterate" .RunningFlow .Gates (printf "iterate #%d (aplicar findings del último validate)" .IssueNumber)}}
           <button class="btn primary"
                   hx-post="/action/iterate/{{.IssueNumber}}"
                   hx-target="#modal-slot"
                   hx-swap="innerHTML"
-                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="iterate #{{.IssueNumber}} (aplicar findings del último validate)"{{end}}>iterate</button>
+                  {{if $bi.Disabled}}disabled{{end}} title="{{$bi.Title}}">iterate</button>
         {{else if eq .PlanVerdict "needs-human"}}
           <span class="needs-human-hint" style="color:var(--muted); font-size: 12px; padding: 6px 0;">
             plan-validated:needs-human — resolvé a mano (editá el body del issue) antes de seguir.
           </span>
         {{else}}
+          {{$shownExecute = true}}
+          {{$bx := flowBtnState "execute" .RunningFlow .Gates (printf "execute #%d (plan validado → aplicar)" .IssueNumber)}}
           <button class="btn primary"
                   hx-post="/action/execute/{{.IssueNumber}}"
                   hx-target="#modal-slot"
                   hx-swap="innerHTML"
-                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="execute #{{.IssueNumber}} (plan validado → aplicar)"{{end}}>execute</button>
+                  {{if $bx.Disabled}}disabled{{end}} title="{{$bx.Title}}">execute</button>
+          {{$shownValidate = true}}
+          {{$bv := flowBtnState "validate" .RunningFlow .Gates (printf "validate #%d (re-validar el plan)" .IssueNumber)}}
           <button class="btn warn"
                   hx-post="/action/validate/{{.IssueNumber}}"
                   hx-target="#modal-slot"
                   hx-swap="innerHTML"
-                  {{if .RunningFlow}}disabled title="flow {{.RunningFlow}} en curso"{{else}}title="validate #{{.IssueNumber}} (re-validar el plan)"{{end}}>validate</button>
+                  {{if $bv.Disabled}}disabled{{end}} title="{{$bv.Title}}">validate</button>
         {{end}}
       {{end}}
       <a class="btn ghost" style="margin-left:auto"
          href="https://github.com/{{.NWO}}/issues/{{.IssueNumber}}"
          target="_blank" rel="noopener">ver en GH</a>
     </div>
+    {{/* Reasons inline issue-only: por cada botón renderizado, si el gate lo
+         bloqueó (no por RunningFlow), mostramos el motivo bajo la fila.
+         Resolvemos los gates de nuevo acá (las vars del scope de arriba se
+         pierden al salir del bloque). */}}
+    {{$ge := gateOf "explore" .Gates}}
+    {{$gx := gateOf "execute" .Gates}}
+    {{$gv := gateOf "validate" .Gates}}
+    {{$gi := gateOf "iterate" .Gates}}
+    {{$anyBlocked := and (not .RunningFlow) (or
+        (and $shownExplore  (not $ge.Available))
+        (and $shownExecute  (not $gx.Available))
+        (and $shownValidate (not $gv.Available))
+        (and $shownIterate  (not $gi.Available)) )}}
+    {{if $anyBlocked}}
+    <div class="drawer-blocked-reasons">
+      {{if and $shownExplore  (not $ge.Available)}}<div class="reason"><span class="flow">explore</span> ⛔ {{$ge.Reason}}</div>{{end}}
+      {{if and $shownExecute  (not $gx.Available)}}<div class="reason"><span class="flow">execute</span> ⛔ {{$gx.Reason}}</div>{{end}}
+      {{if and $shownValidate (not $gv.Available)}}<div class="reason"><span class="flow">validate</span> ⛔ {{$gv.Reason}}</div>{{end}}
+      {{if and $shownIterate  (not $gi.Available)}}<div class="reason"><span class="flow">iterate</span> ⛔ {{$gi.Reason}}</div>{{end}}
+    </div>
+    {{end}}
 
     <div class="drawer-logs">
       <div class="drawer-logs-hdr">

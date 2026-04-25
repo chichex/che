@@ -545,7 +545,10 @@ func newActionServer(t *testing.T) (*httptest.Server, *Server, *fakeRunner) {
 		NWO:    "demo/che",
 		LastOK: time.Now(),
 		Entities: []Entity{
-			{Kind: KindIssue, IssueNumber: 42, IssueTitle: "plan ready", Status: "plan"},
+			// IssueBody con "## Plan consolidado" para que el preflight
+			// gate de validate-plan lo deje pasar (tests de tick + action
+			// no testean parsing — eso vive en preflight_test.go).
+			{Kind: KindIssue, IssueNumber: 42, IssueTitle: "plan ready", Status: "plan", IssueBody: "## Plan consolidado\n\n**Resumen:** ready\n"},
 			{Kind: KindFused, IssueNumber: 7, IssueTitle: "fused", PRNumber: 12, Status: "executing", RunningFlow: "execute"},
 		},
 	}}
@@ -598,7 +601,11 @@ func TestAction_FusedValidateUsesPR(t *testing.T) {
 		NWO:    "demo/che",
 		LastOK: time.Now(),
 		Entities: []Entity{
-			{Kind: KindFused, IssueNumber: 122, PRNumber: 140, IssueTitle: "f", Status: "executed"},
+			// PRVerdict para que el gate de iterate (que también testea
+			// abajo) lo deje pasar tras el clearRunning. Sin verdict el
+			// gate bloquearía con "el PR no tiene verdict" — eso lo
+			// cubren los tests de preflight, acá testeamos routing.
+			{Kind: KindFused, IssueNumber: 122, PRNumber: 140, IssueTitle: "f", Status: "executed", PRVerdict: "changes-requested"},
 		},
 	}}
 	s := NewServer(src, "che-cli", 15)
@@ -749,7 +756,10 @@ func TestAction_IssueOnlyValidateUsesIssue(t *testing.T) {
 		NWO:    "demo/che",
 		LastOK: time.Now(),
 		Entities: []Entity{
-			{Kind: KindIssue, IssueNumber: 42, IssueTitle: "i", Status: "plan"},
+			// IssueBody con header "## Plan consolidado" para que el gate
+			// de validate plan lo deje pasar — el test es sobre routing,
+			// no sobre el preflight (eso vive en preflight_test.go).
+			{Kind: KindIssue, IssueNumber: 42, IssueTitle: "i", Status: "plan", IssueBody: "## Plan consolidado\n\n**Resumen:** x\n"},
 		},
 	}}
 	s := NewServer(src, "che-cli", 15)
@@ -1378,19 +1388,25 @@ func TestOverlayRunning_InjectsRoundsForSnapshotFlow(t *testing.T) {
 	}
 }
 
-// TestOverlayRunning_IdleNoOp: si no hay running local ni entities con
-// RunningFlow del snapshot, overlayRunning devuelve el slice sin alocar.
-// Fast path importante porque buildData se llama en cada /board.
-func TestOverlayRunning_IdleNoOp(t *testing.T) {
+// TestOverlayRunning_IdlePopulatesGates: aún en estado idle (sin running
+// local ni RunningFlow en snapshot), overlayRunning aloca y popula
+// Entity.Gates para que el template tenga datos al renderar botones
+// disabled+title. El fast-path original "retornar in sin copiar" se sacó al
+// agregar preflight gates (PR de gates UI, abril 2026): el costo del copy
+// es trivial (~50 entities en un dash típico) y la alternativa requería
+// computar gates en el caller, esparciendo la responsabilidad.
+func TestOverlayRunning_IdlePopulatesGates(t *testing.T) {
 	src := &fixedSource{snap: Snapshot{LastOK: time.Now()}}
 	s := NewServer(src, "repo", 15)
 	in := []Entity{
-		{Kind: KindIssue, IssueNumber: 42, Status: "plan"},
+		{Kind: KindIssue, IssueNumber: 42, Status: "plan", IssueBody: "## Plan consolidado\n\nx"},
 	}
 	out := s.overlayRunning(in)
-	// Identidad del slice (fast path retorna in directamente).
-	if &out[0] != &in[0] {
-		t.Errorf("idle overlay: expected identity return (no copy), got new slice")
+	if out[0].Gates == nil {
+		t.Fatalf("idle overlay: Gates no fue populado")
+	}
+	if !out[0].Gates[flowValidate].Available {
+		t.Errorf("idle overlay: gate validate debería estar Available para issue plan con body consolidado, got Reason=%q", out[0].Gates[flowValidate].Reason)
 	}
 }
 
