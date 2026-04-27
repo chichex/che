@@ -499,6 +499,15 @@ func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 			// Kind=KindPR, Status="adopt" para que aparezca en la columna
 			// "adopt" (visible solo con el toggle opt-in). El humano puede
 			// correrle validate/close desde ahí.
+			//
+			// Filtro: solo PRs OPEN. Los closed/merged sin close-keyword no
+			// son adoptables — no hay nada que validar ni cerrar, ya están
+			// resueltos. Caían acá porque fetchClosedPRs los traía para
+			// fusionar con issues closed (combineEntities no distingue
+			// open/closed); pero un orphan closed no aporta nada al board.
+			if p.State != "OPEN" {
+				continue
+			}
 			e := Entity{
 				Kind:      KindPR,
 				PRNumber:  p.Number,
@@ -555,6 +564,16 @@ func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 			// tiene ningún label che:*. Hay issue → mantenemos KindFused
 			// (drawer puede mostrar el body/ref del issue), pero el status
 			// es "adopt" para que caiga en esa columna.
+			//
+			// Filtro: solo si el PR está OPEN. Un PR closed/merged sin
+			// che:* en el issue ya está resuelto; mostrarlo en adopt
+			// confunde (el usuario reportó "no me debería mostrar
+			// untracked cosas que ya están cerradas", abril 2026). Si
+			// querían trackear el cierre con `che close`, ya es tarde —
+			// el PR está cerrado. Se filtra silenciosamente.
+			if p.State != "OPEN" {
+				continue
+			}
 			e.Status = "adopt"
 		}
 		// Checks del PR.

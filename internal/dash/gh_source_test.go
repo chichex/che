@@ -209,6 +209,51 @@ func TestCombineEntities_AdoptsPRsWithoutClosingRefs(t *testing.T) {
 	}
 }
 
+// TestCombineEntities_FiltersClosedAdoptPRs: regresión abril 2026. La
+// columna "adopt" mostraba PRs closed/merged que no tenían close-keyword
+// (orphans) — el usuario los veía como adoptables y eso confundía. Ahora
+// los closed orphans se filtran silenciosamente: si está cerrado y no hay
+// nada que trackear via che, no hay nada que adoptar.
+//
+// También cubre el branch fused: PR closed con close-keyword a un issue
+// sin che:* labels → antes caía a adopt vía Status="" fallback; ahora se
+// filtra.
+func TestCombineEntities_FiltersClosedAdoptPRs(t *testing.T) {
+	prs := []ghPR{
+		{Number: 100, Title: "open orphan", State: "OPEN"},                                                                        // visible en adopt
+		{Number: 101, Title: "merged orphan", State: "MERGED"},                                                                    // filtrado
+		{Number: 102, Title: "closed orphan", State: "CLOSED"},                                                                    // filtrado
+		{Number: 103, Title: "open fused sin che:*", State: "OPEN", ClosingIssuesReferences: []ghCloseRef{{Number: 200}}},         // visible en adopt (fused)
+		{Number: 104, Title: "merged fused sin che:*", State: "MERGED", ClosingIssuesReferences: []ghCloseRef{{Number: 201}}},     // filtrado
+	}
+	issues := []ghIssue{
+		{Number: 200, Title: "issue sin che:*", Labels: []ghLabel{{Name: "ct:plan"}}},
+		{Number: 201, Title: "issue sin che:*", Labels: []ghLabel{{Name: "ct:plan"}}},
+	}
+	entities := combineEntities(issues, prs)
+
+	got := map[int]string{}
+	for _, e := range entities {
+		got[e.PRNumber] = e.Status
+	}
+
+	if s, ok := got[100]; !ok || s != "adopt" {
+		t.Errorf("PR #100 (open orphan) debería estar en adopt, got status=%q present=%v", s, ok)
+	}
+	if _, ok := got[101]; ok {
+		t.Errorf("PR #101 (merged orphan) NO debería aparecer — adopt filtra closed/merged")
+	}
+	if _, ok := got[102]; ok {
+		t.Errorf("PR #102 (closed orphan) NO debería aparecer — adopt filtra closed/merged")
+	}
+	if s, ok := got[103]; !ok || s != "adopt" {
+		t.Errorf("PR #103 (open fused sin che:*) debería estar en adopt, got status=%q present=%v", s, ok)
+	}
+	if _, ok := got[104]; ok {
+		t.Errorf("PR #104 (merged fused sin che:*) NO debería aparecer — adopt filtra closed/merged")
+	}
+}
+
 func TestCombineEntities_PRVerdictFromLabels(t *testing.T) {
 	issues, err := parseIssues(readFixture(t, "issues.json"))
 	if err != nil {
