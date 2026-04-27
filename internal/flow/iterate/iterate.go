@@ -752,14 +752,16 @@ func postIssueComment(issueRef, body string) error {
 	return nil
 }
 
-// removeIssueLabel saca un label del issue vía `gh issue edit --remove-label`.
+// removeIssueLabel saca un label del issue vía REST (`gh api -X DELETE
+// repos/.../issues/{n}/labels/{name}`). Antes usaba `gh issue edit
+// --remove-label`, que dispara GraphQL y falla en repos de orgs sin scope
+// read:org. REST solo necesita `repo`.
 func removeIssueLabel(issueRef, name string) error {
-	cmd := exec.Command("gh", "issue", "edit", issueRef, "--remove-label", name)
-	out, err := cmd.CombinedOutput()
+	number, err := validate.ResolveRefNumber(issueRef)
 	if err != nil {
-		return fmt.Errorf("gh issue edit --remove-label %s: %s", name, strings.TrimSpace(string(out)))
+		return fmt.Errorf("remove issue label %s: %w", name, err)
 	}
-	return nil
+	return labels.RemoveLabel(number, name)
 }
 
 // ListIterablePlanCandidates devuelve los issues abiertos del repo con
@@ -1344,12 +1346,14 @@ func postPRComment(prRef, body string) error {
 	return nil
 }
 
-// removeLabel saca un label del PR. Usa `gh pr edit --remove-label`.
+// removeLabel saca un label del PR vía REST (`gh api -X DELETE
+// repos/.../issues/{n}/labels/{name}` — los PRs son issues en REST). Antes
+// usaba `gh pr edit --remove-label`, que dispara GraphQL y requiere scope
+// read:org en repos de orgs.
 func removeLabel(prRef, name string) error {
-	cmd := exec.Command("gh", "pr", "edit", prRef, "--remove-label", name)
-	out, err := cmd.CombinedOutput()
+	number, err := validate.ResolveRefNumber(prRef)
 	if err != nil {
-		return fmt.Errorf("gh pr edit --remove-label %s: %s", name, strings.TrimSpace(string(out)))
+		return fmt.Errorf("remove pr label %s: %w", name, err)
 	}
-	return nil
+	return labels.RemoveLabel(number, name)
 }

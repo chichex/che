@@ -289,24 +289,78 @@ func EnsureAll(names ...string) error {
 	return nil
 }
 
-// applyTransition ejecuta la llamada `gh issue edit` con los flags de
-// remove/add. Si una transición no tiene labels que tocar (no debería pasar
-// en una transición válida, pero defendemos), devolvemos nil sin llamar a gh.
+// applyTransition ejecuta la transición vía REST (POST/DELETE labels) en
+// vez de `gh issue edit`. Razón: `gh issue edit` y `gh pr edit` con --add-
+// label/--remove-label disparan GraphQL internamente, que requiere scope
+// `read:org` para PRs en repos de orgs — scope que `gh auth login` default
+// no entrega. La REST API `/repos/{owner}/{repo}/issues/{n}/labels` solo
+// requiere `repo` y funciona uniformemente para issues y PRs (un PR es un
+// issue en REST).
 func applyTransition(ref string, tr Transition) error {
 	if len(tr.Remove) == 0 && len(tr.Add) == 0 {
 		return nil
 	}
-	args := []string{"issue", "edit", ref}
-	for _, l := range tr.Remove {
-		args = append(args, "--remove-label", l)
+	number, err := refNumber(ref)
+	if err != nil {
+		return fmt.Errorf("apply transition %s: %w", ref, err)
 	}
-	for _, l := range tr.Add {
-		args = append(args, "--add-label", l)
+	for _, l := range tr.Remove {
+		if err := removeLabelREST(number, l); err != nil {
+			return err
+		}
+	}
+	if len(tr.Add) > 0 {
+		if err := addLabelsREST(number, tr.Add...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// AddLabels aplica labels al issue/PR identificado por number vía REST. No
+// asume nada del estado previo: el endpoint POST es idempotente (re-aplicar
+// un label existente es un no-op en GitHub). Caller-side: hacer Ensure antes
+// si el label puede no existir en el repo.
+func AddLabels(number int, names ...string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	return addLabelsREST(number, names...)
+}
+
+// RemoveLabel saca un label del issue/PR identificado por number vía REST.
+// Tolera 404 (label no aplicado al issue, o label inexistente en el repo) —
+// mismo comportamiento que Unlock, alineado con que el caller suele usar
+// esto en defers / rollbacks idempotentes.
+func RemoveLabel(number int, name string) error {
+	return removeLabelREST(number, name)
+}
+
+func addLabelsREST(number int, names ...string) error {
+	args := []string{"api", "-X", "POST", fmt.Sprintf("repos/{owner}/{repo}/issues/%d/labels", number)}
+	for _, n := range names {
+		args = append(args, "-f", "labels[]="+n)
 	}
 	cmd := exec.Command("gh", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("gh issue edit: %s", strings.TrimSpace(string(out)))
+		return WrapGhError(fmt.Errorf("gh api POST labels: %s", strings.TrimSpace(string(out))), out)
 	}
 	return nil
+}
+
+func removeLabelREST(number int, name string) error {
+	cmd := exec.Command("gh", "api",
+		"-X", "DELETE",
+		fmt.Sprintf("repos/{owner}/{repo}/issues/%d/labels/%s", number, name),
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	combined := string(out)
+	if strings.Contains(combined, "Label does not exist") || strings.Contains(combined, "HTTP 404") {
+		return nil
+	}
+	return WrapGhError(fmt.Errorf("gh api DELETE labels/%s: %s", name, strings.TrimSpace(combined)), out)
 }

@@ -633,13 +633,12 @@ func reclassifyIssue(ref string, issue *Issue, log *output.Logger) error {
 		}
 	}
 
-	args := []string{"issue", "edit", ref}
-	for _, l := range toAdd {
-		args = append(args, "--add-label", l)
-	}
-	out, err := exec.Command("gh", args...).CombinedOutput()
+	number, err := labels.RefNumber(ref)
 	if err != nil {
-		return fmt.Errorf("gh issue edit: %s", strings.TrimSpace(string(out)))
+		return fmt.Errorf("reclassify %s: %w", ref, err)
+	}
+	if err := labels.AddLabels(number, toAdd...); err != nil {
+		return err
 	}
 
 	for _, l := range toAdd {

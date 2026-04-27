@@ -98,15 +98,16 @@ func TestExecute_GoldenPath(t *testing.T) {
 	}
 	prCreates[0].AssertArgsContain(t, "--draft", "--base", "main")
 
-	edits := inv.FindCalls("gh", "issue", "edit", "42")
-	if len(edits) != 2 {
-		t.Fatalf("expected 2 issue edits (lock + unlock), got %d", len(edits))
+	// Transiciones REST: 1) plan→executing (DELETE che:plan + POST
+	// che:executing). 2) executing→executed (DELETE che:executing + POST
+	// che:executed). awaiting-human ya no se aplica (el gate vive en
+	// plan-validated:* / validated:*).
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executing"); len(got) != 1 {
+		t.Fatalf("expected 1 POST adding che:executing, got %d", len(got))
 	}
-	// Primer edit: plan → executing.
-	edits[0].AssertArgsContain(t, "--add-label", "che:executing")
-	// Segundo edit: executing → executed. awaiting-human ya no se aplica
-	// (el gate vive en plan-validated:* / validated:*).
-	edits[1].AssertArgsContain(t, "--add-label", "che:executed")
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executed"); len(got) != 1 {
+		t.Fatalf("expected 1 POST adding che:executed, got %d", len(got))
+	}
 
 	if comments := inv.FindCalls("gh", "issue", "comment", "42", "--body-file"); len(comments) != 1 {
 		t.Fatalf("expected 1 issue comment, got %d", len(comments))
@@ -236,11 +237,14 @@ func TestExecute_AgentFails_Rollback(t *testing.T) {
 	if creates := inv.FindCalls("gh", "pr", "create"); len(creates) > 0 {
 		t.Fatalf("expected 0 gh pr create after agent failure, got %d", len(creates))
 	}
-	edits := inv.FindCalls("gh", "issue", "edit", "42")
-	if len(edits) != 2 {
-		t.Fatalf("expected 2 issue edits (lock + rollback), got %d", len(edits))
+	// Lock: DELETE che:plan + POST che:executing. Rollback: DELETE
+	// che:executing + POST che:plan.
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executing"); len(got) != 1 {
+		t.Fatalf("expected 1 POST adding che:executing (lock), got %d", len(got))
 	}
-	edits[1].AssertArgsContain(t, "--add-label", "che:plan")
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:plan"); len(got) != 1 {
+		t.Fatalf("expected 1 POST adding che:plan (rollback), got %d", len(got))
+	}
 }
 
 // TestExecute_AgentFails_RollbackSkippedIfLockLost: claude falla y cuando
@@ -269,22 +273,13 @@ func TestExecute_AgentFails_RollbackSkippedIfLockLost(t *testing.T) {
 	}
 
 	inv := env.Invocations()
-	edits := inv.FindCalls("gh", "issue", "edit", "42")
-	if len(edits) != 1 {
-		t.Fatalf("expected 1 issue edit (only lock, rollback skipped), got %d", len(edits))
+	// Lock: 1 POST adding che:executing. Rollback NO debe ocurrir → 0
+	// POSTs adding che:plan.
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executing"); len(got) != 1 {
+		t.Fatalf("expected 1 POST adding che:executing (lock), got %d", len(got))
 	}
-	// El único edit debe ser el lock; inspeccionamos la secuencia
-	// consecutiva `--add-label status:plan` para descartar rollback.
-	rollbackCount := 0
-	for _, e := range edits {
-		for i := 0; i+1 < len(e.Args); i++ {
-			if e.Args[i] == "--add-label" && e.Args[i+1] == "che:plan" {
-				rollbackCount++
-			}
-		}
-	}
-	if rollbackCount != 0 {
-		t.Fatalf("expected 0 rollback edits (consecutive --add-label status:plan), got %d", rollbackCount)
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:plan"); len(got) != 0 {
+		t.Fatalf("expected 0 POST adding che:plan (rollback skipped), got %d", len(got))
 	}
 	harness.AssertContains(t, r.Stderr, "rollback abortado")
 }
@@ -350,14 +345,9 @@ func TestExecute_NoChanges_ExistingPR_Rollback(t *testing.T) {
 	if creates := inv.FindCalls("gh", "pr", "create"); len(creates) != 0 {
 		t.Fatalf("expected 0 gh pr create, got %d", len(creates))
 	}
-	// Ninguno de los edits debe agregar status:executed (chequeo consecutivo).
-	edits := inv.FindCalls("gh", "issue", "edit", "42")
-	for _, e := range edits {
-		for i := 0; i+1 < len(e.Args); i++ {
-			if e.Args[i] == "--add-label" && e.Args[i+1] == "che:executed" {
-				t.Fatalf("rogue transition to status:executed: %v", e.Args)
-			}
-		}
+	// Ninguna transición debe agregar che:executed (POST con ese label).
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executed"); len(got) != 0 {
+		t.Fatalf("rogue transition to che:executed: %v", got)
 	}
 }
 
@@ -528,12 +518,14 @@ func TestExecute_PreviousPRClosed_NoAutoReopen(t *testing.T) {
 	if reopens := inv.FindCalls("gh", "pr", "reopen"); len(reopens) != 0 {
 		t.Fatalf("expected 0 gh pr reopen (auto-reopen no implementado), got %d", len(reopens))
 	}
-	// Rollback aplicado: 2 edits (lock + rollback a status:plan).
-	edits := inv.FindCalls("gh", "issue", "edit", "42")
-	if len(edits) != 2 {
-		t.Fatalf("expected 2 issue edits (lock + rollback), got %d", len(edits))
+	// Rollback aplicado: lock POST adds che:executing, rollback POST adds
+	// che:plan.
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executing"); len(got) != 1 {
+		t.Fatalf("expected 1 POST adding che:executing (lock), got %d", len(got))
 	}
-	edits[1].AssertArgsContain(t, "--add-label", "che:plan")
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:plan"); len(got) != 1 {
+		t.Fatalf("expected 1 POST adding che:plan (rollback), got %d", len(got))
+	}
 }
 
 // TestExecute_PRCreateFails_PostPush_CleanupCorrect: si `gh pr create` falla
@@ -596,12 +588,14 @@ func TestExecute_PRCreateFails_PostPush_CleanupCorrect(t *testing.T) {
 	}
 
 	inv := env.Invocations()
-	// Rollback del label aplicado (2do edit agrega status:plan).
-	edits := inv.FindCalls("gh", "issue", "edit", "42")
-	if len(edits) != 2 {
-		t.Fatalf("expected 2 issue edits (lock + rollback), got %d", len(edits))
+	// Rollback del label aplicado: lock POST agrega che:executing, rollback
+	// POST agrega che:plan.
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executing"); len(got) != 1 {
+		t.Fatalf("expected 1 POST adding che:executing (lock), got %d", len(got))
 	}
-	edits[1].AssertArgsContain(t, "--add-label", "che:plan")
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:plan"); len(got) != 1 {
+		t.Fatalf("expected 1 POST adding che:plan (rollback), got %d", len(got))
+	}
 
 	// Se intentó crear una sola vez — el fallo no desencadena retry.
 	if creates := inv.FindCalls("gh", "pr", "create"); len(creates) != 1 {

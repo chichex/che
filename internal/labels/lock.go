@@ -233,6 +233,11 @@ func parseListLocked(data []byte, repo string) ([]LockedRef, error) {
 	return out, nil
 }
 
+// RefNumber expone refNumber para callers fuera del paquete (flows que
+// arman llamadas REST y necesitan el número parseado). Mantenemos el
+// nombre interno corto.
+func RefNumber(ref string) (int, error) { return refNumber(ref) }
+
 // refNumber extrae el número de un ref. Acepta "42", "#42", URLs de GitHub
 // (/pull/42 o /issues/42), o "owner/repo#42". Es una copia más chica de
 // validate.resolveRefNumber — duplicarla acá evita un import circular

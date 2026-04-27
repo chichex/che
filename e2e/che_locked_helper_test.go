@@ -16,5 +16,5 @@ import "github.com/chichex/che/e2e/harness"
 func scriptCheLockDefault(env *harness.Env) {
 	env.ExpectGh(`^label create che:locked`).RespondStdout("", 0)
 	env.ExpectGh(`^api -X POST repos/\{owner\}/\{repo\}/issues/\d+/labels`).RespondStdout("{}\n", 0)
-	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/issues/\d+/labels/che:locked`).RespondStdout("", 0)
+	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/issues/\d+/labels/che:`).RespondStdout("", 0)
 }

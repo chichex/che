@@ -133,19 +133,12 @@ func assertCleanupApplied(t *testing.T, env *harness.Env, stderr string) {
 		t.Fatalf("local branch exec/42-* still present after cleanup:\n%s", out)
 	}
 
-	// 3) Rollback de label ejecutado: debe haber un issue edit consecutivo
-	//    con --add-label status:plan.
-	edits := env.Invocations().FindCalls("gh", "issue", "edit", "42")
-	foundRollback := false
-	for _, e := range edits {
-		for i := 0; i+1 < len(e.Args); i++ {
-			if e.Args[i] == "--add-label" && e.Args[i+1] == "che:plan" {
-				foundRollback = true
-			}
-		}
-	}
-	if !foundRollback {
-		t.Fatalf("expected rollback to status:plan in edits\n%v", edits)
+	// 3) Rollback de label ejecutado: debe haber un POST REST agregando
+	//    che:plan (transición executing→plan).
+	posts := env.Invocations().FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:plan")
+	if len(posts) == 0 {
+		t.Fatalf("expected rollback POST adding che:plan; calls=%v",
+			env.Invocations().For("gh"))
 	}
 
 	// 4) Mensaje al usuario: el stderr debería indicar que limpió local.

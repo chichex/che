@@ -92,22 +92,22 @@ func TestExplore_IssueMissingCtPlan_ClassifiesAndContinues(t *testing.T) {
 	if n := len(inv.For("claude")); n != 2 {
 		t.Fatalf("expected 2 claude calls (classifier + explorer), got %d", n)
 	}
-	// El primer `gh issue edit` sin --body-file debería ser reclassify
-	// (ct:plan + status:idea). La fixture ya tiene type:fix y size:s, así
-	// que esos NO se re-agregan.
-	reclassifyEdits := inv.FindCalls("gh", "issue", "edit", "99", "--add-label")
-	if len(reclassifyEdits) < 3 {
-		t.Fatalf("expected at least 3 add-label edits (reclassify + lock + transition), got %d", len(reclassifyEdits))
+	// El reclassify ahora corre REST: 1 POST con ct:plan + che:idea (sin
+	// type/size porque la fixture ya los trae). La transición de estado
+	// posterior añade che:planning y luego che:plan vía POST/DELETE.
+	posts := inv.FindCalls("gh", "api", "-X", "POST", "issues/99/labels")
+	if len(posts) < 3 {
+		t.Fatalf("expected at least 3 POST labels (reclassify + lock + transition), got %d; calls=%v", len(posts), posts)
 	}
-	reclassifyEdits[0].AssertArgsContain(t, "--add-label", "ct:plan", "--add-label", "che:idea")
-	reclassArgs := strings.Join(reclassifyEdits[0].Args, " ")
+	posts[0].AssertArgsContain(t, "labels[]=ct:plan", "labels[]=che:idea")
+	reclassArgs := strings.Join(posts[0].Args, " ")
 	if strings.Contains(reclassArgs, "type:feature") || strings.Contains(reclassArgs, "size:m") {
-		t.Fatalf("reclassify edit debería preservar type/size existentes; args=%v", reclassifyEdits[0].Args)
+		t.Fatalf("reclassify POST debería preservar type/size existentes; args=%v", posts[0].Args)
 	}
-	// La última edit con --add-label es la transición final a che:plan.
-	reclassifyEdits[len(reclassifyEdits)-1].AssertArgsContain(t,
-		"--remove-label", "che:planning",
-		"--add-label", "che:plan")
+	postsByLabel := findLabelPostsByLabel(inv, 99)
+	if postsByLabel["che:plan"] != 1 {
+		t.Fatalf("expected exactly 1 POST adding che:plan, got %d", postsByLabel["che:plan"])
+	}
 }
 
 // TestExplore_IssueMissingCtPlan_NoTypeSize_AppliesInferred: issue sin
@@ -136,15 +136,15 @@ func TestExplore_IssueMissingCtPlan_NoTypeSize_AppliesInferred(t *testing.T) {
 	if n := len(inv.For("claude")); n != 2 {
 		t.Fatalf("expected 2 claude calls (classifier + explorer), got %d", n)
 	}
-	addEdits := inv.FindCalls("gh", "issue", "edit", "77", "--add-label")
-	if len(addEdits) < 3 {
-		t.Fatalf("expected at least 3 add-label edits (reclassify + lock + transition), got %d", len(addEdits))
+	posts := inv.FindCalls("gh", "api", "-X", "POST", "issues/77/labels")
+	if len(posts) < 3 {
+		t.Fatalf("expected at least 3 POST labels (reclassify + lock + transition), got %d", len(posts))
 	}
-	addEdits[0].AssertArgsContain(t,
-		"--add-label", "ct:plan",
-		"--add-label", "che:idea",
-		"--add-label", "type:feature",
-		"--add-label", "size:m",
+	posts[0].AssertArgsContain(t,
+		"labels[]=ct:plan",
+		"labels[]=che:idea",
+		"labels[]=type:feature",
+		"labels[]=size:m",
 	)
 	labelCreates := inv.FindCalls("gh", "label", "create")
 	joined := ""
@@ -156,9 +156,10 @@ func TestExplore_IssueMissingCtPlan_NoTypeSize_AppliesInferred(t *testing.T) {
 			t.Fatalf("expected gh label create for %q; calls=%v", expected, labelCreates)
 		}
 	}
-	addEdits[len(addEdits)-1].AssertArgsContain(t,
-		"--remove-label", "che:planning",
-		"--add-label", "che:plan")
+	postsByLabel := findLabelPostsByLabel(inv, 77)
+	if postsByLabel["che:plan"] != 1 {
+		t.Fatalf("expected exactly 1 POST adding che:plan, got %d", postsByLabel["che:plan"])
+	}
 }
 
 // TestExplore_IssueMissingCtPlan_ClassifierFails_Exit2: si el LLM falla, exit 2.
@@ -241,14 +242,16 @@ func TestExplore_IssueMissingCtPlan_WithPreexistingStatus_PreservesStatus(t *tes
 	harness.AssertContains(t, r.Stderr, "ya avanzó en el pipeline")
 
 	inv := env.Invocations()
-	edits := inv.FindCalls("gh", "issue", "edit", "55")
-	if len(edits) != 1 {
-		t.Fatalf("expected 1 gh issue edit (reclassify only; flow corta en gate), got %d", len(edits))
+	// Reclassify-only: 1 POST con ct:plan (sin che:idea porque preserva el
+	// estado preexistente). El gate corta antes de cualquier transición.
+	posts := inv.FindCalls("gh", "api", "-X", "POST", "issues/55/labels")
+	if len(posts) != 1 {
+		t.Fatalf("expected 1 POST labels (reclassify only; flow corta en gate), got %d; calls=%v", len(posts), posts)
 	}
-	edits[0].AssertArgsContain(t, "--add-label", "ct:plan")
-	reclassArgs := strings.Join(edits[0].Args, " ")
+	posts[0].AssertArgsContain(t, "labels[]=ct:plan")
+	reclassArgs := strings.Join(posts[0].Args, " ")
 	if strings.Contains(reclassArgs, "che:idea") {
-		t.Fatalf("reclassify debería preservar che:plan y NO agregar che:idea; args=%v", edits[0].Args)
+		t.Fatalf("reclassify debería preservar che:plan y NO agregar che:idea; args=%v", posts[0].Args)
 	}
 	for _, c := range inv.For("claude") {
 		joined := strings.Join(c.Args, " ")
@@ -322,22 +325,27 @@ func TestExplore_GoldenPath(t *testing.T) {
 	if len(bodyEdits) != 1 {
 		t.Fatalf("expected 1 body edit, got %d", len(bodyEdits))
 	}
-	// El flow nuevo hace dos transiciones de máquina de estados:
-	//   1) che:idea → che:planning (lock)
+	// El flow nuevo hace dos transiciones de máquina de estados via REST
+	// (gh api POST/DELETE labels en lugar de gh issue edit):
+	//   1) che:idea → che:planning (lock de máquina de estados)
 	//   2) che:planning → che:plan (éxito)
-	labelEdits := inv.FindCalls("gh", "issue", "edit", "42", "--remove-label")
-	if len(labelEdits) != 2 {
-		t.Fatalf("expected 2 label edits (lock + transition), got %d", len(labelEdits))
+	// Excluimos che:locked (Lock/Unlock del recurso ortogonal).
+	deletes := findLabelDeletes(inv, 42)
+	if len(deletes) != 2 {
+		t.Fatalf("expected 2 state-label DELETE (idea + planning), got %d", len(deletes))
 	}
-	labelEdits[0].AssertArgsContain(t,
-		"--remove-label", "che:idea",
-		"--add-label", "che:planning")
-	labelEdits[1].AssertArgsContain(t,
-		"--remove-label", "che:planning",
-		"--add-label", "che:plan")
+	deletes[0].AssertArgsContain(t, "issues/42/labels/che:idea")
+	deletes[1].AssertArgsContain(t, "issues/42/labels/che:planning")
+	postsByLabel := findLabelPostsByLabel(inv, 42)
+	if postsByLabel["che:planning"] != 1 {
+		t.Fatalf("expected 1 POST adding che:planning, got %d", postsByLabel["che:planning"])
+	}
+	if postsByLabel["che:plan"] != 1 {
+		t.Fatalf("expected 1 POST adding che:plan, got %d", postsByLabel["che:plan"])
+	}
 	// No aplicar ct:exec desde explore.
-	if strings.Contains(strings.Join(labelEdits[1].Args, " "), "ct:exec") {
-		t.Fatalf("explore must NOT apply ct:exec; args=%v", labelEdits[1].Args)
+	if postsByLabel["ct:exec"] != 0 {
+		t.Fatalf("explore must NOT apply ct:exec; got %d POSTs", postsByLabel["ct:exec"])
 	}
 	// Otros agentes NO deberían haberse invocado.
 	inv.AssertNotCalled(t, "codex")
@@ -379,17 +387,20 @@ func TestExplore_IssueCtPlanWithoutStatusIdea_EnsuresRemoveLabel(t *testing.T) {
 	if len(createPlan) == 0 {
 		t.Fatalf("expected `gh label create status:plan` before transition; calls=%v", inv.For("gh"))
 	}
-	// Dos label edits: 1) che:idea → che:planning (lock), 2) che:planning → che:plan.
-	labelEdits := inv.FindCalls("gh", "issue", "edit", "115", "--remove-label")
-	if len(labelEdits) != 2 {
-		t.Fatalf("expected 2 label edits (lock + transition), got %d", len(labelEdits))
+	// Dos transiciones via REST: 1) che:idea→che:planning, 2) che:planning→che:plan.
+	deletes := findLabelDeletes(inv, 115)
+	if len(deletes) != 2 {
+		t.Fatalf("expected 2 state-label DELETE, got %d", len(deletes))
 	}
-	labelEdits[0].AssertArgsContain(t,
-		"--remove-label", "che:idea",
-		"--add-label", "che:planning")
-	labelEdits[1].AssertArgsContain(t,
-		"--remove-label", "che:planning",
-		"--add-label", "che:plan")
+	deletes[0].AssertArgsContain(t, "issues/115/labels/che:idea")
+	deletes[1].AssertArgsContain(t, "issues/115/labels/che:planning")
+	postsByLabel := findLabelPostsByLabel(inv, 115)
+	if postsByLabel["che:planning"] != 1 {
+		t.Fatalf("expected 1 POST adding che:planning, got %d", postsByLabel["che:planning"])
+	}
+	if postsByLabel["che:plan"] != 1 {
+		t.Fatalf("expected 1 POST adding che:plan, got %d", postsByLabel["che:plan"])
+	}
 }
 
 // TestExplore_AgentCodex: --agent codex invoca el binario `codex`, no claude.
@@ -545,6 +556,15 @@ func TestExplore_ClaudeMultipleRecommended_Exit3(t *testing.T) {
 func TestExplore_LabelEditFailsAfterComment_Exit2_WarnsOrphan(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
+	// IMPORTANTE: registrar el matcher de fallo ANTES de los prechecks. El
+	// fake matchea en orden de registro y scriptCheLockDefault tiene un
+	// catch-all `^api -X POST .../labels` que devuelve "{}" exitoso —
+	// shadowea cualquier matcher de fallo registrado después. Consumable=true
+	// para que solo el POST adding che:plan falle, los demás (Lock/Unlock,
+	// transiciones previas) caen al catch-all subsiguiente.
+	env.ExpectGh(`^api -X POST repos/\{owner\}/\{repo\}/issues/42/labels.*labels\[\]=che:plan(\s|$)`).
+		Consumable().
+		RespondExitWithError(1, "422 validation failed\n")
 	scriptExplorePrechecks(env)
 	env.ExpectGh(`^issue view 42`).RespondStdoutFromFixture("explore/gh_issue_view_with_ctplan.json", 0)
 	env.ExpectAgent("claude").
@@ -553,13 +573,6 @@ func TestExplore_LabelEditFailsAfterComment_Exit2_WarnsOrphan(t *testing.T) {
 	env.ExpectGh(`^issue comment 42`).RespondStdout("https://github.com/acme/demo/issues/42#issuecomment-999\n", 0)
 	env.ExpectGh(`^issue edit 42 --body-file`).RespondStdout("ok\n", 0)
 	env.ExpectGh(`^label create `).RespondStdout("ok\n", 0)
-	// Primer edit (lock idea→planning) pasa, segundo (planning→plan) falla.
-	// El rollback del defer también intenta un edit (planning→idea) que
-	// también falla — todo sumado el flow sale con exit 2.
-	env.ExpectGh(`^issue edit 42 --remove-label che:idea`).
-		Consumable().
-		RespondStdout("ok\n", 0)
-	env.ExpectGh(`^issue edit 42 `).RespondExitWithError(1, "422 validation failed\n")
 
 	r := env.Run("explore", "42")
 	if r.ExitCode != 2 {
@@ -645,6 +658,11 @@ func scriptExplorePrechecks(env *harness.Env) {
 // rollback). Tests que necesiten asertar args específicos del label edit
 // no deben llamar este helper. Tests que solo quieran "que el flow corra"
 // y no asertar sobre las transiciones, sí.
+//
+// Las transiciones ahora corren REST (gh api POST/DELETE labels) en lugar
+// de `gh issue edit --remove/--add-label` — evita el scope read:org de
+// GraphQL en repos de orgs.
 func scriptExploreStateTransitions(env *harness.Env, issueNum int) {
-	env.ExpectGh(fmt.Sprintf(`^issue edit %d --remove-label che:`, issueNum)).RespondStdout("ok\n", 0)
+	env.ExpectGh(fmt.Sprintf(`^api -X DELETE repos/\{owner\}/\{repo\}/issues/%d/labels/che:`, issueNum)).RespondStdout("", 0)
+	env.ExpectGh(fmt.Sprintf(`^api -X POST repos/\{owner\}/\{repo\}/issues/%d/labels`, issueNum)).RespondStdout("{}\n", 0)
 }

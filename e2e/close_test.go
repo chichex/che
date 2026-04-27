@@ -151,16 +151,20 @@ func TestClose_GoldenPath_DraftToReadyAndMerge(t *testing.T) {
 	if closes := inv.FindCalls("gh", "issue close 42"); len(closes) != 1 {
 		t.Fatalf("expected 1 gh issue close call, got %d", len(closes))
 	}
-	// labels.Apply hace 2 edits sobre el issue: executed→closing y
-	// closing→closed. La transición intermedia che:closing es transient.
-	edits := inv.FindCalls("gh", "issue", "edit", "42")
-	if len(edits) != 2 {
-		t.Fatalf("expected 2 issue edits (executed→closing→closed), got %d", len(edits))
+	// labels.Apply hace 2 transiciones sobre el issue (executed→closing→
+	// closed). Con REST cada una se descompone en 1 DELETE + 1 POST.
+	if dels := inv.FindCalls("gh", "api", "-X", "DELETE", "issues/42/labels/che:executed"); len(dels) != 1 {
+		t.Fatalf("expected 1 DELETE che:executed, got %d", len(dels))
 	}
-	edits[0].AssertArgsContain(t, "--add-label", "che:closing")
-	edits[0].AssertArgsContain(t, "--remove-label", "che:executed")
-	edits[1].AssertArgsContain(t, "--add-label", "che:closed")
-	edits[1].AssertArgsContain(t, "--remove-label", "che:closing")
+	if posts := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:closing"); len(posts) != 1 {
+		t.Fatalf("expected 1 POST adding che:closing, got %d", len(posts))
+	}
+	if dels := inv.FindCalls("gh", "api", "-X", "DELETE", "issues/42/labels/che:closing"); len(dels) != 1 {
+		t.Fatalf("expected 1 DELETE che:closing, got %d", len(dels))
+	}
+	if posts := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:closed"); len(posts) != 1 {
+		t.Fatalf("expected 1 POST adding che:closed, got %d", len(posts))
+	}
 	env.Invocations().AssertNotCalled(t, "claude")
 }
 
@@ -583,8 +587,7 @@ func scriptClosePrechecks(env *harness.Env) {
 	// validated → closing → closed). Catch-all para los gh label create
 	// y los issue/pr edits de transición.
 	env.ExpectGh(`^label create che:`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^issue edit \d+ --remove-label che:`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^pr edit \d+ --remove-label che:`).RespondStdout("ok\n", 0)
+	// Las transiciones REST (api POST/DELETE) las cubre scriptCheLockDefault.
 }
 
 // branchExists devuelve true si refs/heads/<branch> existe en el repo.

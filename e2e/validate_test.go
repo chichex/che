@@ -71,9 +71,9 @@ func TestValidate_GoldenPath_OpusApproves(t *testing.T) {
 	env.ExpectGh(`^pr comment 7 --body-file`).Consumable().RespondStdout("ok\n", 0)
 	env.ExpectGh(`^pr comment 7 --body-file`).Consumable().RespondStdout("ok\n", 0)
 
-	// Label consolidado (approve) — ensure + pr edit con add-label.
+	// Label consolidado (approve) — ensure + REST POST.
 	env.ExpectGh(`^label create validated:approve --force$`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^pr edit 7 --add-label validated:approve$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^api -X POST repos/\{owner\}/\{repo\}/issues/7/labels.*labels\[\]=validated:approve`).RespondStdout("{}\n", 0)
 
 	out := env.MustRun("validate", "--validators", "opus", "7")
 	harness.AssertContains(t, out, "che ya dejó los comments")
@@ -91,9 +91,9 @@ func TestValidate_GoldenPath_OpusApproves(t *testing.T) {
 	if len(ensures) != 1 {
 		t.Fatalf("expected 1 label create for validated:approve, got %d", len(ensures))
 	}
-	edits := inv.FindCalls("gh", "pr", "edit", "7", "--add-label", "validated:approve")
-	if len(edits) != 1 {
-		t.Fatalf("expected 1 pr edit adding validated:approve, got %d", len(edits))
+	posts := inv.FindCalls("gh", "api", "-X", "POST", "issues/7/labels", "labels[]=validated:approve")
+	if len(posts) != 1 {
+		t.Fatalf("expected 1 POST adding validated:approve, got %d", len(posts))
 	}
 }
 
@@ -138,7 +138,7 @@ func TestValidate_Iter2_IncrementsFromPreviousComments(t *testing.T) {
 	env.ExpectGh(`^pr comment 7 --body-file`).Consumable().RespondStdout("ok\n", 0)
 
 	env.ExpectGh(`^label create validated:approve --force$`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^pr edit 7 --add-label validated:approve$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^api -X POST repos/\{owner\}/\{repo\}/issues/7/labels.*labels\[\]=validated:approve`).RespondStdout("{}\n", 0)
 
 	out := env.MustRun("validate", "--validators", "opus", "7")
 	// El stdout debe estar ok — lo interesante es que al menos uno de los
@@ -178,7 +178,7 @@ func TestValidate_MultipleValidators_AllPosted(t *testing.T) {
 
 	// Label consolidado: peor verdict = changes_requested (gana sobre approve).
 	env.ExpectGh(`^label create validated:changes-requested --force$`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^pr edit 7 --add-label validated:changes-requested$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^api -X POST repos/\{owner\}/\{repo\}/issues/7/labels.*labels\[\]=validated:changes-requested`).RespondStdout("{}\n", 0)
 
 	out := env.MustRun("validate", "--validators", "codex,gemini", "7")
 	harness.AssertContains(t, out, "codex#1")
@@ -196,9 +196,9 @@ func TestValidate_MultipleValidators_AllPosted(t *testing.T) {
 	if len(comments) != 3 {
 		t.Fatalf("expected 3 pr comment calls (2 validators + summary), got %d", len(comments))
 	}
-	edits := inv.FindCalls("gh", "pr", "edit", "7", "--add-label", "validated:changes-requested")
-	if len(edits) != 1 {
-		t.Fatalf("expected 1 pr edit with validated:changes-requested, got %d", len(edits))
+	posts := inv.FindCalls("gh", "api", "-X", "POST", "issues/7/labels", "labels[]=validated:changes-requested")
+	if len(posts) != 1 {
+		t.Fatalf("expected 1 POST adding validated:changes-requested, got %d", len(posts))
 	}
 }
 
@@ -242,9 +242,9 @@ func TestValidate_Plan_GoldenPath_OpusApproves(t *testing.T) {
 	env.ExpectGh(`^issue comment 42 --body-file`).Consumable().RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue comment 42 --body-file`).Consumable().RespondStdout("ok\n", 0)
 
-	// Label plan-validated:approve: ensure + issue edit.
+	// Label plan-validated:approve: ensure + REST POST.
 	env.ExpectGh(`^label create plan-validated:approve --force$`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^issue edit 42 --add-label plan-validated:approve$`).RespondStdout("ok\n", 0)
+	env.ExpectGh(`^api -X POST repos/\{owner\}/\{repo\}/issues/42/labels.*labels\[\]=plan-validated:approve`).RespondStdout("{}\n", 0)
 
 	out := env.MustRun("validate", "--validators", "opus", "42")
 	harness.AssertContains(t, out, "che ya dejó los comments")
@@ -258,9 +258,9 @@ func TestValidate_Plan_GoldenPath_OpusApproves(t *testing.T) {
 	if len(comments) != 2 {
 		t.Fatalf("expected 2 issue comment calls (validator + summary), got %d", len(comments))
 	}
-	edits := inv.FindCalls("gh", "issue", "edit", "42", "--add-label", "plan-validated:approve")
-	if len(edits) != 1 {
-		t.Fatalf("expected 1 issue edit with plan-validated:approve, got %d", len(edits))
+	posts := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=plan-validated:approve")
+	if len(posts) != 1 {
+		t.Fatalf("expected 1 POST adding plan-validated:approve, got %d", len(posts))
 	}
 }
 
@@ -330,8 +330,7 @@ func scriptValidatePrechecks(env *harness.Env) {
 	// validating→validated o executed→validating→validated). labels.Ensure
 	// llama gh label create por cada label antes de aplicarlos.
 	env.ExpectGh(`^label create che:`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^issue edit \d+ --remove-label che:`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^pr edit \d+ --remove-label che:`).RespondStdout("ok\n", 0)
+	// Las transiciones REST (api POST/DELETE) las cubre scriptCheLockDefault.
 }
 
 // scriptDetectTargetPR scriptea la respuesta de `gh api repos/.../issues/<n>`

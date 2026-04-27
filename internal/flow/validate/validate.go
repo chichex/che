@@ -722,6 +722,11 @@ func detectTarget(ref string) (Target, error) {
 	return TargetPlan, nil
 }
 
+// ResolveRefNumber expone resolveRefNumber al resto del módulo. Otros flows
+// (iterate, close) lo necesitan para llamar a labels.AddLabels/RemoveLabel
+// con el number en vez del ref crudo.
+func ResolveRefNumber(ref string) (int, error) { return resolveRefNumber(ref) }
+
 // resolveRefNumber devuelve el número del issue/PR que corresponde al ref.
 // Si el ref es un número puro, lo devuelve tal cual (sin tocar red). Para
 // URLs / owner/repo#N extraemos el número con parsing local — no llamamos
@@ -793,6 +798,10 @@ func verdictToLabel(verdict string) string {
 // aplica al PR, removiendo primero cualquier otro label validated:* presente
 // (son mutuamente excluyentes). Idempotente: si el target ya está y no hay
 // otros para remover, no hace nada.
+//
+// Usa REST (`gh api .../issues/{n}/labels`) en lugar de `gh pr edit
+// --add-label`: el segundo dispara GraphQL que requiere scope read:org en
+// repos de orgs (`gh auth login` default no lo entrega).
 func applyValidatedLabel(prRef string, pr *PullRequest, target string) error {
 	if target == "" {
 		return fmt.Errorf("empty target label")
@@ -800,30 +809,22 @@ func applyValidatedLabel(prRef string, pr *PullRequest, target string) error {
 	if err := labels.Ensure(target); err != nil {
 		return err
 	}
-	args := []string{"pr", "edit", prRef}
-	changes := false
+	number, err := resolveRefNumber(prRef)
+	if err != nil {
+		return fmt.Errorf("apply validated label: %w", err)
+	}
 	for _, l := range labels.AllValidated {
-		if l == target {
+		if l == target || !pr.HasLabel(l) {
 			continue
 		}
-		if pr.HasLabel(l) {
-			args = append(args, "--remove-label", l)
-			changes = true
+		if err := labels.RemoveLabel(number, l); err != nil {
+			return err
 		}
 	}
-	if !pr.HasLabel(target) {
-		args = append(args, "--add-label", target)
-		changes = true
-	}
-	if !changes {
+	if pr.HasLabel(target) {
 		return nil
 	}
-	cmd := exec.Command("gh", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("gh pr edit: %s", strings.TrimSpace(string(out)))
-	}
-	return nil
+	return labels.AddLabels(number, target)
 }
 
 // ListOpenPRs devuelve los PRs abiertos del repo actual (todos, sin filtrar
@@ -1437,6 +1438,8 @@ func verdictToPlanLabel(verdict string) string {
 // applyPlanValidatedLabel es al modo plan lo que applyValidatedLabel al modo
 // PR: asegura que target exista, lo aplica al issue, y remueve los otros
 // plan-validated:* presentes (son mutuamente excluyentes). Idempotente.
+// Usa REST por la misma razón que applyValidatedLabel — uniformemente
+// `repo` scope alcanza para issues y PRs.
 func applyPlanValidatedLabel(issueRef string, issue *Issue, target string) error {
 	if target == "" {
 		return fmt.Errorf("empty target label")
@@ -1444,30 +1447,22 @@ func applyPlanValidatedLabel(issueRef string, issue *Issue, target string) error
 	if err := labels.Ensure(target); err != nil {
 		return err
 	}
-	args := []string{"issue", "edit", issueRef}
-	changes := false
+	number, err := resolveRefNumber(issueRef)
+	if err != nil {
+		return fmt.Errorf("apply plan-validated label: %w", err)
+	}
 	for _, l := range labels.AllPlanValidated {
-		if l == target {
+		if l == target || !issue.HasLabel(l) {
 			continue
 		}
-		if issue.HasLabel(l) {
-			args = append(args, "--remove-label", l)
-			changes = true
+		if err := labels.RemoveLabel(number, l); err != nil {
+			return err
 		}
 	}
-	if !issue.HasLabel(target) {
-		args = append(args, "--add-label", target)
-		changes = true
-	}
-	if !changes {
+	if issue.HasLabel(target) {
 		return nil
 	}
-	cmd := exec.Command("gh", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("gh issue edit: %s", strings.TrimSpace(string(out)))
-	}
-	return nil
+	return labels.AddLabels(number, target)
 }
 
 // buildPlanValidatorPrompt arma el prompt del validador en modo plan. La

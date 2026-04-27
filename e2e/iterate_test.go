@@ -88,8 +88,10 @@ func TestIterate_AgentNoChanges_Exit2(t *testing.T) {
 
 	inv := env.Invocations()
 	// NO debe haber intentado remover el label (solo se remueve si hubo push).
-	if rm := inv.FindCalls("gh", "pr edit", "--remove-label"); len(rm) != 0 {
-		t.Fatalf("expected 0 remove-label calls when no changes, got %d", len(rm))
+	// La remoción ahora es REST DELETE — chequeamos que no haya un DELETE
+	// targeting validated:* sobre el PR (issues/7/labels/validated:...).
+	if rm := inv.FindCalls("gh", "api", "-X", "DELETE", "issues/7/labels/validated:"); len(rm) != 0 {
+		t.Fatalf("expected 0 DELETE label calls when no changes, got %d", len(rm))
 	}
 	// NO debe haber posteado comment de iterate.
 	if cm := inv.FindCalls("gh", "pr comment 7"); len(cm) != 0 {
@@ -116,8 +118,8 @@ func TestIterate_PlanGoldenPath(t *testing.T) {
 
 	env.ExpectGh(`^issue edit 42 --body-file`).Consumable().RespondStdout("ok\n", 0)
 	env.ExpectGh(`^issue comment 42 --body-file`).Consumable().RespondStdout("ok\n", 0)
-	env.ExpectGh(`^issue edit 42 --remove-label plan-validated:changes-requested$`).
-		Consumable().RespondStdout("ok\n", 0)
+	env.ExpectGh(`^api -X DELETE repos/\{owner\}/\{repo\}/issues/42/labels/plan-validated:changes-requested$`).
+		Consumable().RespondStdout("", 0)
 
 	out := env.MustRun("iterate", "42")
 	harness.AssertContains(t, out, "Iterated plan")
@@ -133,8 +135,8 @@ func TestIterate_PlanGoldenPath(t *testing.T) {
 	if comments := inv.FindCalls("gh", "issue", "comment", "42", "--body-file"); len(comments) != 1 {
 		t.Fatalf("expected 1 issue comment, got %d", len(comments))
 	}
-	if rm := inv.FindCalls("gh", "issue", "edit", "42", "--remove-label", "plan-validated:changes-requested"); len(rm) != 1 {
-		t.Fatalf("expected 1 remove-label call, got %d", len(rm))
+	if rm := inv.FindCalls("gh", "api", "-X", "DELETE", "issues/42/labels/plan-validated:changes-requested"); len(rm) != 1 {
+		t.Fatalf("expected 1 DELETE removing plan-validated:changes-requested, got %d", len(rm))
 	}
 }
 
@@ -243,10 +245,10 @@ func TestIterate_Plan_NoChanges_ExitRetry(t *testing.T) {
 	}
 	// El flow nuevo hace lock (validated→planning) + rollback (planning→
 	// validated) cuando opus no produce cambios. Lo que NO debe pasar es
-	// remover el label plan-validated:changes-requested.
-	rm := inv.FindCalls("gh", "issue", "edit", "42", "--remove-label", "plan-validated:changes-requested")
+	// remover el label plan-validated:changes-requested (REST DELETE).
+	rm := inv.FindCalls("gh", "api", "-X", "DELETE", "issues/42/labels/plan-validated:changes-requested")
 	if len(rm) != 0 {
-		t.Fatalf("expected 0 remove-label plan-validated:changes-requested on no-change, got %d", len(rm))
+		t.Fatalf("expected 0 DELETE plan-validated:changes-requested on no-change, got %d", len(rm))
 	}
 }
 
@@ -280,11 +282,9 @@ func scriptIteratePrechecks(env *harness.Env) {
 	// planning ó validated→executing), que llaman labels.Ensure por cada
 	// label antes de aplicarlos. Catch-all para no listar cada label.
 	env.ExpectGh(`^label create che:`).RespondStdout("ok\n", 0)
-	// Catch-all para los edits de transición de estado. Los tests que
-	// asertan args específicos pueden registrar matchers más específicos
-	// antes de llamar al helper.
-	env.ExpectGh(`^issue edit \d+ --remove-label che:`).RespondStdout("ok\n", 0)
-	env.ExpectGh(`^pr edit \d+ --remove-label che:`).RespondStdout("ok\n", 0)
+	// Las transiciones REST (api POST/DELETE) las cubre scriptCheLockDefault
+	// con catch-alls para issues/\d+/labels/che:* — comparten endpoint con el
+	// che:locked.
 }
 
 // scriptIterateDetectTargetPR scriptea la respuesta del `gh api
