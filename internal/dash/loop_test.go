@@ -371,7 +371,6 @@ func TestTick_ConcurrencyIssueSide(t *testing.T) {
 	fr := &fakeRunner{}
 	s.runAction = fr.run
 	s.repoPath = "/tmp/r"
-	s.loop.enabled = true
 	s.loop.rules[RuleValidatePlan] = true
 
 	if n := s.runTick(); n != 1 {
@@ -417,7 +416,6 @@ func TestTick_IssueAndPRSimultaneous(t *testing.T) {
 		{Kind: KindFused, IssueNumber: 2, PRNumber: 22, Status: "executed"},
 	}
 	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = true
 	s.loop.rules[RuleValidatePlan] = true
 	s.loop.rules[RuleValidatePR] = true
 
@@ -449,7 +447,6 @@ func TestTick_CapFive(t *testing.T) {
 		{Kind: KindIssue, IssueNumber: 42, Status: "plan"},
 	}
 	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = true
 	s.loop.rules[RuleValidatePlan] = true
 
 	for i := 1; i <= LoopCap; i++ {
@@ -471,30 +468,14 @@ func TestTick_CapFive(t *testing.T) {
 	}
 }
 
-// TestTick_MasterOff: reglas ON pero enabled=false → no dispatcha.
-func TestTick_MasterOff(t *testing.T) {
-	ents := []Entity{
-		{Kind: KindIssue, IssueNumber: 42, Status: "plan"},
-	}
-	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = false
-	s.loop.rules[RuleValidatePlan] = true
-
-	if n := s.runTick(); n != 0 {
-		t.Errorf("tick con master OFF: got %d want 0", n)
-	}
-	if fr.count() != 0 {
-		t.Errorf("runner no debería ser llamado con master OFF; got %d", fr.count())
-	}
-}
-
-// TestTick_AllRulesOff: master ON pero todas las reglas OFF → no dispatcha.
+// TestTick_AllRulesOff: todas las reglas OFF → no dispatcha. Reemplaza
+// al viejo TestTick_MasterOff: sin master switch (v0.0.77), "el loop está
+// apagado" significa exactamente "ninguna regla activa".
 func TestTick_AllRulesOff(t *testing.T) {
 	ents := []Entity{
 		{Kind: KindIssue, IssueNumber: 42, Status: "plan"},
 	}
 	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = true
 	// Ninguna regla activada.
 
 	if n := s.runTick(); n != 0 {
@@ -513,7 +494,6 @@ func TestTick_ManualBlocksLoop(t *testing.T) {
 		{Kind: KindIssue, IssueNumber: 50, Status: "plan"}, // también issue-side
 	}
 	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = true
 	s.loop.rules[RuleValidatePlan] = true
 
 	// Simular flow manual disparado antes del tick.
@@ -545,7 +525,6 @@ func TestTick_LockedSkipped(t *testing.T) {
 		{Kind: KindIssue, IssueNumber: 50, Status: "plan"},
 	}
 	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = true
 	s.loop.rules[RuleValidatePlan] = true
 
 	if n := s.runTick(); n != 1 {
@@ -582,7 +561,6 @@ func TestTick_ManualDispatchCountsForCap(t *testing.T) {
 		t.Errorf("rounds[42]: got %d want %d", r, LoopCap)
 	}
 	// Encender el loop — tick no debería dispatchar por cap.
-	s.loop.enabled = true
 	s.loop.rules[RuleValidatePlan] = true
 	if n := s.runTick(); n != 0 {
 		t.Errorf("tick post-cap: got %d want 0", n)
@@ -606,7 +584,6 @@ func TestTick_AutoFlagOnlyForTick(t *testing.T) {
 	s.clearRunning(42)
 
 	// Tick — reglas ON para disparar validate sobre el issue plan #42.
-	s.loop.enabled = true
 	s.loop.rules[RuleValidatePlan] = true
 	if n := s.runTick(); n != 1 {
 		t.Fatalf("tick: got %d want 1", n)
@@ -636,58 +613,172 @@ func TestLoopEndpoints_GET(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	got := string(body)
-	// 4 reglas enlistadas.
+	// Todas las reglas enlistadas.
 	for _, r := range allLoopRules {
 		if !strings.Contains(got, string(r)) {
 			t.Errorf("popover missing rule %q", r)
 		}
 	}
-	// Master master switch hx-post.
-	if !strings.Contains(got, `hx-post="/loop/toggle"`) {
-		t.Errorf("popover missing hx-post to /loop/toggle")
-	}
-	// Denominador del label "N/M reglas activas" es dinámico: len(allLoopRules).
-	// Hardcoded "/4" era un bug cuando se agregó execute-plan — el pill ya lo
-	// arregló con len(allLoopRules), acá validamos el mismo contrato.
-	wantDenom := fmt.Sprintf("/%d reglas activas", len(allLoopRules))
+	// Header counter "N / M activas" — el denominador es dinámico
+	// (TotalRules = len(allLoopRules)).
+	wantDenom := fmt.Sprintf("/ %d activas", len(allLoopRules))
 	if !strings.Contains(got, wantDenom) {
-		t.Errorf("popover missing dynamic denominator %q — got: %s", wantDenom, got[:min(len(got), 1000)])
+		t.Errorf("popover missing dynamic denominator %q", wantDenom)
+	}
+	// Bulk endpoints (reemplazo del master switch).
+	if !strings.Contains(got, `hx-post="/loop/bulk/on"`) {
+		t.Errorf("popover missing hx-post a /loop/bulk/on")
+	}
+	if !strings.Contains(got, `hx-post="/loop/bulk/off"`) {
+		t.Errorf("popover missing hx-post a /loop/bulk/off")
+	}
+	// Separador "or" del par excluyente (validate-plan ↔ execute-raw).
+	if !strings.Contains(got, "loop-or-sep") {
+		t.Errorf("popover missing separador exclusivo loop-or-sep")
+	}
+	// Sub-headers from-state.
+	if !strings.Contains(got, "loop-from-state") {
+		t.Errorf("popover missing from-state headers")
 	}
 }
 
-// TestLoopEndpoints_Toggle flipea el master y verifica OOB del pill.
-func TestLoopEndpoints_Toggle(t *testing.T) {
+// TestLoopEndpoints_ExclusiveValidateExecuteRaw verifica que prender una de
+// las dos reglas excluyentes (validate-plan ↔ execute-raw) apaga la otra
+// automáticamente. Si las dos pudieran estar on, el matcher prefiere
+// validate, pero la UI ya muestra "or (no both)" — el backend mantiene la
+// invariante.
+func TestLoopEndpoints_ExclusiveValidateExecuteRaw(t *testing.T) {
 	s := NewServer(MockSource{}, "che-cli", 15)
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	if s.loop.isEnabled() {
-		t.Fatalf("master debería arrancar OFF")
+	// Prender validate-plan.
+	resp, err := http.Post(ts.URL+"/loop/rule/validate-plan", "", nil)
+	if err != nil {
+		t.Fatalf("POST validate-plan: %v", err)
+	}
+	resp.Body.Close()
+	s.loop.mu.Lock()
+	vOn := s.loop.rules[RuleValidatePlan]
+	eOn := s.loop.rules[RuleExecuteRaw]
+	s.loop.mu.Unlock()
+	if !vOn || eOn {
+		t.Fatalf("tras prender validate-plan: validate=%v execute-raw=%v want true/false", vOn, eOn)
 	}
 
-	resp, err := http.Post(ts.URL+"/loop/toggle", "", nil)
+	// Prender execute-raw → debe apagar validate-plan.
+	resp, err = http.Post(ts.URL+"/loop/rule/execute-raw", "", nil)
+	if err != nil {
+		t.Fatalf("POST execute-raw: %v", err)
+	}
+	resp.Body.Close()
+	s.loop.mu.Lock()
+	vOn = s.loop.rules[RuleValidatePlan]
+	eOn = s.loop.rules[RuleExecuteRaw]
+	s.loop.mu.Unlock()
+	if vOn || !eOn {
+		t.Fatalf("tras prender execute-raw: validate=%v execute-raw=%v want false/true", vOn, eOn)
+	}
+
+	// Volver a prender validate-plan → debe apagar execute-raw.
+	resp, err = http.Post(ts.URL+"/loop/rule/validate-plan", "", nil)
+	if err != nil {
+		t.Fatalf("POST validate-plan #2: %v", err)
+	}
+	resp.Body.Close()
+	s.loop.mu.Lock()
+	vOn = s.loop.rules[RuleValidatePlan]
+	eOn = s.loop.rules[RuleExecuteRaw]
+	s.loop.mu.Unlock()
+	if !vOn || eOn {
+		t.Errorf("tras re-prender validate-plan: validate=%v execute-raw=%v want true/false", vOn, eOn)
+	}
+}
+
+// TestLoopState_ToggleRuleExclusiveDoesNotTouchOthers verifica que la
+// exclusión sólo aplica al par (validate-plan, execute-raw). Otras reglas
+// que también podrían parecer excluyentes (iterate-plan + execute-plan
+// sobre validated; ambas matchean validated pero con verdicts distintos)
+// NO se apagan entre sí — el verdict las distingue en el matcher.
+func TestLoopState_ToggleRuleExclusiveDoesNotTouchOthers(t *testing.T) {
+	l := newLoopState()
+	l.toggleRule(RuleValidatePlan)
+	l.toggleRule(RuleIteratePlan)
+	l.toggleRule(RuleExecutePlan)
+	l.toggleRule(RuleValidatePR)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.rules[RuleValidatePlan] || !l.rules[RuleIteratePlan] ||
+		!l.rules[RuleExecutePlan] || !l.rules[RuleValidatePR] {
+		t.Errorf("reglas no excluyentes apagadas indebidamente: %+v", l.rules)
+	}
+}
+
+// TestLoopEndpoints_BulkOn prende todas las reglas. Para el par excluyente
+// validate-plan/execute-raw, validate-plan gana (matchea el matcher).
+func TestLoopEndpoints_BulkOn(t *testing.T) {
+	s := NewServer(MockSource{}, "che-cli", 15)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/loop/bulk/on", "", nil)
+	if err != nil {
+		t.Fatalf("POST /loop/bulk/on: %v", err)
+	}
+	resp.Body.Close()
+
+	s.loop.mu.Lock()
+	defer s.loop.mu.Unlock()
+	for _, r := range allLoopRules {
+		if r == RuleExecuteRaw {
+			if s.loop.rules[r] {
+				t.Errorf("execute-raw NO debe quedar ON tras bulk/on (validate-plan gana por exclusión)")
+			}
+			continue
+		}
+		if !s.loop.rules[r] {
+			t.Errorf("regla %q debería estar ON tras bulk/on", r)
+		}
+	}
+}
+
+// TestLoopEndpoints_BulkOff apaga todas las reglas.
+func TestLoopEndpoints_BulkOff(t *testing.T) {
+	s := NewServer(MockSource{}, "che-cli", 15)
+	for _, r := range allLoopRules {
+		s.loop.rules[r] = true
+	}
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/loop/bulk/off", "", nil)
+	if err != nil {
+		t.Fatalf("POST /loop/bulk/off: %v", err)
+	}
+	resp.Body.Close()
+
+	s.loop.mu.Lock()
+	defer s.loop.mu.Unlock()
+	for r, on := range s.loop.rules {
+		if on {
+			t.Errorf("regla %q debería estar OFF tras bulk/off", r)
+		}
+	}
+}
+
+// TestLoopEndpoints_BulkInvalidMode rechaza modes fuera de on/off.
+func TestLoopEndpoints_BulkInvalidMode(t *testing.T) {
+	s := NewServer(MockSource{}, "che-cli", 15)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/loop/bulk/half", "", nil)
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("status: got %d want 200", resp.StatusCode)
-	}
-	if !s.loop.isEnabled() {
-		t.Errorf("master debería estar ON tras toggle")
-	}
-	body, _ := io.ReadAll(resp.Body)
-	got := string(body)
-	// Response incluye OOB del pill + popover.
-	if !strings.Contains(got, `hx-swap-oob="outerHTML"`) {
-		t.Errorf("POST response missing hx-swap-oob para pill")
-	}
-	if !strings.Contains(got, `id="auto-loop-toggle"`) {
-		t.Errorf("POST response missing id=auto-loop-toggle (pill OOB)")
-	}
-	// Label refleja ON.
-	if !strings.Contains(got, "auto-loop ON") {
-		t.Errorf("POST response label debe decir 'auto-loop ON'; got: %s", got[:min(200, len(got))])
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status: got %d want 400", resp.StatusCode)
 	}
 }
 
@@ -756,10 +847,11 @@ func TestTopbarPillLabel_RenderInitial(t *testing.T) {
 	}
 }
 
-// TestTopbarPillLabel_AfterToggle: tras toggle, el pill dice "ON (N/4)".
-func TestTopbarPillLabel_AfterToggle(t *testing.T) {
+// TestTopbarPillLabel_AfterRulesOn: con N reglas ON el pill dice
+// "auto-loop ON (N/M)". Sin master switch (v0.0.77), basta con prender
+// reglas para que el loop quede ON.
+func TestTopbarPillLabel_AfterRulesOn(t *testing.T) {
 	s := NewServer(MockSource{}, "che-cli", 15)
-	s.loop.enabled = true
 	s.loop.rules[RuleValidatePlan] = true
 	s.loop.rules[RuleValidatePR] = true
 	ts := httptest.NewServer(s)
@@ -772,14 +864,15 @@ func TestTopbarPillLabel_AfterToggle(t *testing.T) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	got := string(body)
-	if !strings.Contains(got, "auto-loop ON (2/7)") {
-		t.Errorf("topbar debería decir 'auto-loop ON (2/7)'; got head: %s", got[:min(500, len(got))])
+	want := fmt.Sprintf("auto-loop ON (2/%d)", len(allLoopRules))
+	if !strings.Contains(got, want) {
+		t.Errorf("topbar debería decir %q; got head: %s", want, got[:min(500, len(got))])
 	}
 }
 
-// TestLoopEndpoints_Concurrency flipea el master concurrently — verifica
-// que el race detector no explote. El estado final es no determinístico
-// (N toggles consecutivos), pero el test garantiza safety.
+// TestLoopEndpoints_Concurrency flipea reglas concurrently — verifica que
+// el race detector no encuentre nada. Reemplaza al viejo test del master
+// switch (borrado en v0.0.77).
 func TestLoopEndpoints_Concurrency(t *testing.T) {
 	s := NewServer(MockSource{}, "che-cli", 15)
 	ts := httptest.NewServer(s)
@@ -791,7 +884,7 @@ func TestLoopEndpoints_Concurrency(t *testing.T) {
 	for i := 0; i < N; i++ {
 		go func() {
 			defer wg.Done()
-			resp, err := http.Post(ts.URL+"/loop/toggle", "", nil)
+			resp, err := http.Post(ts.URL+"/loop/rule/validate-plan", "", nil)
 			if err != nil {
 				t.Errorf("POST: %v", err)
 				return
@@ -800,8 +893,6 @@ func TestLoopEndpoints_Concurrency(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	// No hay assert concreto sobre el estado final — el objetivo es que el
-	// race detector no encuentre nada raro.
 }
 
 // TestRunTick_GateBlocksValidateWithoutBody: un issue en che:plan SIN body
@@ -820,7 +911,6 @@ func TestRunTick_GateBlocksValidateWithoutBody(t *testing.T) {
 	fr := &fakeRunner{}
 	s.runAction = fr.run
 	s.repoPath = "/tmp/r"
-	s.loop.enabled = true
 	s.loop.rules[RuleValidatePlan] = true
 
 	if n := s.runTick(); n != 0 {
@@ -893,7 +983,6 @@ func TestRunTick_AutoChipInDrawer(t *testing.T) {
 
 	// Disparar via tick (el mock Source sigue devolviendo la entity sin
 	// RunningFlow, pero el overlay local la marca).
-	s.loop.enabled = true
 	s.loop.rules[RuleValidatePlan] = true
 	if n := s.runTick(); n != 1 {
 		t.Fatalf("tick: got %d want 1", n)
@@ -943,14 +1032,14 @@ func TestAllLoopRules_OrderStable(t *testing.T) {
 // es len(allLoopRules) — si se agregan reglas, este test debe cambiar
 // junto con la constante.
 func TestPillLabel(t *testing.T) {
+	const total = 7
 	cases := []struct {
 		data loopPopoverData
 		want string
 	}{
-		{loopPopoverData{Enabled: false}, "auto-loop OFF"},
-		{loopPopoverData{Enabled: true, ActiveRules: 0}, "auto-loop ON (0/7)"},
-		{loopPopoverData{Enabled: true, ActiveRules: 3}, "auto-loop ON (3/7)"},
-		{loopPopoverData{Enabled: true, ActiveRules: 7}, "auto-loop ON (7/7)"},
+		{loopPopoverData{ActiveRules: 0, TotalRules: total}, "auto-loop OFF"},
+		{loopPopoverData{ActiveRules: 3, TotalRules: total}, "auto-loop ON (3/7)"},
+		{loopPopoverData{ActiveRules: 7, TotalRules: total}, "auto-loop ON (7/7)"},
 	}
 	for _, tc := range cases {
 		got := pillLabel(tc.data)
@@ -969,7 +1058,6 @@ func TestTick_ExecutePlanDispatches(t *testing.T) {
 		{Kind: KindIssue, IssueNumber: 122, Status: "validated", PlanVerdict: "approve", IssueTitle: "approved"},
 	}
 	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = true
 	s.loop.rules[RuleExecutePlan] = true
 
 	if n := s.runTick(); n != 1 {
@@ -995,7 +1083,6 @@ func TestTick_ExploreIdeaDispatches(t *testing.T) {
 		{Kind: KindIssue, IssueNumber: 7, Status: "idea", IssueTitle: "fresh idea"},
 	}
 	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = true
 	s.loop.rules[RuleExploreIdea] = true
 
 	if n := s.runTick(); n != 1 {
@@ -1020,7 +1107,6 @@ func TestTick_ExploreIdeaSkipsFused(t *testing.T) {
 		{Kind: KindFused, IssueNumber: 7, PRNumber: 11, Status: "idea"},
 	}
 	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = true
 	s.loop.rules[RuleExploreIdea] = true
 
 	if n := s.runTick(); n != 0 {
@@ -1038,7 +1124,6 @@ func TestTick_ExecuteRawDispatches(t *testing.T) {
 		{Kind: KindIssue, IssueNumber: 99, Status: "plan", IssueTitle: "trust the plan"},
 	}
 	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = true
 	s.loop.rules[RuleExecuteRaw] = true
 
 	if n := s.runTick(); n != 1 {
@@ -1065,7 +1150,6 @@ func TestTick_ValidatePlanWinsOverExecuteRaw(t *testing.T) {
 		{Kind: KindIssue, IssueNumber: 99, Status: "plan", IssueTitle: "plan a refinar"},
 	}
 	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = true
 	s.loop.rules[RuleValidatePlan] = true
 	s.loop.rules[RuleExecuteRaw] = true
 
@@ -1084,7 +1168,6 @@ func TestTick_ExecutePlanSkipsFused(t *testing.T) {
 		{Kind: KindFused, IssueNumber: 122, PRNumber: 140, Status: "validated", PlanVerdict: "approve"},
 	}
 	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = true
 	s.loop.rules[RuleExecutePlan] = true
 
 	if n := s.runTick(); n != 0 {
@@ -1139,7 +1222,6 @@ func TestTick_PrefersOldestFirst(t *testing.T) {
 		{Kind: KindIssue, IssueNumber: 1, Status: "plan", CreatedAt: now.Add(-72 * time.Hour)},
 	}
 	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = true
 	s.loop.rules[RuleValidatePlan] = true
 
 	if n := s.runTick(); n != 1 {
@@ -1174,7 +1256,6 @@ func TestTick_ZeroCreatedAtKeepsOriginalOrder(t *testing.T) {
 		{Kind: KindIssue, IssueNumber: 20, Status: "plan", IssueBody: "## Plan consolidado\nx"},
 	}
 	s, fr := newLoopServer(t, ents)
-	s.loop.enabled = true
 	s.loop.rules[RuleValidatePlan] = true
 
 	if n := s.runTick(); n != 1 {
@@ -1244,30 +1325,87 @@ func TestRuleSide(t *testing.T) {
 	}
 }
 
-// TestBuildLoopData_GroupsRules: el popover divide las reglas en dos
-// listas (issue/PR) que el template renderiza como secciones separadas.
-// El bug que evitamos: si alguien suma una regla nueva sin pensar en el
-// side, va al bloque "issue" por default — ese ese el comportamiento que
-// fija el test.
+// TestBuildLoopData_GroupsRules: el popover agrupa las reglas por
+// (side, fromState). El template renderea cada grupo como un mini-stepper
+// del lifecycle. Fija el contrato: si alguien agrega una regla nueva, debe
+// declarar ruleSide + ruleFromState para que aparezca en algún grupo.
 func TestBuildLoopData_GroupsRules(t *testing.T) {
 	s := NewServer(MockSource{}, "che-cli", 15)
 	data := s.buildLoopData()
-	if len(data.IssueRules)+len(data.PRRules) != len(data.Rules) {
-		t.Fatalf("issue+pr (%d+%d) != total (%d)",
-			len(data.IssueRules), len(data.PRRules), len(data.Rules))
+
+	// TotalRules = len(allLoopRules) — el header del popover lo usa.
+	if data.TotalRules != len(allLoopRules) {
+		t.Errorf("TotalRules: got %d want %d", data.TotalRules, len(allLoopRules))
 	}
-	// PR-side: solo validate-pr y iterate-pr.
-	if len(data.PRRules) != 2 {
-		t.Errorf("PRRules: got %d want 2", len(data.PRRules))
+
+	// La suma de reglas en todos los grupos debe igualar el total.
+	count := 0
+	for _, g := range data.IssueGroups {
+		count += len(g.Rules)
 	}
-	for _, r := range data.PRRules {
-		if r.Name != RuleValidatePR && r.Name != RuleIteratePR {
-			t.Errorf("PRRules incluye %q — debería ser solo validate-pr/iterate-pr", r.Name)
+	for _, g := range data.PRGroups {
+		count += len(g.Rules)
+	}
+	if count != len(allLoopRules) {
+		t.Errorf("suma de reglas en grupos: got %d want %d (alguna regla quedó fuera de un grupo — agregar al ruleSide o ruleFromState)", count, len(allLoopRules))
+	}
+
+	// Issue side: 3 grupos en orden idea, plan, validated.
+	wantIssueOrder := []string{"idea", "plan", "validated"}
+	if len(data.IssueGroups) != len(wantIssueOrder) {
+		t.Fatalf("IssueGroups len: got %d want %d", len(data.IssueGroups), len(wantIssueOrder))
+	}
+	for i, st := range wantIssueOrder {
+		if data.IssueGroups[i].State != st {
+			t.Errorf("IssueGroups[%d].State: got %q want %q", i, data.IssueGroups[i].State, st)
 		}
 	}
-	// Issue-side: las 5 restantes.
-	if len(data.IssueRules) != 5 {
-		t.Errorf("IssueRules: got %d want 5", len(data.IssueRules))
+
+	// PR side: 2 grupos en orden executed, validated.
+	wantPROrder := []string{"executed", "validated"}
+	if len(data.PRGroups) != len(wantPROrder) {
+		t.Fatalf("PRGroups len: got %d want %d", len(data.PRGroups), len(wantPROrder))
+	}
+	for i, st := range wantPROrder {
+		if data.PRGroups[i].State != st {
+			t.Errorf("PRGroups[%d].State: got %q want %q", i, data.PRGroups[i].State, st)
+		}
+	}
+
+	// El grupo (issue, plan) debe estar marcado Exclusive (validate-plan ↔
+	// execute-raw). Ningún otro grupo es exclusive hoy.
+	for _, g := range data.IssueGroups {
+		wantExcl := g.State == "plan"
+		if g.Exclusive != wantExcl {
+			t.Errorf("IssueGroups[state=%s].Exclusive: got %v want %v", g.State, g.Exclusive, wantExcl)
+		}
+	}
+	for _, g := range data.PRGroups {
+		if g.Exclusive {
+			t.Errorf("PRGroups[state=%s].Exclusive: got true; no PR group debería ser exclusive hoy", g.State)
+		}
+	}
+}
+
+// TestRuleFromState fija el mapping regla → estado origen del lifecycle.
+// El popover agrupa por este valor, así que cambiarlo reorganiza secciones.
+func TestRuleFromState(t *testing.T) {
+	cases := []struct {
+		rule LoopRule
+		want string
+	}{
+		{RuleExploreIdea, "idea"},
+		{RuleValidatePlan, "plan"},
+		{RuleExecuteRaw, "plan"},
+		{RuleIteratePlan, "validated"},
+		{RuleExecutePlan, "validated"},
+		{RuleValidatePR, "executed"},
+		{RuleIteratePR, "validated"},
+	}
+	for _, tc := range cases {
+		if got := ruleFromState(tc.rule); got != tc.want {
+			t.Errorf("ruleFromState(%q): got %q want %q", tc.rule, got, tc.want)
+		}
 	}
 }
 

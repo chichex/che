@@ -1255,11 +1255,12 @@ func (s *Server) buildMux() *http.ServeMux {
 
 	// ==== Step 6: auto-loop endpoints ====
 	// GET /loop              → popover HTML (hx-target="#loop-popover").
-	// POST /loop/toggle      → flipea master, devuelve popover + OOB del pill.
-	// POST /loop/rule/{name} → flipea una regla, idem.
+	// POST /loop/rule/{name} → flipea una regla, devuelve popover + OOB del pill.
+	// POST /loop/bulk/{mode} → mode=on|off, prende/apaga todas a la vez.
+	// (POST /loop/toggle se borró en v0.0.77 junto con el master switch.)
 	mux.HandleFunc("GET /loop", s.handleLoopGet)
-	mux.HandleFunc("POST /loop/toggle", s.handleLoopToggle)
 	mux.HandleFunc("POST /loop/rule/{name}", s.handleLoopRule)
+	mux.HandleFunc("POST /loop/bulk/{mode}", s.handleLoopBulk)
 
 	// GET /stream/{id} — Server-Sent Events del log en vivo del subproceso
 	// `che <flow> <id>` disparado desde el dashboard. Flujo:

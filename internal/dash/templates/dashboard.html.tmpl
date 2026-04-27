@@ -147,34 +147,108 @@
   .auto-loop-toggle:hover { border-color: var(--border-muted); }
   .auto-loop-toggle:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
 
-  /* ==================== Loop popover ====================
+  /* ==================== Loop popover (v0.0.77 redesign) ====================
      Dropdown posicionado absoluto debajo del pill. Se llena con hx-get /loop
      (lazy — el server no arma el HTML si el usuario nunca clickea). Vacío
      en el render inicial; el swap inserta .loop-popover-inner. Visible
      solo cuando hay contenido — si está vacío, el padding/border desaparece
-     por el :empty selector, así no hay rectángulo fantasma en el topbar. */
+     por el :empty selector, así no hay rectángulo fantasma en el topbar.
+
+     v0.0.77: se borró el master switch; los toggles individuales son
+     iOS-style (mismo patrón que .auto-loop-toggle .switch del topbar). Las
+     reglas se agrupan por estado origen (from idea / from plan / etc). El
+     par excluyente (validate-plan ↔ execute-raw) se separa con un
+     "or (no both)" en naranja. Width subió de 280 a 380 para que el chip
+     code-style de transición no compita con el label. */
   .loop-popover {
     position: absolute;
     top: calc(100% + 6px);
     right: 0;
-    min-width: 280px;
+    min-width: 380px;
     background: var(--panel);
     border: 1px solid var(--elevated);
-    border-radius: 6px;
-    padding: 8px 10px;
+    border-radius: 8px;
+    padding: 0;
     font-size: 11px;
     z-index: 500;
     box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+    overflow: hidden;
   }
   .loop-popover:empty { display: none; }
-  .loop-popover-inner { display: flex; flex-direction: column; gap: 6px; }
-  .loop-row { display: flex; align-items: center; gap: 8px; }
-  .loop-row-label { color: var(--text); }
-  .loop-row-label b { color: var(--cyan); }
-  .loop-master .loop-row-label { color: var(--text); }
-  /* chip code-style con la transición de estados (idea → plan, etc).
-     Color cyan/azul para que destaque del label en --text y se lea como
-     "metadato del flow" sin competir visualmente con la acción. */
+  .loop-popover-inner { display: flex; flex-direction: column; gap: 0; }
+
+  /* Header del popover: counter pasivo + bulk actions (all on / all off
+     reemplazan al viejo master switch). Fondo --elevated para diferenciar
+     del body. */
+  .loop-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px;
+    background: var(--elevated);
+    border-bottom: 1px solid var(--bg);
+  }
+  .loop-head-left { display: flex; align-items: baseline; gap: 8px; }
+  .loop-head-title { font-size: 12px; font-weight: 600; color: var(--text); }
+  .loop-head-meta { color: var(--muted); font-size: 11px; }
+  .loop-head-meta .n { color: var(--green); font-weight: 700; }
+  .loop-head-meta .n.zero { color: var(--muted); }
+
+  .loop-bulk { display: flex; gap: 4px; }
+  .loop-bulk button {
+    background: var(--panel);
+    border: 1px solid var(--border-muted);
+    color: var(--muted);
+    font-family: inherit;
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 10px;
+    cursor: pointer;
+  }
+  .loop-bulk button:hover { color: var(--text); border-color: var(--text); }
+
+  /* Sección por side (issue / PR). El header tiene un pip de color que matchea
+     la convención del board (cyan = issue, magenta = PR). */
+  .loop-section { padding: 8px 14px 10px 14px; }
+  .loop-section + .loop-section { border-top: 1px solid var(--elevated); }
+  .loop-sec-hdr {
+    display: flex; align-items: center; gap: 6px;
+    color: var(--muted); font-size: 9px;
+    text-transform: uppercase; letter-spacing: 0.1em;
+    padding: 4px 0 6px 0;
+  }
+  .loop-pip {
+    width: 6px; height: 6px; border-radius: 50%;
+    display: inline-block;
+  }
+  .loop-pip.pip-issue { background: var(--cyan); }
+  .loop-pip.pip-pr { background: var(--magenta); }
+
+  /* Mini-header de cada from-group ("from <state>"). Más sutil que la
+     section, sirve para que el dropdown se lea como un mini-stepper del
+     lifecycle. */
+  .loop-from-hdr {
+    display: flex; align-items: baseline; gap: 6px;
+    color: var(--muted); font-size: 10px;
+    padding: 6px 0 2px 0;
+  }
+  .loop-from-label { color: var(--muted); }
+  .loop-from-state {
+    color: var(--cyan); font-weight: 600;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+  }
+
+  /* Row de regla: toggle + label + transición. La transición queda
+     pegada a la derecha (margin-left: auto) sin truncar — el width
+     extra del popover (380px) le da aire. */
+  .loop-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 5px 0;
+  }
+  .loop-label {
+    color: var(--text); font-size: 12px; font-weight: 500;
+    flex: 1 1 auto;
+  }
+  .loop-row.off .loop-label { color: var(--muted); }
   .loop-transition {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 10px;
@@ -183,45 +257,58 @@
     border: 1px solid rgba(0, 215, 255, 0.25);
     border-radius: 3px;
     padding: 1px 5px;
-    margin-left: auto;
     white-space: nowrap;
   }
-  .loop-check {
-    background: transparent;
-    border: 1px solid var(--border-muted);
-    color: var(--muted);
-    width: 22px;
-    height: 22px;
-    border-radius: 4px;
-    font-size: 13px;
-    line-height: 1;
+  .loop-row.off .loop-transition { color: var(--muted); opacity: 0.7; border-color: var(--border-muted); background: transparent; }
+
+  /* Toggle iOS — mismo patrón que .auto-loop-toggle .switch del topbar
+     (28x14, knob 10x10). Mantener consistencia visual entre el pill del
+     topbar y los toggles del popover: verde cuando ON, gris cuando OFF. */
+  .loop-toggle {
+    flex: 0 0 auto;
+    width: 28px; height: 14px;
+    background: var(--border-muted);
+    border-radius: 8px;
+    position: relative;
+    transition: background 0.15s;
     cursor: pointer;
-    padding: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    border: none; padding: 0;
   }
-  .loop-check.on { color: var(--green); border-color: var(--green); }
-  .loop-check:hover { border-color: var(--text); }
-  .loop-sep {
-    border: none;
-    border-top: 1px solid var(--elevated);
-    margin: 4px 0;
+  .loop-toggle::after {
+    content: ""; position: absolute;
+    top: 2px; left: 2px;
+    width: 10px; height: 10px;
+    background: var(--text);
+    border-radius: 50%;
+    transition: left 0.15s;
   }
-  /* mini-header de cada bloque (issue/PR) — alineado a la izquierda, en
-     muted+caps para que se lea como label de sección sin pesar visualmente
-     contra los rows. */
-  .loop-section-header {
-    color: var(--muted);
-    font-size: 9px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    padding: 2px 0 0 0;
+  .loop-toggle.on { background: var(--green); }
+  .loop-toggle.on::after { left: 16px; }
+  .loop-toggle:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+  /* Separador "or (no both)" entre las dos reglas excluyentes
+     (validate-plan ↔ execute-raw). Naranja con dashed lines a los lados —
+     llama la atención sin ser invasivo. Alineado con la columna del label,
+     no con el toggle, para que se lea entre las dos rules visualmente. */
+  .loop-or-sep {
+    display: flex; align-items: center; gap: 8px;
+    color: var(--orange); font-size: 9px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.15em;
+    padding: 4px 0;
+    margin-left: 38px;
   }
+  .loop-or-sep::before, .loop-or-sep::after {
+    content: ""; flex: 1 1 auto;
+    border-top: 1px dashed rgba(255,184,108,0.4);
+  }
+
+  /* Footer con el contador de auto-runs en curso (cuando AutoLoops > 0). */
   .loop-foot {
     color: var(--magenta);
     font-size: 10px;
     text-align: right;
+    padding: 6px 14px 8px 14px;
+    border-top: 1px solid var(--elevated);
   }
   .loop-foot .count { color: var(--magenta); font-weight: bold; }
   .auto-loop-toggle .switch {

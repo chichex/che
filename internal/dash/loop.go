@@ -37,10 +37,11 @@
 // ocupan slots — son "rounds efectivas" sobre la entity y suman al cap.
 //
 // Estado en memoria (no persiste a disco — ver project_tui_session_state.md):
-// master switch + flags por regla + contador de rounds. Todo protegido por
-// un mutex dedicado (loopMu) separado del que protege el overlay de running,
-// porque los dominios son independientes y no queremos bloquear handlers
-// HTTP mientras el tick evalúa.
+// flags por regla + contador de rounds. Todo protegido por un mutex
+// dedicado (loopMu) separado del que protege el overlay de running, porque
+// los dominios son independientes y no queremos bloquear handlers HTTP
+// mientras el tick evalúa. El loop se considera "encendido" cuando hay al
+// menos una regla on (no hay master switch — se borró en v0.0.77).
 //
 // Agentes por defecto (hoy no configurable — la decisión de hacerlo
 // configurable es un follow-up explícito):
@@ -137,11 +138,11 @@ var allLoopRules = []LoopRule{
 }
 
 // loopState es el estado del auto-loop mantenido por el Server. Zero value:
-// master OFF, todas las reglas OFF, rounds vacío.
+// todas las reglas OFF, rounds vacío. El loop dispatcha cuando hay ≥1 regla
+// on; con todas off, runTick es no-op (early return).
 type loopState struct {
-	mu      sync.Mutex
-	enabled bool
-	rules   map[LoopRule]bool
+	mu    sync.Mutex
+	rules map[LoopRule]bool
 	// rounds trackea cuántos dispatches (auto + manual) se hicieron sobre
 	// cada IssueNumber desde que arrancó el server. Se usa para el cap.
 	rounds map[int]int
@@ -212,27 +213,38 @@ func (l *loopState) snapshotRules() []loopRuleView {
 	return out
 }
 
-// isEnabled devuelve el estado del master bajo lock.
-func (l *loopState) isEnabled() bool {
+// anyRuleOn devuelve si al menos una regla está ON. Bajo lock. Se usa como
+// "is the loop active?" — reemplaza el viejo isEnabled() del master switch
+// que se borró en v0.0.77. Si ninguna regla está on, runTick es no-op.
+func (l *loopState) anyRuleOn() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.enabled
+	for _, on := range l.rules {
+		if on {
+			return true
+		}
+	}
+	return false
 }
 
-// setEnabled flipea el master. Devuelve el valor nuevo.
-func (l *loopState) toggleEnabled() bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.enabled = !l.enabled
-	return l.enabled
-}
-
-// toggleRule flipea una regla. Devuelve el valor nuevo. Asume r válida
-// (el handler valida antes de llamar).
+// toggleRule flipea una regla. Devuelve el valor nuevo. Asume r válida (el
+// handler valida antes de llamar). Aplica exclusión mutua entre el par
+// (validate-plan, execute-raw): ambas matchean Status=plan sin verdict y no
+// pueden estar on al mismo tiempo (la UI lo refleja con el separador "or";
+// el matcher en nextDispatch ya prefería validate, ahora el toggle hace la
+// exclusión real).
 func (l *loopState) toggleRule(r LoopRule) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.rules[r] = !l.rules[r]
+	if l.rules[r] {
+		switch r {
+		case RuleValidatePlan:
+			l.rules[RuleExecuteRaw] = false
+		case RuleExecuteRaw:
+			l.rules[RuleValidatePlan] = false
+		}
+	}
 	return l.rules[r]
 }
 
@@ -357,6 +369,42 @@ type loopRuleView struct {
 	Label      string
 	Transition string
 	On         bool
+}
+
+// ruleFromState devuelve el estado del lifecycle desde el cual la regla
+// dispara su transición — el primer término de ruleTransition antes del " →".
+// El popover agrupa las reglas por este valor para que el humano lea el
+// dropdown como "qué hago cuando una entity está en <state>".
+//
+// El estado "validated" aparece dos veces (una en issue, una en PR) porque
+// son lifecycles paralelos: validated:approve / validated:changes-req del
+// lado issue son distintos de validated:changes-req del lado PR. La
+// agrupación final usa (side, fromState) como clave compuesta — ver
+// buildLoopData.
+func ruleFromState(r LoopRule) string {
+	switch r {
+	case RuleExploreIdea:
+		return "idea"
+	case RuleValidatePlan, RuleExecuteRaw:
+		return "plan"
+	case RuleIteratePlan, RuleExecutePlan:
+		return "validated"
+	case RuleValidatePR:
+		return "executed"
+	case RuleIteratePR:
+		return "validated"
+	}
+	return ""
+}
+
+// loopFromGroup agrupa reglas por estado origen del lifecycle. Exclusive=true
+// indica que las reglas del grupo son mutuamente excluyentes (sólo plan ON
+// hoy: validate-plan y execute-raw). El template renderea un separador "or"
+// entre las reglas cuando Exclusive=true.
+type loopFromGroup struct {
+	State     string
+	Rules     []loopRuleView
+	Exclusive bool
 }
 
 // ================== Matcher puro ==================
@@ -531,11 +579,9 @@ func entityRef(e Entity) string {
 // markRunning fallará y el tick saltará esa entity sin incrementar
 // rounds ni dispatchar — seguro.
 func (s *Server) runTick() int {
-	if !s.loop.isEnabled() {
-		return 0
-	}
 	// Snapshot de reglas bajo lock. Si todas están OFF, no hace falta
-	// recorrer entidades.
+	// recorrer entidades — el "loop está apagado" cuando no hay reglas on
+	// (no hay master switch desde v0.0.77).
 	rules := map[LoopRule]bool{}
 	s.loop.mu.Lock()
 	for r, on := range s.loop.rules {
@@ -734,49 +780,78 @@ func (s *Server) isAutoRunning(id int) bool {
 
 // ================== HTTP handlers ==================
 
-// loopPopoverData es el contexto del template del popover. Rules es la
-// lista combinada (orden didáctico de allLoopRules) — se mantiene para el
-// `len .Rules` del header "(N/M reglas activas)" y para tests que iteran
-// el snapshot completo. IssueRules/PRRules son la misma data agrupada por
-// lado del flow, que es como el popover decide secciones visuales: el
-// humano lee "qué pasa en el issue" arriba y "qué pasa en el PR" abajo.
+// loopPopoverData es el contexto del template del popover. IssueGroups y
+// PRGroups agrupan las reglas por (side, fromState) para que el template
+// renderee el dropdown como un mini-stepper del lifecycle: "from idea" →
+// "from plan" → "from validated" en el side issue, y "from executed" →
+// "from validated" en el side PR. TotalRules expone len(allLoopRules) sin
+// requerir que el template lo derive (más ergonómico para el header
+// "N/M reglas activas").
 type loopPopoverData struct {
-	Enabled     bool
-	Rules       []loopRuleView
-	IssueRules  []loopRuleView
-	PRRules     []loopRuleView
+	IssueGroups []loopFromGroup
+	PRGroups    []loopFromGroup
 	ActiveRules int
+	TotalRules  int
 	ActiveLoops int // len del running map (manual+auto), para el label del pill
 	AutoLoops   int // solo los auto
 }
 
+// issueFromOrder y prFromOrder fijan el orden de las secciones por estado
+// origen — refleja la lectura del lifecycle (idea → plan → validated en
+// issue side; executed → validated en PR side). Cambiar este orden mueve
+// las secciones del popover.
+var (
+	issueFromOrder = []string{"idea", "plan", "validated"}
+	prFromOrder    = []string{"executed", "validated"}
+)
+
 // buildLoopData arma el contexto del popover + del pill label. Separado de
-// buildData para no acoplar dos endpoints distintos.
+// buildData para no acoplar dos endpoints distintos. Agrupa las reglas por
+// (side, fromState) preservando el orden didáctico de allLoopRules dentro
+// de cada grupo.
 func (s *Server) buildLoopData() loopPopoverData {
 	rules := s.loop.snapshotRules()
 	active := 0
-	issueRules := make([]loopRuleView, 0, len(rules))
-	prRules := make([]loopRuleView, 0, len(rules))
+	// buckets indexados por (side, fromState). Mantenemos un map para
+	// agregación + dos slices ordenados al final con issueFromOrder /
+	// prFromOrder, así no dependemos del orden de iteración del map.
+	type key struct{ side, from string }
+	buckets := map[key][]loopRuleView{}
 	for _, r := range rules {
 		if r.On {
 			active++
 		}
-		if ruleSide(r.Name) == "pr" {
-			prRules = append(prRules, r)
-		} else {
-			issueRules = append(issueRules, r)
+		k := key{ruleSide(r.Name), ruleFromState(r.Name)}
+		buckets[k] = append(buckets[k], r)
+	}
+	build := func(side string, order []string) []loopFromGroup {
+		out := make([]loopFromGroup, 0, len(order))
+		for _, st := range order {
+			rs := buckets[key{side, st}]
+			if len(rs) == 0 {
+				continue
+			}
+			// Único par excluyente hoy: (validate-plan, execute-raw) sobre
+			// from=plan en issue side. Si el grupo tiene >1 regla y son
+			// las dos del par, marcamos Exclusive — el template renderea
+			// el separador "or" entre ellas.
+			exclusive := false
+			if side == "issue" && st == "plan" && len(rs) == 2 {
+				exclusive = true
+			}
+			out = append(out, loopFromGroup{State: st, Rules: rs, Exclusive: exclusive})
 		}
+		return out
 	}
 	s.mu.Lock()
 	running := len(s.running)
 	auto := len(s.autoRunning)
 	s.mu.Unlock()
 	return loopPopoverData{
-		Enabled:     s.loop.isEnabled(),
-		Rules:       rules,
-		IssueRules:  issueRules,
-		PRRules:     prRules,
+		IssueGroups: build("issue", issueFromOrder),
+		PRGroups:    build("pr", prFromOrder),
 		ActiveRules: active,
+		TotalRules:  len(allLoopRules),
 		ActiveLoops: running,
 		AutoLoops:   auto,
 	}
@@ -794,9 +869,34 @@ func (s *Server) handleLoopGet(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
-// handleLoopToggle flipea el master y devuelve popover + pill label (OOB).
-func (s *Server) handleLoopToggle(w http.ResponseWriter, _ *http.Request) {
-	s.loop.toggleEnabled()
+// setAllRules prende o apaga todas las reglas de una. Bajo lock. Cuando
+// enable=true, respeta la exclusión validate-plan ↔ execute-raw: prende
+// validate-plan (gana en el matcher) y deja execute-raw OFF.
+func (l *loopState) setAllRules(enable bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, r := range allLoopRules {
+		l.rules[r] = enable
+	}
+	if enable {
+		l.rules[RuleExecuteRaw] = false
+	}
+}
+
+// handleLoopBulk acepta /on y /off. Prende o apaga todas las reglas de una
+// (alternativa más explícita que el viejo master switch — ver header del
+// archivo). Para /on, validate-plan gana sobre execute-raw (exclusión).
+func (s *Server) handleLoopBulk(w http.ResponseWriter, r *http.Request) {
+	mode := r.PathValue("mode")
+	switch mode {
+	case "on":
+		s.loop.setAllRules(true)
+	case "off":
+		s.loop.setAllRules(false)
+	default:
+		http.Error(w, "invalid bulk mode", http.StatusBadRequest)
+		return
+	}
 	s.writeLoopResponse(w)
 }
 
@@ -827,22 +927,21 @@ func (s *Server) writeLoopResponse(w http.ResponseWriter) {
 // pillLabel devuelve el texto que va en el pill del topbar, fuera del
 // popover. Se expone como template func para que el partial "auto-loop-
 // toggle" lo use. El denominador es len(allLoopRules) — si se agregan
-// reglas nuevas, el label se ajusta solo. Ejemplos (con 7 reglas hoy):
-//   - master OFF                  → "auto-loop OFF"
-//   - master ON, 0 rules          → "auto-loop ON (0/7)"
-//   - master ON, 3 rules, 2 auto  → "auto-loop ON (3/7) · ⟳ 2"
+// reglas nuevas, el label se ajusta solo. Sin master switch (v0.0.77+) el
+// loop se considera "ON" cuando hay ≥1 regla activa. Ejemplos:
+//   - 0 rules ON                  → "auto-loop OFF"
+//   - 3 rules ON, 2 auto en curso → "auto-loop ON (3/7) · ⟳ 2"
 func pillLabel(data loopPopoverData) string {
-	if !data.Enabled {
+	if data.ActiveRules == 0 {
 		return "auto-loop OFF"
 	}
-	label := fmt.Sprintf("auto-loop ON (%d/%d)", data.ActiveRules, len(allLoopRules))
-	return label
+	return fmt.Sprintf("auto-loop ON (%d/%d)", data.ActiveRules, data.TotalRules)
 }
 
 // pillLabelHasSpinner indica si mostrar el chip magenta de "⟳ N" junto al
-// label. True cuando el master está ON y hay al menos un auto-dispatch en
-// curso. Se expone al template para el conditional del span .count.
+// label. True cuando hay al menos una regla on y al menos un auto-dispatch
+// en curso. Se expone al template para el conditional del span .count.
 func pillLabelHasSpinner(data loopPopoverData) bool {
-	return data.Enabled && data.AutoLoops > 0
+	return data.ActiveRules > 0 && data.AutoLoops > 0
 }
 

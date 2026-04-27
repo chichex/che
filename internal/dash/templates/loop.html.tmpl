@@ -2,29 +2,29 @@
 
      Define 3 templates:
        - "auto-loop-toggle": el pill del topbar (OOB-able). Label depende
-         de Loop.Enabled y cuenta de reglas activas. Click abre el popover
-         via hx-get="/loop". Se reusa del render inicial (dashboard.tmpl)
-         y de todos los responses que quieran actualizar el label fuera
-         del target principal (hx-swap-oob="outerHTML").
+         del count de reglas activas (sin master switch desde v0.0.77).
+         Click abre el popover via hx-get="/loop". Se reusa del render
+         inicial (dashboard.tmpl) y de los responses que actualicen el
+         label fuera del target principal (hx-swap-oob="outerHTML").
 
-       - "loop-popover": el contenido del popover. Master switch + 4
-         checkboxes (uno por regla). Cada control es un hx-post al
-         endpoint correspondiente con target=#loop-popover (re-render del
-         popover en-place).
+       - "loop-popover": el contenido del popover. Header con counter
+         pasivo + bulk actions (all on / all off), y dos secciones (issue
+         / PR) agrupadas por estado origen del lifecycle. Cada regla es
+         un toggle iOS-style. Las reglas excluyentes (validate-plan ↔
+         execute-raw, ambas matchean from=plan sin verdict) tienen un
+         separador "or (no both)" entre ellas.
 
        - "loop-response": concatena loop-popover + auto-loop-toggle con
-         OOB swap. Es la respuesta de los POST (/loop/toggle y
-         /loop/rule/...) — htmx hace 2 swaps de una: el popover (target
-         declarado) y el pill (OOB).
+         OOB swap. Es la respuesta del POST /loop/rule/... — htmx hace
+         2 swaps de una: el popover (target declarado) y el pill (OOB).
 
-     Recibe loopPopoverData (.Enabled, .Rules, .ActiveRules,
-     .ActiveLoops, .AutoLoops). Para "auto-loop-toggle" se pasa el wrapper
-     pageData.Loop (mismo tipo). */}}
+     Recibe loopPopoverData (.IssueGroups, .PRGroups, .ActiveRules,
+     .TotalRules, .ActiveLoops, .AutoLoops). */}}
 
 {{define "auto-loop-toggle"}}
   <button id="auto-loop-toggle" hx-swap-oob="outerHTML"
           type="button"
-          class="auto-loop-toggle{{if .Enabled}} on{{end}}"
+          class="auto-loop-toggle{{if gt .ActiveRules 0}} on{{end}}"
           hx-get="/loop"
           hx-target="#loop-popover"
           hx-swap="innerHTML"
@@ -35,57 +35,82 @@
   </button>
 {{end}}
 
+{{define "loop-rule-row"}}
+  {{/* Sub-template: render de una row de regla con toggle iOS + label +
+       chip de transición. Recibe un loopRuleView. */}}
+  <div class="loop-row{{if .On}} on{{else}} off{{end}}">
+    <button type="button"
+            class="loop-toggle{{if .On}} on{{end}}"
+            role="switch"
+            aria-checked="{{if .On}}true{{else}}false{{end}}"
+            aria-label="{{.Label}}"
+            hx-post="/loop/rule/{{.Name}}"
+            hx-target="#loop-popover"
+            hx-swap="innerHTML"
+            title="{{.Label}} — {{.Transition}}"></button>
+    <span class="loop-label">{{.Label}}</span>
+    {{if .Transition}}<code class="loop-transition">{{.Transition}}</code>{{end}}
+  </div>
+{{end}}
+
+{{define "loop-from-group"}}
+  {{/* Sub-template: header "from <state>" + rows del grupo. Si .Exclusive
+       y hay 2 reglas, intercala un separador "or (no both)" entre ellas.
+       Recibe un loopFromGroup. */}}
+  <div class="loop-from-hdr">
+    <span class="loop-from-label">from</span>
+    <span class="loop-from-state">{{.State}}</span>
+  </div>
+  {{if and .Exclusive (eq (len .Rules) 2)}}
+    {{template "loop-rule-row" (index .Rules 0)}}
+    <div class="loop-or-sep" aria-label="exclusive — only one runs"><span>or (no both)</span></div>
+    {{template "loop-rule-row" (index .Rules 1)}}
+  {{else}}
+    {{range .Rules}}{{template "loop-rule-row" .}}{{end}}
+  {{end}}
+{{end}}
+
 {{define "loop-popover"}}
-  {{/* El popover es un fragment — el wrapper #loop-popover vive en el
-       topbar (dashboard.tmpl) como div vacío hasta que se clickea el
-       pill. Contenido: master switch + 4 rows de reglas. Cada row
-       tiene un hx-post que re-renderea el popover en-place. */}}
   <div class="loop-popover-inner" role="dialog" aria-label="auto-loop settings">
-    <div class="loop-row loop-master">
-      <button type="button"
-              class="loop-check{{if .Enabled}} on{{end}}"
-              hx-post="/loop/toggle"
-              hx-target="#loop-popover"
-              hx-swap="innerHTML"
-              title="master switch">
-        {{if .Enabled}}☑{{else}}☐{{end}}
-      </button>
-      <span class="loop-row-label"><b>master</b> ({{.ActiveRules}}/{{len .Rules}} reglas activas)</span>
+
+    <div class="loop-head">
+      <div class="loop-head-left">
+        <span class="loop-head-title">auto-loop</span>
+        <span class="loop-head-meta"><span class="n{{if eq .ActiveRules 0}} zero{{end}}">{{.ActiveRules}}</span> / {{.TotalRules}} activas</span>
+      </div>
+      <div class="loop-bulk">
+        <button type="button" title="activar todas"
+                hx-post="/loop/bulk/on"
+                hx-target="#loop-popover"
+                hx-swap="innerHTML">all on</button>
+        <button type="button" title="desactivar todas"
+                hx-post="/loop/bulk/off"
+                hx-target="#loop-popover"
+                hx-swap="innerHTML">all off</button>
+      </div>
     </div>
-    <hr class="loop-sep"/>
-    <div class="loop-section-header">issue</div>
-    {{range .IssueRules}}
-      <div class="loop-row">
-        <button type="button"
-                class="loop-check{{if .On}} on{{end}}"
-                hx-post="/loop/rule/{{.Name}}"
-                hx-target="#loop-popover"
-                hx-swap="innerHTML"
-                title="{{.Label}} — {{.Transition}}">
-          {{if .On}}☑{{else}}☐{{end}}
-        </button>
-        <span class="loop-row-label">{{.Label}}</span>
-        {{if .Transition}}<code class="loop-transition">{{.Transition}}</code>{{end}}
+
+    {{if .IssueGroups}}
+      <div class="loop-section">
+        <div class="loop-sec-hdr">
+          <span class="loop-pip pip-issue"></span>
+          <span>issue side</span>
+        </div>
+        {{range .IssueGroups}}{{template "loop-from-group" .}}{{end}}
       </div>
     {{end}}
-    <hr class="loop-sep"/>
-    <div class="loop-section-header">PR</div>
-    {{range .PRRules}}
-      <div class="loop-row">
-        <button type="button"
-                class="loop-check{{if .On}} on{{end}}"
-                hx-post="/loop/rule/{{.Name}}"
-                hx-target="#loop-popover"
-                hx-swap="innerHTML"
-                title="{{.Label}} — {{.Transition}}">
-          {{if .On}}☑{{else}}☐{{end}}
-        </button>
-        <span class="loop-row-label">{{.Label}}</span>
-        {{if .Transition}}<code class="loop-transition">{{.Transition}}</code>{{end}}
+
+    {{if .PRGroups}}
+      <div class="loop-section">
+        <div class="loop-sec-hdr">
+          <span class="loop-pip pip-pr"></span>
+          <span>PR side</span>
+        </div>
+        {{range .PRGroups}}{{template "loop-from-group" .}}{{end}}
       </div>
     {{end}}
+
     {{if gt .AutoLoops 0}}
-      <hr class="loop-sep"/>
       <div class="loop-foot">
         <span class="count">⟳ {{.AutoLoops}} auto-run{{if gt .AutoLoops 1}}s{{end}} en curso</span>
       </div>
