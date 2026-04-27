@@ -1815,6 +1815,47 @@ func TestDrawerAdopt_FusedRendersOnlyValidate(t *testing.T) {
 	}
 }
 
+// TestDrawerKindPR_PostAdoptValidated: una vez que validate aplicó
+// che:validated al PR (validate.go:530-541, commit 955313e), el drawer
+// debe ofrecer iterate + validate + close — no quedarse en el set
+// fijo de adopt. Cubre el bug de abril 2026 donde KindPR post-adopt
+// seguía mostrando solo validate y el card no podía progresar.
+func TestDrawerKindPR_PostAdoptValidated(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		NWO:    "demo/che",
+		Entities: []Entity{
+			{Kind: KindPR, PRNumber: 301, PRTitle: "orphan", Status: "validated", PRVerdict: "changes-requested"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/drawer/301")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	got := string(body)
+
+	for _, want := range []string{
+		`hx-post="/action/iterate/301"`,
+		`hx-post="/action/validate/301"`,
+		`hx-post="/action/close/301"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("KindPR validated drawer: missing %s", want)
+		}
+	}
+	// El chip "adopt" naranja NO debe aparecer una vez que el PR pasó
+	// a validated — antes se renderizaba hardcodeado para todo KindPR.
+	if strings.Contains(got, `>adopt</span>`) {
+		t.Errorf("KindPR validated drawer: chip 'adopt' no debería aparecer post-adopt")
+	}
+}
+
 // TestColumn_Adopt: Entity.Column() devuelve "adopt" cuando Status=="adopt".
 // Cubierto también en model_test pero duplicado como sanity del dispatcher.
 func TestColumn_Adopt(t *testing.T) {

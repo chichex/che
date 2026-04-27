@@ -478,11 +478,14 @@ func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, t
 		}
 		return "", 0, "no-rule-match"
 	case "validated":
-		// Fused en "validated" = post validate-pr: el flow transicionó
-		// executed→validated y dejó el verdict en PRVerdict (validated:*).
-		// Para issue-only, el verdict vive en PlanVerdict. El case se
-		// bifurca por Kind porque el flow natural es distinto.
-		if e.Kind == KindFused {
+		// Fused/KindPR en "validated" = post validate-pr: el flow
+		// transicionó executed→validated (fused con che:executed previo)
+		// o aplicó che:validated directo al PR (adopt mode, KindPR puro o
+		// fused sin che:executed — ver validate.go:530-541, commit
+		// 955313e). En ambos casos el verdict vive en PRVerdict
+		// (validated:*). Para issue-only, el verdict vive en PlanVerdict.
+		// El case se bifurca por Kind porque el flow natural es distinto.
+		if e.Kind == KindFused || e.Kind == KindPR {
 			if e.PRVerdict == "needs-human" {
 				return "", 0, "pr-needs-human"
 			}
@@ -491,7 +494,10 @@ func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, t
 			}
 			// changes-requested → iterate (rule4). Cierra el loop
 			// validate↔iterate del lado PR: análogo al fix iterate-plan
-			// para el lado issue (v0.0.67).
+			// para el lado issue (v0.0.67). Cubre KindPR adoptado +
+			// re-validado con changes-requested (bug abril 2026: el
+			// case sólo branchaba KindFused y un PR huérfano caía al
+			// branch issue-only que mira PlanVerdict).
 			if e.PRVerdict == "changes-requested" && rules[RuleIteratePR] && e.PRNumber > 0 {
 				return "iterate", e.PRNumber, "rule:iterate-pr"
 			}

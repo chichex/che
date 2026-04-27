@@ -111,6 +111,40 @@ func TestNextDispatch_RuleTable(t *testing.T) {
 			wantSubstr: "no-rule-match",
 		},
 		{
+			// KindPR (PR huérfano) post-adopt + validate dejó che:validated +
+			// PRVerdict=changes-requested. Antes del fix abril 2026 el case
+			// validated solo branchaba KindFused y este caso caía al branch
+			// issue-only que mira PlanVerdict (siempre vacío para PR puro)
+			// → no-rule-match. Ahora la rama PR cubre KindFused y KindPR.
+			name:       "rule4: KindPR validated + PRVerdict=changes-requested + rule ON → iterate PR",
+			e:          Entity{Kind: KindPR, PRNumber: 88, Status: "validated", PRVerdict: "changes-requested"},
+			rules:      map[LoopRule]bool{RuleIteratePR: true},
+			wantFlow:   "iterate",
+			wantRef:    88,
+			wantSubstr: "iterate-pr",
+		},
+		{
+			name:       "KindPR validated + PRVerdict=approve → pr-approved (stop)",
+			e:          Entity{Kind: KindPR, PRNumber: 88, Status: "validated", PRVerdict: "approve"},
+			rules:      map[LoopRule]bool{RuleIteratePR: true},
+			wantFlow:   "",
+			wantSubstr: "pr-approved",
+		},
+		{
+			name:       "KindPR validated + PRVerdict=needs-human → pr-needs-human",
+			e:          Entity{Kind: KindPR, PRNumber: 88, Status: "validated", PRVerdict: "needs-human"},
+			rules:      map[LoopRule]bool{RuleIteratePR: true},
+			wantFlow:   "",
+			wantSubstr: "pr-needs-human",
+		},
+		{
+			name:       "KindPR validated + changes-requested sin regla → no-rule-match",
+			e:          Entity{Kind: KindPR, PRNumber: 88, Status: "validated", PRVerdict: "changes-requested"},
+			rules:      map[LoopRule]bool{},
+			wantFlow:   "",
+			wantSubstr: "no-rule-match",
+		},
+		{
 			name:       "plan + approve → stop (no dispatch)",
 			e:          Entity{Kind: KindIssue, IssueNumber: 42, Status: "plan", PlanVerdict: "approve"},
 			rules:      map[LoopRule]bool{RuleValidatePlan: true, RuleIteratePlan: true},
