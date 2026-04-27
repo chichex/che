@@ -240,10 +240,22 @@ func gateValidate(e Entity) FlowGate {
 		}
 		return FlowGate{true, ""}
 	case KindPR:
-		// Adopt: el flow valida vía stateref con fallback al PR. No hay
-		// gates que pueda chequear desde el snapshot (no tenemos status
-		// che:* sobre el PR ni issue linkeado). Dejamos pasar.
-		return FlowGate{true, ""}
+		// PR sin issue linkeado: el flow valida vía stateref con fallback
+		// al PR. Status="adopt" (PR sin che:*), "validated" (re-validar
+		// post-adopt) o "executed" (raro, PR con che:executed manual)
+		// pasan; cerrados/en cierre rechazan defensivo (el flow real
+		// fallaría de todos modos pero queremos UX clara). validating es
+		// transient — si está corriendo, e.Locked se prende y sale arriba.
+		switch e.Status {
+		case "adopt", "validated", "executed":
+			return FlowGate{true, ""}
+		case "closing":
+			return FlowGate{false, "ya hay un close en curso (che:closing) — esperá que termine"}
+		case "closed":
+			return FlowGate{false, "el PR ya está cerrado (che:closed)"}
+		default:
+			return FlowGate{false, fmt.Sprintf("validate PR espera Status adopt/validated/executed — este está en che:%s", emptyAsIdea(e.Status))}
+		}
 	}
 	return FlowGate{false, "kind desconocido (defensa contra evolución del enum)"}
 }
@@ -254,10 +266,12 @@ func gateValidate(e Entity) FlowGate {
 //     iterate.go:391-411 también rechaza che:executing/che:executed
 //     concurrentes (estado anómalo); el dash no chequea raw-labels y
 //     delega ese edge-case al flow.
-//   - KindFused: validated:changes-requested + sin lock. Status=executed o
-//     validated ambos aceptan iterate (el flow lee el verdict de validated:*
-//     vía stateref).
-//   - KindPR: no aplica (iterate necesita verdict del issue/PR linkeado).
+//   - KindFused / KindPR: validated:changes-requested + sin lock. Status
+//     in {executed, validated}. Ambos comparten la rama porque iterate
+//     resuelve el verdict via stateref con fallback al PR cuando no hay
+//     issue linkeado (validate.go:530-541 aplica che:validated al PR para
+//     adopt mode, así que el snapshot lee el Status correcto del PR).
+//     El flow real corre indistinto sobre fused vs PR puro.
 func gateIterate(e Entity) FlowGate {
 	if e.Locked {
 		return FlowGate{false, lockedReason(e)}
@@ -277,7 +291,7 @@ func gateIterate(e Entity) FlowGate {
 			return FlowGate{false, fmt.Sprintf("el plan está en plan-validated:%s — iterate solo aplica con changes-requested", e.PlanVerdict)}
 		}
 		return FlowGate{true, ""}
-	case KindFused:
+	case KindFused, KindPR:
 		if e.Status != "executed" && e.Status != "validated" {
 			return FlowGate{false, fmt.Sprintf("iterate PR espera che:executed o che:validated — este está en che:%s", emptyAsIdea(e.Status))}
 		}
@@ -288,8 +302,6 @@ func gateIterate(e Entity) FlowGate {
 			return FlowGate{false, fmt.Sprintf("el PR está en validated:%s — iterate solo aplica con changes-requested", e.PRVerdict)}
 		}
 		return FlowGate{true, ""}
-	case KindPR:
-		return FlowGate{false, "iterate no aplica a PRs adopt — corré validate primero para generar verdict"}
 	}
 	return FlowGate{false, "kind desconocido (defensa contra evolución del enum)"}
 }

@@ -295,6 +295,86 @@ func TestComputeGates(t *testing.T) {
 				flowClose:    "no aplica desde adopt",
 			},
 		},
+		// =========== KindPR post-adopt (state machine tras validate) ============
+		// Cubre el bug de abril 2026: gateIterate rechazaba incondicionalmente
+		// todo KindPR (mensaje "iterate no aplica a PRs adopt — corré validate
+		// primero"), aunque el flow real soporta iterate sobre PR puro vía
+		// stateref con fallback. Resultado: auto-loop dispatchaba iterate y
+		// el doble check de gates lo mataba con "skip iterate"; los botones
+		// del drawer aparecían disabled. La rama KindPR ahora se fusiona con
+		// KindFused.
+		{
+			name: "KindPR validated + changes-requested → iterate ON, validate ON, close ON",
+			entity: Entity{Kind: KindPR, PRNumber: 26, Status: "validated",
+				PRVerdict: "changes-requested"},
+			wantAvail: map[string]bool{
+				flowIterate:  true,
+				flowValidate: true,
+				flowClose:    true,
+				flowExplore:  false,
+				flowExecute:  false,
+			},
+		},
+		{
+			name: "KindPR validated + approve → iterate OFF (verdict no es changes-requested)",
+			entity: Entity{Kind: KindPR, PRNumber: 26, Status: "validated",
+				PRVerdict: "approve"},
+			wantAvail: map[string]bool{
+				flowIterate:  false,
+				flowValidate: true,
+				flowClose:    true,
+			},
+			wantReasonContains: map[string]string{
+				flowIterate: "validated:approve",
+			},
+		},
+		{
+			name: "KindPR validated sin verdict → iterate OFF con razón explícita",
+			entity: Entity{Kind: KindPR, PRNumber: 26, Status: "validated"},
+			wantAvail: map[string]bool{
+				flowIterate:  false,
+				flowValidate: true,
+				flowClose:    true,
+			},
+			wantReasonContains: map[string]string{
+				flowIterate: "no tiene verdict",
+			},
+		},
+		{
+			name: "KindPR executed + changes-requested → iterate ON",
+			entity: Entity{Kind: KindPR, PRNumber: 26, Status: "executed",
+				PRVerdict: "changes-requested"},
+			wantAvail: map[string]bool{
+				flowIterate:  true,
+				flowValidate: true,
+				flowClose:    true,
+			},
+		},
+		{
+			name:   "KindPR closed → validate y close OFF (defensivo)",
+			entity: Entity{Kind: KindPR, PRNumber: 26, Status: "closed"},
+			wantAvail: map[string]bool{
+				flowValidate: false,
+				flowIterate:  false,
+				flowClose:    false,
+			},
+			wantReasonContains: map[string]string{
+				flowValidate: "ya está cerrado",
+				flowClose:    "ya está cerrado",
+			},
+		},
+		{
+			name:   "KindPR closing → validate y close OFF (close en curso)",
+			entity: Entity{Kind: KindPR, PRNumber: 26, Status: "closing"},
+			wantAvail: map[string]bool{
+				flowValidate: false,
+				flowClose:    false,
+			},
+			wantReasonContains: map[string]string{
+				flowValidate: "che:closing",
+				flowClose:    "che:closing",
+			},
+		},
 	}
 
 	for _, c := range cases {
