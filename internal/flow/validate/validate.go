@@ -498,7 +498,8 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		return ExitRetry
 	}
 
-	if verdict := consolidateVerdict(results); verdict != "" {
+	verdict := consolidateVerdict(results)
+	if verdict != "" {
 		target := verdictToLabel(verdict)
 		log.Step("aplicando label al PR", output.F{Labels: []string{target}, PR: pr.Number})
 		if err := applyValidatedLabel(prRef, pr, target); err != nil {
@@ -514,7 +515,8 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 	// che:validated. Solo aplica si arrancamos con che:executed. El
 	// target es el mismo que usamos para abrir la transición (issue si
 	// había closing issue con che:*, PR si no).
-	if hasExecutedState {
+	switch {
+	case hasExecutedState:
 		if stateRes.ResolvedToIssue {
 			log.Step("transicionando issue a che:validated", output.F{Issue: stateRes.IssueNumber})
 		} else {
@@ -525,6 +527,24 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		} else {
 			stateValidated = true
 		}
+	case verdict != "" && !stateRes.ResolvedToIssue:
+		// Adopt mode: validate es la puerta de entrada al state machine
+		// para PRs sin che:* previo (v0.0.79 / commit 881c964). No hubo
+		// transición desde che:executed, pero el flow cerró OK con
+		// verdict, así que aplicamos che:validated directo al PR para que
+		// el dash lo mueva fuera de la columna de adopt.
+		log.Step("adopt mode: aplicando che:validated al PR", output.F{PR: pr.Number})
+		if err := labels.Ensure(labels.CheValidated); err != nil {
+			log.Warn(fmt.Sprintf("no pude crear label che:validated en el repo: %v — revisá labels a mano", err))
+		} else if err := labels.AddLabels(pr.Number, labels.CheValidated); err != nil {
+			log.Warn(fmt.Sprintf("no pude aplicar che:validated al PR: %v — revisá labels a mano", err))
+		}
+	case verdict != "" && stateRes.ResolvedToIssue:
+		// PR linkeado a un issue con che:* pero NO en che:executed (ej.
+		// che:idea / che:plan). No saltamos estados de la máquina por
+		// nuestra cuenta: dejamos el verdict aplicado y warnea para que
+		// el humano resuelva.
+		log.Warn(fmt.Sprintf("issue #%d linkeado no estaba en che:executed; aplique che:validated manualmente si corresponde", stateRes.IssueNumber))
 	}
 
 	fmt.Fprintln(stdout, renderReport(results))

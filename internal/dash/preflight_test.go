@@ -280,18 +280,19 @@ func TestComputeGates(t *testing.T) {
 			},
 		},
 		{
-			name:   "issue adopt — set explore/execute/validate habilitado (puerta de entrada)",
+			name:   "issue adopt — explore/execute habilitado, validate bloqueado (necesita plan)",
 			entity: Entity{Kind: KindIssue, Status: "adopt", IssueNumber: 700},
 			wantAvail: map[string]bool{
 				flowExplore:  true,
 				flowExecute:  true,
-				flowValidate: true,
+				flowValidate: false,
 				flowIterate:  false,
 				flowClose:    false,
 			},
 			wantReasonContains: map[string]string{
-				flowIterate: "no aplica desde adopt",
-				flowClose:   "no aplica desde adopt",
+				flowValidate: "necesita che:plan",
+				flowIterate:  "no aplica desde adopt",
+				flowClose:    "no aplica desde adopt",
 			},
 		},
 	}

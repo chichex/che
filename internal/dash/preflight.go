@@ -103,8 +103,10 @@ func computeGates(e Entity) FlowGates {
 // flow cuando aplica (validate vía stateref, etc.). El resto deshabilitado.
 //
 // Sets:
-//   - KindIssue: explore + execute + validate (el "plan" del usuario es
-//     explore, ver judgment-call en commit message). KindIssue en adopt es
+//   - KindIssue: explore + execute (el "plan" del usuario es explore, ver
+//     judgment-call en commit message). validate NO entra: runPlan exige
+//     che:plan + body con `## Plan consolidado`, ninguno presente en adopt
+//     puro. El path natural es explore → validate. KindIssue en adopt es
 //     un edge-case actual (combineEntities skippea issues sin che:*) pero
 //     definimos el set por defensa / uso futuro.
 //   - KindFused: validate (el path canónico de adopt para PRs con issue
@@ -131,7 +133,7 @@ func adoptGates(e Entity) FlowGates {
 		return FlowGates{
 			flowExplore:  {true, ""},
 			flowExecute:  {true, ""},
-			flowValidate: {true, ""},
+			flowValidate: {false, "validate plan necesita che:plan + body con `## Plan consolidado` — corré explore primero, después validate"},
 			flowIterate:  {false, notInAdopt},
 			flowClose:    {false, notInAdopt},
 		}

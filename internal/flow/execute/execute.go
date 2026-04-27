@@ -279,6 +279,18 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitRetry
 	}
 
+	// Adopt mode (v0.0.79): si el issue entró sin ct:plan ni ningún che:*,
+	// lo "adoptamos" como entry point del state machine inyectando ct:plan +
+	// che:idea antes del gate. Paralelo a explore.reclassifyIssue, pero sin
+	// el LLM call: execute no necesita type/size para correr, y preparePlan
+	// tolera body sin header consolidado (lo trata como Summary). Así el
+	// botón execute del dash en adopt mode no falla con "no está en
+	// che:idea/plan/validated".
+	if err := seedAdoptLabels(issueRef, issue); err != nil {
+		fmt.Fprintf(stderr, "error: %v\n", err)
+		return ExitRetry
+	}
+
 	if err := gate(issue); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitSemantic
@@ -742,6 +754,45 @@ func gate(i *Issue) error {
 	}
 	if !i.HasLabel(labels.CheIdea) && !i.HasLabel(labels.ChePlan) && !i.HasLabel(labels.CheValidated) {
 		return fmt.Errorf("issue #%d no está en che:idea, che:plan ni che:validated — corré `che explore %d` o `che validate %d` según el flow", i.Number, i.Number, i.Number)
+	}
+	return nil
+}
+
+// seedAdoptLabels detecta issues sin ct:plan ni che:* (entrada por adopt
+// mode del dash) y les inyecta ct:plan + che:idea para que el flow normal
+// pueda correr (gate exige ct:plan + che:idea/plan/validated). Idempotente:
+// si el issue ya tiene cualquier che:* o ct:plan, no toca nada — preserva
+// el estado existente. Actualiza issue.Labels in-place para que el resto
+// del flow vea los labels nuevos sin re-fetchear.
+func seedAdoptLabels(ref string, issue *Issue) error {
+	if issue.HasLabel(labels.CtPlan) {
+		return nil
+	}
+	hasCheState := false
+	for _, l := range issue.Labels {
+		if strings.HasPrefix(l.Name, "che:") && l.Name != labels.CheLocked {
+			hasCheState = true
+			break
+		}
+	}
+	toAdd := []string{labels.CtPlan}
+	if !hasCheState {
+		toAdd = append(toAdd, labels.CheIdea)
+	}
+	for _, l := range toAdd {
+		if err := labels.Ensure(l); err != nil {
+			return fmt.Errorf("seeding adopt label %s: %w", l, err)
+		}
+	}
+	number, err := labels.RefNumber(ref)
+	if err != nil {
+		return fmt.Errorf("seed adopt %s: %w", ref, err)
+	}
+	if err := labels.AddLabels(number, toAdd...); err != nil {
+		return fmt.Errorf("seed adopt: %w", err)
+	}
+	for _, l := range toAdd {
+		issue.Labels = append(issue.Labels, Label{Name: l})
 	}
 	return nil
 }
