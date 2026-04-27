@@ -172,6 +172,20 @@
   .loop-row-label { color: var(--text); }
   .loop-row-label b { color: var(--cyan); }
   .loop-master .loop-row-label { color: var(--text); }
+  /* chip code-style con la transición de estados (idea → plan, etc).
+     Color cyan/azul para que destaque del label en --text y se lea como
+     "metadato del flow" sin competir visualmente con la acción. */
+  .loop-transition {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10px;
+    color: var(--cyan);
+    background: rgba(0, 215, 255, 0.08);
+    border: 1px solid rgba(0, 215, 255, 0.25);
+    border-radius: 3px;
+    padding: 1px 5px;
+    margin-left: auto;
+    white-space: nowrap;
+  }
   .loop-check {
     background: transparent;
     border: 1px solid var(--border-muted);
@@ -193,6 +207,16 @@
     border: none;
     border-top: 1px solid var(--elevated);
     margin: 4px 0;
+  }
+  /* mini-header de cada bloque (issue/PR) — alineado a la izquierda, en
+     muted+caps para que se lea como label de sección sin pesar visualmente
+     contra los rows. */
+  .loop-section-header {
+    color: var(--muted);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 2px 0 0 0;
   }
   .loop-foot {
     color: var(--magenta);

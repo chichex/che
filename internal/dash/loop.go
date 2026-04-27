@@ -1,21 +1,28 @@
 // Package dash — auto-loop engine (Step 6).
 //
 // El auto-loop observa el snapshot del Source y dispara automáticamente
-// `che validate`, `che iterate` o `che execute` sobre entidades que
-// estén en estados "intermedios" sin verdict resolutorio — cerrando el
-// ciclo humano → IA sin intervención manual.
+// `che explore`, `che validate`, `che iterate` o `che execute` sobre
+// entidades que estén en estados "intermedios" sin verdict resolutorio —
+// cerrando el ciclo humano → IA sin intervención manual.
 //
-// Reglas (5):
-//   1. Status=plan sin PlanVerdict                 → che validate <IssueNumber>
-//   2. Status=validated + PlanVerdict=changes-req  → che iterate  <IssueNumber>
+// Reglas (7), enumeradas en orden didáctico (issue-side primero, después PR-side):
+//   1. Status=idea (o "")                          → che explore  <IssueNumber>
+//      (idea→plan: arranca el ciclo desde un issue con `ct:plan` aplicado.)
+//   2. Status=plan sin PlanVerdict                 → che validate <IssueNumber>
+//   3. Status=validated + PlanVerdict=changes-req  → che iterate  <IssueNumber>
 //      (post-v0.0.49: validate transiciona plan→validated; el verdict
 //       "changes-requested" queda como label plan-validated:* sobre un
 //       issue en che:validated.)
-//   3. Status=executed sin PRVerdict               → che validate <PRNumber>
-//   4. Status=executed + PRVerdict=changes-req     → che iterate  <PRNumber>
-//   5. Status=validated + PlanVerdict=approve      → che execute  <IssueNumber>
+//   4. Status=validated + PlanVerdict=approve      → che execute  <IssueNumber>
 //      (issue-only; sin PR previo. Cierra el gap post-validate plan:
 //       un plan aprobado automáticamente pasa a ejecución.)
+//   5. Status=plan sin PlanVerdict                 → che execute  <IssueNumber>
+//      (fast-lane "plan→executed" sin pasar por validate. Mutuamente
+//       excluyente con regla 2 a nivel de UI: si ambas están ON, validate
+//       gana — preferimos validar antes de ejecutar cuando hay duda.)
+//   6. Status=executed sin PRVerdict               → che validate <PRNumber>
+//   7. Status=executed + PRVerdict=changes-req     → che iterate  <PRNumber>
+//      (también matchea Status=validated cuando validate-pr ya transicionó.)
 //
 // Stop conditions por entity:
 //   - verdict=approve        → done (feliz), no dispatch.
@@ -37,14 +44,16 @@
 //
 // Agentes por defecto (hoy no configurable — la decisión de hacerlo
 // configurable es un follow-up explícito):
+//   - explore:  1x opus  — `che explore` default de `--agent` es opus.
 //   - validate: 1x opus  — default del subcomando `che validate` (flag
 //     `--validators` default = "opus", 1 validador).
 //   - iterate:  1x opus  — `che iterate` no tiene `--agent`, es opus por
 //     diseño del flow.
 //   - execute:  1x opus  — `che execute` default de `--agent` es opus.
-//     El loop dispatcha execute solo via RuleExecutePlan (Status=validated
-//     + PlanVerdict=approve). Es una señal explícita del humano (validar
-//     con approve equivale a "luz verde") — sin approve no hay dispatch.
+//     El loop dispatcha execute via dos reglas: RuleExecutePlan (validated
+//     + approve = luz verde explícita del validador) o RuleExecuteRaw
+//     (plan sin verdict = fast-lane, opt-in para usuarios que confían en
+//     el plan sin validarlo).
 // El loop invoca los subcomandos sin flags de agent — heredan estos
 // defaults. Mantener esto sincronizado si los defaults cambien en cmd/.
 package dash
@@ -73,6 +82,11 @@ const LoopCap = 10
 type LoopRule string
 
 const (
+	// RuleExploreIdea: entity issue-only en Status="" o "idea" → explore.
+	// Arranca el ciclo desde un issue con `ct:plan` aplicado pero sin
+	// che:* todavía (o con che:idea explícito). Issue-only (KindIssue):
+	// explore no opera sobre PRs ni fused.
+	RuleExploreIdea LoopRule = "explore-idea"
 	// RuleValidatePlan: entity en Status=plan sin PlanVerdict → validate.
 	RuleValidatePlan LoopRule = "validate-plan"
 	// RuleIteratePlan: entity en Status=validated con PlanVerdict=
@@ -87,6 +101,13 @@ const (
 	// (KindIssue) — en fused no aplica, ese lado del flow ya implica PR
 	// abierto y execute no corre sobre PRs existentes.
 	RuleExecutePlan LoopRule = "execute-plan"
+	// RuleExecuteRaw: entity en Status=plan sin PlanVerdict → execute,
+	// sin pasar por validate. Fast-lane "plan→executed" para usuarios que
+	// confían en el plan sin validarlo. Si tanto RuleValidatePlan como
+	// RuleExecuteRaw están ON sobre el mismo plan, validate gana
+	// (preferimos validar antes de ejecutar — el matcher chequea validate
+	// primero dentro del case "plan").
+	RuleExecuteRaw LoopRule = "execute-raw"
 	// RuleValidatePR: entity en Status=executed sin PRVerdict → validate.
 	RuleValidatePR LoopRule = "validate-pr"
 	// RuleIteratePR: entity con PRVerdict=changes-requested → iterate.
@@ -97,17 +118,20 @@ const (
 	RuleIteratePR LoopRule = "iterate-pr"
 )
 
-// allLoopRules es la allowlist + orden canónico de evaluación. El tick
-// recorre las 5 en este orden para cada entity, primera que matchee gana.
-// El orden importa: si una entity tuviera 2 reglas aplicables (no debería
-// pasar — las condiciones son mutuamente exclusivas por status + verdict),
-// la más "progresiva" (validate antes que iterate; execute-plan después
-// de las de plan/status para mantener el flujo natural issue→PR) queda
-// primera dentro de su bloque.
+// allLoopRules es la allowlist + orden canónico de display en el popover.
+// Lectura didáctica del lifecycle: arranca por idea→plan (explore), sigue
+// el bloque issue-side (plan→validated→{plan,executed} via validate/iterate/
+// execute), y cierra con PR-side (executed→validated→executed via
+// validate/iterate-PR). Una entity no matchea más de una regla a la vez
+// porque las condiciones son mutuamente exclusivas por (status, verdict);
+// la única excepción es plan-sin-verdict, donde RuleValidatePlan y
+// RuleExecuteRaw compiten — el matcher prefiere validate (ver nextDispatch).
 var allLoopRules = []LoopRule{
+	RuleExploreIdea,
 	RuleValidatePlan,
 	RuleIteratePlan,
 	RuleExecutePlan,
+	RuleExecuteRaw,
 	RuleValidatePR,
 	RuleIteratePR,
 }
@@ -167,14 +191,23 @@ func (l *loopState) activeRuleCount() int {
 	return n
 }
 
-// snapshotRules devuelve un slice ordenado de {regla, on?} para renderear
-// el popover. No expone el map interno (evitar aliasing).
+// snapshotRules devuelve un slice ordenado de {regla, label, transition,
+// on?} para renderear el popover. No expone el map interno (evitar
+// aliasing). Label es la acción ("validate plan"); Transition es el
+// efecto visible en código-style ("plan → validated") — el template los
+// renderiza juntos para que el humano vea "qué hace cada regla" sin tener
+// que leer el código fuente.
 func (l *loopState) snapshotRules() []loopRuleView {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	out := make([]loopRuleView, 0, len(allLoopRules))
 	for _, r := range allLoopRules {
-		out = append(out, loopRuleView{Name: r, Label: ruleLabel(r), On: l.rules[r]})
+		out = append(out, loopRuleView{
+			Name:       r,
+			Label:      ruleLabel(r),
+			Transition: ruleTransition(r),
+			On:         l.rules[r],
+		})
 	}
 	return out
 }
@@ -258,28 +291,72 @@ func (l *loopState) markGateNotified(id int, flow, reason string) bool {
 	return was
 }
 
-// ruleLabel es el texto humano que se muestra en el popover para una regla.
+// ruleLabel es la acción que dispara la regla — el "qué hace", sin la
+// transición de estados. El popover lo combina con ruleTransition para que
+// se lea "validate plan · plan → validated" y el humano entienda de un
+// vistazo de dónde a dónde transiciona la entity.
 func ruleLabel(r LoopRule) string {
 	switch r {
+	case RuleExploreIdea:
+		return "explore idea"
 	case RuleValidatePlan:
-		return "validate plan (plan sin verdict → validate)"
+		return "validate plan"
 	case RuleIteratePlan:
-		return "iterate plan (validated con changes-requested → iterate)"
+		return "iterate plan"
 	case RuleExecutePlan:
-		return "execute plan (validated + approve → execute)"
+		return "execute plan aprobado"
+	case RuleExecuteRaw:
+		return "execute plan directo"
 	case RuleValidatePR:
-		return "validate PR (executed sin verdict → validate)"
+		return "validate PR"
 	case RuleIteratePR:
-		return "iterate PR (executed con changes-requested → iterate)"
+		return "iterate PR"
 	}
 	return string(r)
 }
 
+// ruleSide clasifica la regla en "issue" o "pr" para agrupar el popover.
+// Mismo criterio que entitySide pero a nivel de regla: las dos PR-rules
+// son las únicas que operan sobre PRNumber. El resto vive sobre el issue
+// (incluyendo execute, que crea el PR pero arranca desde el issue).
+func ruleSide(r LoopRule) string {
+	switch r {
+	case RuleValidatePR, RuleIteratePR:
+		return "pr"
+	default:
+		return "issue"
+	}
+}
+
+// ruleTransition es la transición de estados que dispara la regla, en
+// formato "<from> → <to>". Pensado para renderearse como chip code-style
+// (monospace, color azul) al lado del label en el popover.
+func ruleTransition(r LoopRule) string {
+	switch r {
+	case RuleExploreIdea:
+		return "idea → plan"
+	case RuleValidatePlan:
+		return "plan → validated"
+	case RuleIteratePlan:
+		return "validated:changes-req → plan"
+	case RuleExecutePlan:
+		return "validated:approve → executed"
+	case RuleExecuteRaw:
+		return "plan → executed"
+	case RuleValidatePR:
+		return "executed → validated"
+	case RuleIteratePR:
+		return "validated:changes-req → executed"
+	}
+	return ""
+}
+
 // loopRuleView es el shape que consume el template del popover.
 type loopRuleView struct {
-	Name  LoopRule
-	Label string
-	On    bool
+	Name       LoopRule
+	Label      string
+	Transition string
+	On         bool
 }
 
 // ================== Matcher puro ==================
@@ -316,6 +393,19 @@ func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, t
 	}
 
 	switch e.Status {
+	case "", "idea":
+		// Status="" = entity sin che:* (issue legacy o ct:plan recién
+		// aplicado pero el watcher de labels todavía no transicionó a
+		// che:idea). gateExplore acepta los dos como puntos de entrada
+		// válidos para arrancar el ciclo. Issue-only: KindFused/KindPR
+		// con Status="" son edge-cases raros que no escalan a explore.
+		if e.Kind != KindIssue {
+			return "", 0, "status-not-loopable"
+		}
+		if rules[RuleExploreIdea] {
+			return "explore", e.IssueNumber, "rule:explore-idea"
+		}
+		return "", 0, "no-rule-match"
 	case "plan":
 		// Verdict terminal → stop.
 		if e.PlanVerdict == "approve" {
@@ -324,13 +414,19 @@ func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, t
 		if e.PlanVerdict == "needs-human" {
 			return "", 0, "plan-needs-human"
 		}
-		// Sin verdict → rule1 (validate). Nota: Status=plan +
-		// PlanVerdict=changes-requested ya no existe en la práctica —
-		// validate transiciona plan→validated antes de setear el verdict
-		// (ver project_validation_model.md). El matching de iterate-plan
-		// vive en el case "validated".
+		// Sin verdict: dos reglas compiten — validate (canal normal) y
+		// execute-raw (fast-lane, opt-in). validate gana si ambas están
+		// ON: el orden refleja la preferencia "validar antes de
+		// ejecutar". Status=plan + PlanVerdict=changes-requested ya no
+		// existe en la práctica post-v0.0.49 (validate transiciona
+		// plan→validated antes de setear el verdict — ver
+		// project_validation_model.md); el matching de iterate-plan vive
+		// en el case "validated".
 		if e.PlanVerdict == "" && rules[RuleValidatePlan] {
 			return "validate", e.IssueNumber, "rule:validate-plan"
+		}
+		if e.PlanVerdict == "" && rules[RuleExecuteRaw] {
+			return "execute", e.IssueNumber, "rule:execute-raw"
 		}
 		return "", 0, "no-rule-match"
 	case "validated":
@@ -638,10 +734,17 @@ func (s *Server) isAutoRunning(id int) bool {
 
 // ================== HTTP handlers ==================
 
-// loopPopoverData es el contexto del template del popover.
+// loopPopoverData es el contexto del template del popover. Rules es la
+// lista combinada (orden didáctico de allLoopRules) — se mantiene para el
+// `len .Rules` del header "(N/M reglas activas)" y para tests que iteran
+// el snapshot completo. IssueRules/PRRules son la misma data agrupada por
+// lado del flow, que es como el popover decide secciones visuales: el
+// humano lee "qué pasa en el issue" arriba y "qué pasa en el PR" abajo.
 type loopPopoverData struct {
 	Enabled     bool
 	Rules       []loopRuleView
+	IssueRules  []loopRuleView
+	PRRules     []loopRuleView
 	ActiveRules int
 	ActiveLoops int // len del running map (manual+auto), para el label del pill
 	AutoLoops   int // solo los auto
@@ -652,9 +755,16 @@ type loopPopoverData struct {
 func (s *Server) buildLoopData() loopPopoverData {
 	rules := s.loop.snapshotRules()
 	active := 0
+	issueRules := make([]loopRuleView, 0, len(rules))
+	prRules := make([]loopRuleView, 0, len(rules))
 	for _, r := range rules {
 		if r.On {
 			active++
+		}
+		if ruleSide(r.Name) == "pr" {
+			prRules = append(prRules, r)
+		} else {
+			issueRules = append(issueRules, r)
 		}
 	}
 	s.mu.Lock()
@@ -664,6 +774,8 @@ func (s *Server) buildLoopData() loopPopoverData {
 	return loopPopoverData{
 		Enabled:     s.loop.isEnabled(),
 		Rules:       rules,
+		IssueRules:  issueRules,
+		PRRules:     prRules,
 		ActiveRules: active,
 		ActiveLoops: running,
 		AutoLoops:   auto,
@@ -715,10 +827,10 @@ func (s *Server) writeLoopResponse(w http.ResponseWriter) {
 // pillLabel devuelve el texto que va en el pill del topbar, fuera del
 // popover. Se expone como template func para que el partial "auto-loop-
 // toggle" lo use. El denominador es len(allLoopRules) — si se agregan
-// reglas nuevas, el label se ajusta solo. Ejemplos:
+// reglas nuevas, el label se ajusta solo. Ejemplos (con 7 reglas hoy):
 //   - master OFF                  → "auto-loop OFF"
-//   - master ON, 0 rules          → "auto-loop ON (0/5)"
-//   - master ON, 3 rules, 2 auto  → "auto-loop ON (3/5) · ⟳ 2"
+//   - master ON, 0 rules          → "auto-loop ON (0/7)"
+//   - master ON, 3 rules, 2 auto  → "auto-loop ON (3/7) · ⟳ 2"
 func pillLabel(data loopPopoverData) string {
 	if !data.Enabled {
 		return "auto-loop OFF"

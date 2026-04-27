@@ -163,11 +163,85 @@ func TestNextDispatch_RuleTable(t *testing.T) {
 			wantSubstr: "cap-reached",
 		},
 		{
-			name:       "status no loopable (idea) → no match",
+			// idea es loopable post-RuleExploreIdea (v0.0.76+): si la regla
+			// explore-idea está OFF y otras reglas ON, el matcher devuelve
+			// "no-rule-match" (no "status-not-loopable" — ese reason quedó
+			// para statuses no cubiertos como "planning", "closing", "closed").
+			name:       "idea con explore-idea OFF → no-rule-match",
 			e:          Entity{Kind: KindIssue, IssueNumber: 42, Status: "idea"},
 			rules:      map[LoopRule]bool{RuleValidatePlan: true},
 			wantFlow:   "",
+			wantSubstr: "no-rule-match",
+		},
+		{
+			name:       "rule0: idea + explore-idea ON → explore",
+			e:          Entity{Kind: KindIssue, IssueNumber: 42, Status: "idea"},
+			rules:      map[LoopRule]bool{RuleExploreIdea: true},
+			wantFlow:   "explore",
+			wantRef:    42,
+			wantSubstr: "explore-idea",
+		},
+		{
+			// Status="" = entity sin che:* (issue legacy o ct:plan recién
+			// aplicado pero el watcher de labels no transicionó aún). El
+			// gate y el matcher tratan "" e "idea" igual — ambos arrancan
+			// el ciclo desde cero.
+			name:       "rule0: status vacío + explore-idea ON → explore",
+			e:          Entity{Kind: KindIssue, IssueNumber: 42, Status: ""},
+			rules:      map[LoopRule]bool{RuleExploreIdea: true},
+			wantFlow:   "explore",
+			wantRef:    42,
+			wantSubstr: "explore-idea",
+		},
+		{
+			// explore es issue-first: KindFused/KindPR no escalan a explore
+			// aunque tengan Status vacío (edge raro: PR adopt sin labels en
+			// el issue linkeado). Cae en status-not-loopable.
+			name:       "rule0: fused con status vacío + explore-idea ON → no dispatch",
+			e:          Entity{Kind: KindFused, IssueNumber: 42, PRNumber: 77, Status: ""},
+			rules:      map[LoopRule]bool{RuleExploreIdea: true},
+			wantFlow:   "",
 			wantSubstr: "status-not-loopable",
+		},
+		{
+			// Status no cubierto por ningún case (ej: "planning", "closing",
+			// "closed"). Sigue devolviendo "status-not-loopable" — ese reason
+			// es para estados transient o terminales sin regla aplicable.
+			name:       "status closed (terminal) → status-not-loopable",
+			e:          Entity{Kind: KindFused, IssueNumber: 42, PRNumber: 77, Status: "closed"},
+			rules:      map[LoopRule]bool{RuleValidatePR: true},
+			wantFlow:   "",
+			wantSubstr: "status-not-loopable",
+		},
+		{
+			// Fast-lane: plan sin verdict + execute-raw ON (sin validate-plan)
+			// → execute directo, salteando validate.
+			name:       "rule5: plan sin verdict + execute-raw ON → execute directo",
+			e:          Entity{Kind: KindIssue, IssueNumber: 42, Status: "plan"},
+			rules:      map[LoopRule]bool{RuleExecuteRaw: true},
+			wantFlow:   "execute",
+			wantRef:    42,
+			wantSubstr: "execute-raw",
+		},
+		{
+			// Ambas ON: validate gana (preferimos validar antes de ejecutar
+			// cuando el humano dejó las dos reglas activas).
+			name:       "rule5: plan sin verdict + ambas ON → validate gana",
+			e:          Entity{Kind: KindIssue, IssueNumber: 42, Status: "plan"},
+			rules:      map[LoopRule]bool{RuleValidatePlan: true, RuleExecuteRaw: true},
+			wantFlow:   "validate",
+			wantRef:    42,
+			wantSubstr: "validate-plan",
+		},
+		{
+			// Execute-raw NO matchea sobre plan-validated:approve (ese es
+			// territorio de execute-plan). Mutual exclusion por (status,
+			// verdict) — execute-raw exige verdict vacío.
+			name:       "rule5 OFF: plan + approve no matchea execute-raw (es plan-approved → stop)",
+			e:          Entity{Kind: KindIssue, IssueNumber: 42, Status: "plan", PlanVerdict: "approve"},
+			rules:      map[LoopRule]bool{RuleExecuteRaw: true},
+			wantFlow:   "",
+			wantSubstr: "plan-approved",
 		},
 		{
 			name:       "executed sin PR → no dispatch (defensivo)",
@@ -698,8 +772,8 @@ func TestTopbarPillLabel_AfterToggle(t *testing.T) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	got := string(body)
-	if !strings.Contains(got, "auto-loop ON (2/5)") {
-		t.Errorf("topbar debería decir 'auto-loop ON (2/5)'; got head: %s", got[:min(500, len(got))])
+	if !strings.Contains(got, "auto-loop ON (2/7)") {
+		t.Errorf("topbar debería decir 'auto-loop ON (2/7)'; got head: %s", got[:min(500, len(got))])
 	}
 }
 
@@ -840,11 +914,20 @@ func TestRunTick_AutoChipInDrawer(t *testing.T) {
 }
 
 // Comprobación redundante del orden de allLoopRules (fija el contrato).
-// RuleExecutePlan va entre IteratePlan y ValidatePR: mantiene el bloque
-// "todas las reglas issue-side primero, todas las PR-side después" para
-// que el matcher no tenga sorpresas al leer el orden.
+// El orden refleja la lectura didáctica del lifecycle: explore arranca el
+// ciclo, después issue-side (validate/iterate/execute en sus dos
+// variantes), y al final PR-side (validate/iterate). Cambiar este orden
+// reordena el popover — chequear UX antes de tocar.
 func TestAllLoopRules_OrderStable(t *testing.T) {
-	want := []LoopRule{RuleValidatePlan, RuleIteratePlan, RuleExecutePlan, RuleValidatePR, RuleIteratePR}
+	want := []LoopRule{
+		RuleExploreIdea,
+		RuleValidatePlan,
+		RuleIteratePlan,
+		RuleExecutePlan,
+		RuleExecuteRaw,
+		RuleValidatePR,
+		RuleIteratePR,
+	}
 	if len(allLoopRules) != len(want) {
 		t.Fatalf("allLoopRules len: got %d want %d", len(allLoopRules), len(want))
 	}
@@ -865,9 +948,9 @@ func TestPillLabel(t *testing.T) {
 		want string
 	}{
 		{loopPopoverData{Enabled: false}, "auto-loop OFF"},
-		{loopPopoverData{Enabled: true, ActiveRules: 0}, "auto-loop ON (0/5)"},
-		{loopPopoverData{Enabled: true, ActiveRules: 3}, "auto-loop ON (3/5)"},
-		{loopPopoverData{Enabled: true, ActiveRules: 5}, "auto-loop ON (5/5)"},
+		{loopPopoverData{Enabled: true, ActiveRules: 0}, "auto-loop ON (0/7)"},
+		{loopPopoverData{Enabled: true, ActiveRules: 3}, "auto-loop ON (3/7)"},
+		{loopPopoverData{Enabled: true, ActiveRules: 7}, "auto-loop ON (7/7)"},
 	}
 	for _, tc := range cases {
 		got := pillLabel(tc.data)
@@ -904,6 +987,96 @@ func TestTick_ExecutePlanDispatches(t *testing.T) {
 	}
 }
 
+// TestTick_ExploreIdeaDispatches: issue en che:idea + rule ON → el tick
+// dispatcha explore sobre IssueNumber. Cubre el happy path de la regla
+// que arranca el ciclo desde el origen (idea → plan).
+func TestTick_ExploreIdeaDispatches(t *testing.T) {
+	ents := []Entity{
+		{Kind: KindIssue, IssueNumber: 7, Status: "idea", IssueTitle: "fresh idea"},
+	}
+	s, fr := newLoopServer(t, ents)
+	s.loop.enabled = true
+	s.loop.rules[RuleExploreIdea] = true
+
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick: got %d want 1", n)
+	}
+	if fr.count() != 1 {
+		t.Errorf("runner calls: got %d want 1", fr.count())
+	}
+	got := fr.last()
+	if got.Flow != "explore" {
+		t.Errorf("flow: got %q want 'explore'", got.Flow)
+	}
+	if got.TargetRef != 7 || got.EntityKey != 7 {
+		t.Errorf("ref mapping: got target=%d key=%d want target=7 key=7", got.TargetRef, got.EntityKey)
+	}
+}
+
+// TestTick_ExploreIdeaSkipsFused: un fused con Status vacío/idea no es
+// elegible para explore (issue-first). gateExplore lo bloquea por Kind.
+func TestTick_ExploreIdeaSkipsFused(t *testing.T) {
+	ents := []Entity{
+		{Kind: KindFused, IssueNumber: 7, PRNumber: 11, Status: "idea"},
+	}
+	s, fr := newLoopServer(t, ents)
+	s.loop.enabled = true
+	s.loop.rules[RuleExploreIdea] = true
+
+	if n := s.runTick(); n != 0 {
+		t.Errorf("tick sobre fused: got %d want 0 (explore es issue-first)", n)
+	}
+	if fr.count() != 0 {
+		t.Errorf("runner NO debería ser llamado; got %d", fr.count())
+	}
+}
+
+// TestTick_ExecuteRawDispatches: issue en che:plan sin verdict + rule ON
+// → execute directo sobre IssueNumber, salteando validate (fast-lane).
+func TestTick_ExecuteRawDispatches(t *testing.T) {
+	ents := []Entity{
+		{Kind: KindIssue, IssueNumber: 99, Status: "plan", IssueTitle: "trust the plan"},
+	}
+	s, fr := newLoopServer(t, ents)
+	s.loop.enabled = true
+	s.loop.rules[RuleExecuteRaw] = true
+
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick: got %d want 1", n)
+	}
+	if fr.count() != 1 {
+		t.Errorf("runner calls: got %d want 1", fr.count())
+	}
+	got := fr.last()
+	if got.Flow != "execute" {
+		t.Errorf("flow: got %q want 'execute'", got.Flow)
+	}
+	if got.TargetRef != 99 {
+		t.Errorf("target: got %d want 99", got.TargetRef)
+	}
+}
+
+// TestTick_ValidatePlanWinsOverExecuteRaw: con ambas reglas ON sobre el
+// mismo plan-sin-verdict, validate gana. Es el contrato del orden dentro
+// del case "plan" en nextDispatch — preferimos validar antes de ejecutar
+// cuando el humano dejó las dos prendidas.
+func TestTick_ValidatePlanWinsOverExecuteRaw(t *testing.T) {
+	ents := []Entity{
+		{Kind: KindIssue, IssueNumber: 99, Status: "plan", IssueTitle: "plan a refinar"},
+	}
+	s, fr := newLoopServer(t, ents)
+	s.loop.enabled = true
+	s.loop.rules[RuleValidatePlan] = true
+	s.loop.rules[RuleExecuteRaw] = true
+
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick: got %d want 1", n)
+	}
+	if got := fr.last().Flow; got != "validate" {
+		t.Errorf("flow: got %q want 'validate' (validate gana cuando ambas ON)", got)
+	}
+}
+
 // TestTick_ExecutePlanSkipsFused: un fused en validated+approve no es
 // elegible (execute rechaza PRs; el loop tampoco debe dispatchar).
 func TestTick_ExecutePlanSkipsFused(t *testing.T) {
@@ -922,14 +1095,34 @@ func TestTick_ExecutePlanSkipsFused(t *testing.T) {
 	}
 }
 
-// TestRuleLabel_ExecutePlan fija el texto del popover para la regla nueva.
-func TestRuleLabel_ExecutePlan(t *testing.T) {
-	got := ruleLabel(RuleExecutePlan)
-	if !strings.Contains(got, "execute plan") {
-		t.Errorf("ruleLabel(RuleExecutePlan): got %q; esperaba que contenga 'execute plan'", got)
+// TestRuleLabelAndTransition fija el contrato del split label/transition
+// para todas las reglas. Label = acción ("validate plan"), Transition =
+// efecto ("plan → validated") — el popover los renderiza juntos.
+func TestRuleLabelAndTransition(t *testing.T) {
+	cases := []struct {
+		rule           LoopRule
+		wantLabelSub   string // substring que debe aparecer en Label
+		wantTransition string // exacto
+	}{
+		{RuleExploreIdea, "explore idea", "idea → plan"},
+		{RuleValidatePlan, "validate plan", "plan → validated"},
+		{RuleIteratePlan, "iterate plan", "validated:changes-req → plan"},
+		{RuleExecutePlan, "execute plan aprobado", "validated:approve → executed"},
+		{RuleExecuteRaw, "execute plan directo", "plan → executed"},
+		{RuleValidatePR, "validate PR", "executed → validated"},
+		{RuleIteratePR, "iterate PR", "validated:changes-req → executed"},
 	}
-	if !strings.Contains(got, "approve") {
-		t.Errorf("ruleLabel(RuleExecutePlan): debería mencionar el trigger 'approve'; got %q", got)
+	for _, tc := range cases {
+		t.Run(string(tc.rule), func(t *testing.T) {
+			gotLabel := ruleLabel(tc.rule)
+			if !strings.Contains(gotLabel, tc.wantLabelSub) {
+				t.Errorf("ruleLabel(%q): got %q; esperaba que contenga %q", tc.rule, gotLabel, tc.wantLabelSub)
+			}
+			gotTrans := ruleTransition(tc.rule)
+			if gotTrans != tc.wantTransition {
+				t.Errorf("ruleTransition(%q): got %q want %q", tc.rule, gotTrans, tc.wantTransition)
+			}
+		})
 	}
 }
 
@@ -1022,6 +1215,59 @@ func TestEntitySide(t *testing.T) {
 	}
 	if got := entitySide(Entity{Kind: KindFused}); got != "pr" {
 		t.Errorf("KindFused: got %q want 'pr'", got)
+	}
+}
+
+// TestRuleSide fija qué reglas viven en cada bloque del popover.
+// El criterio es "qué entidad recibe el dispatch del subcomando":
+// validate-pr/iterate-pr operan sobre PRNumber; el resto (incluyendo
+// execute, que arranca desde el issue aunque cree un PR) operan sobre
+// IssueNumber. Si esto cambia, la sección visual del popover y el slot
+// de concurrencia deben moverse en sincronía.
+func TestRuleSide(t *testing.T) {
+	cases := []struct {
+		rule LoopRule
+		want string
+	}{
+		{RuleExploreIdea, "issue"},
+		{RuleValidatePlan, "issue"},
+		{RuleIteratePlan, "issue"},
+		{RuleExecutePlan, "issue"},
+		{RuleExecuteRaw, "issue"},
+		{RuleValidatePR, "pr"},
+		{RuleIteratePR, "pr"},
+	}
+	for _, tc := range cases {
+		if got := ruleSide(tc.rule); got != tc.want {
+			t.Errorf("ruleSide(%q): got %q want %q", tc.rule, got, tc.want)
+		}
+	}
+}
+
+// TestBuildLoopData_GroupsRules: el popover divide las reglas en dos
+// listas (issue/PR) que el template renderiza como secciones separadas.
+// El bug que evitamos: si alguien suma una regla nueva sin pensar en el
+// side, va al bloque "issue" por default — ese ese el comportamiento que
+// fija el test.
+func TestBuildLoopData_GroupsRules(t *testing.T) {
+	s := NewServer(MockSource{}, "che-cli", 15)
+	data := s.buildLoopData()
+	if len(data.IssueRules)+len(data.PRRules) != len(data.Rules) {
+		t.Fatalf("issue+pr (%d+%d) != total (%d)",
+			len(data.IssueRules), len(data.PRRules), len(data.Rules))
+	}
+	// PR-side: solo validate-pr y iterate-pr.
+	if len(data.PRRules) != 2 {
+		t.Errorf("PRRules: got %d want 2", len(data.PRRules))
+	}
+	for _, r := range data.PRRules {
+		if r.Name != RuleValidatePR && r.Name != RuleIteratePR {
+			t.Errorf("PRRules incluye %q — debería ser solo validate-pr/iterate-pr", r.Name)
+		}
+	}
+	// Issue-side: las 5 restantes.
+	if len(data.IssueRules) != 5 {
+		t.Errorf("IssueRules: got %d want 5", len(data.IssueRules))
 	}
 }
 

@@ -53,17 +53,35 @@
       <span class="loop-row-label"><b>master</b> ({{.ActiveRules}}/{{len .Rules}} reglas activas)</span>
     </div>
     <hr class="loop-sep"/>
-    {{range .Rules}}
+    <div class="loop-section-header">issue</div>
+    {{range .IssueRules}}
       <div class="loop-row">
         <button type="button"
                 class="loop-check{{if .On}} on{{end}}"
                 hx-post="/loop/rule/{{.Name}}"
                 hx-target="#loop-popover"
                 hx-swap="innerHTML"
-                title="{{.Label}}">
+                title="{{.Label}} — {{.Transition}}">
           {{if .On}}☑{{else}}☐{{end}}
         </button>
         <span class="loop-row-label">{{.Label}}</span>
+        {{if .Transition}}<code class="loop-transition">{{.Transition}}</code>{{end}}
+      </div>
+    {{end}}
+    <hr class="loop-sep"/>
+    <div class="loop-section-header">PR</div>
+    {{range .PRRules}}
+      <div class="loop-row">
+        <button type="button"
+                class="loop-check{{if .On}} on{{end}}"
+                hx-post="/loop/rule/{{.Name}}"
+                hx-target="#loop-popover"
+                hx-swap="innerHTML"
+                title="{{.Label}} — {{.Transition}}">
+          {{if .On}}☑{{else}}☐{{end}}
+        </button>
+        <span class="loop-row-label">{{.Label}}</span>
+        {{if .Transition}}<code class="loop-transition">{{.Transition}}</code>{{end}}
       </div>
     {{end}}
     {{if gt .AutoLoops 0}}
