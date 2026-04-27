@@ -125,9 +125,19 @@ func TestComputeGates(t *testing.T) {
 			wantAvail: map[string]bool{flowValidate: true},
 		},
 		{
-			name:      "fused adopt — validate habilitado (FIX blocker #4)",
-			entity:    Entity{Kind: KindFused, Status: "adopt", PRNumber: 60, IssueNumber: 59},
-			wantAvail: map[string]bool{flowValidate: true, flowClose: true},
+			name:   "fused adopt — solo validate (set fijo de adopt)",
+			entity: Entity{Kind: KindFused, Status: "adopt", PRNumber: 60, IssueNumber: 59},
+			wantAvail: map[string]bool{
+				flowValidate: true,
+				flowExplore:  false,
+				flowExecute:  false,
+				flowIterate:  false,
+				flowClose:    false,
+			},
+			wantReasonContains: map[string]string{
+				flowClose:   "no aplica desde adopt",
+				flowIterate: "no aplica desde adopt",
+			},
 		},
 		// ====================== iterate ======================
 		{
@@ -253,19 +263,35 @@ func TestComputeGates(t *testing.T) {
 		},
 		// ====================== KindPR (adopt) ======================
 		{
-			name:   "PR adopt — solo validate y close",
+			name:   "PR adopt — solo validate (set fijo de adopt sin close)",
 			entity: Entity{Kind: KindPR, Status: "adopt", PRNumber: 99},
 			wantAvail: map[string]bool{
 				flowValidate: true,
-				flowClose:    true,
 				flowExplore:  false,
 				flowExecute:  false,
 				flowIterate:  false,
+				flowClose:    false,
 			},
 			wantReasonContains: map[string]string{
 				flowExplore: "PR",
 				flowExecute: "PR",
-				flowIterate: "adopt",
+				flowIterate: "no aplica desde adopt",
+				flowClose:   "no aplica desde adopt",
+			},
+		},
+		{
+			name:   "issue adopt — set explore/execute/validate habilitado (puerta de entrada)",
+			entity: Entity{Kind: KindIssue, Status: "adopt", IssueNumber: 700},
+			wantAvail: map[string]bool{
+				flowExplore:  true,
+				flowExecute:  true,
+				flowValidate: true,
+				flowIterate:  false,
+				flowClose:    false,
+			},
+			wantReasonContains: map[string]string{
+				flowIterate: "no aplica desde adopt",
+				flowClose:   "no aplica desde adopt",
 			},
 		},
 	}

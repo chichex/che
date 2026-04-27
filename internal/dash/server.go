@@ -1180,22 +1180,16 @@ func (s *Server) buildMux() *http.ServeMux {
 			http.Error(w, "entity not found", http.StatusNotFound)
 			return
 		}
-		// Defensa server-side: sobre entidades en "adopt" solo permitimos
-		// validate y close. El UI ya oculta los otros botones, pero un
-		// cliente que manipule el POST podría intentar dispararlos; acá
-		// cortamos con 400. iterate/execute/explore sobre un PR/issue sin
-		// estado che:* son no-ops en el mejor caso y arman estado raro en
-		// el peor.
-		if entity.Status == "adopt" && flow != "validate" && flow != "close" {
-			http.Error(w, "flow not allowed in adopt column (only validate/close)", http.StatusBadRequest)
-			return
-		}
 		// Doble barrera: el botón ya viene disabled cuando el gate falla
 		// (template lee .Gates), pero un cliente que haga el POST por
 		// fuera del DOM (curl manual, JS modificado, htmx con cache) debe
 		// recibir el mismo "no" con el motivo concreto. 409 Conflict en
 		// vez de 400 porque la entity existe y es válida — solo el flow
 		// no aplica en su estado actual.
+		//
+		// Para entities en columna "adopt" el gate ya restringe al set fijo
+		// por kind (ver adoptGates en preflight.go) — cualquier flow fuera
+		// del set cae acá con Reason="no aplica desde adopt".
 		if g, ok := entity.Gates[flow]; ok && !g.Available {
 			reason := g.Reason
 			if reason == "" {

@@ -495,34 +495,33 @@ func combineEntities(issues []ghIssue, prs []ghPR) []Entity {
 	// queda determinado por groupByColumn (que preserva orden de aparición).
 	for _, p := range prs {
 		if len(p.ClosingIssuesReferences) == 0 {
-			// Adopt mode: PR huérfano (sin close-keyword). Lo emitimos como
-			// Kind=KindPR, Status="adopt" para que aparezca en la columna
-			// "adopt" (visible solo con el toggle opt-in). El humano puede
-			// correrle validate/close desde ahí.
+			// PR huérfano (sin close-keyword). Post-stateref v0.0.61 el PR
+			// puede tener che:* directo (validate/iterate/close PR-mode caen
+			// al PR cuando no hay issue con che:*). Si applyLabels detecta
+			// uno, respetamos ese estado: el dash debe mostrar el PR en su
+			// columna real, no en adopt.
 			//
-			// Filtro: solo PRs OPEN. Los closed/merged sin close-keyword no
-			// son adoptables — no hay nada que validar ni cerrar, ya están
+			// Si después de applyLabels el Status sigue vacío → adopt
+			// genuino (PR sin che:* en ningún lado). Para esos solo
+			// emitimos los OPEN: closed/merged orphans sin che:* no son
+			// adoptables — no hay nada que validar ni cerrar, ya están
 			// resueltos. Caían acá porque fetchClosedPRs los traía para
-			// fusionar con issues closed (combineEntities no distingue
-			// open/closed); pero un orphan closed no aporta nada al board.
-			if p.State != "OPEN" {
-				continue
-			}
+			// fusionar con issues closed; los descartamos silenciosamente.
 			e := Entity{
 				Kind:      KindPR,
 				PRNumber:  p.Number,
 				PRTitle:   p.Title,
 				Branch:    p.HeadRefName,
 				SHA:       shortSHA(p.HeadRefOid),
-				Status:    "adopt",
 				CreatedAt: p.CreatedAt,
 			}
 			applyLabels(&e, p.Labels)
-			// applyLabels puede haber seteado Status desde algún label che:*
-			// del PR (raro, pero defensa) — para adopt lo pisamos de nuevo.
-			// El criterio es "no tiene issue che trackeado", no "qué labels
-			// tiene el PR".
-			e.Status = "adopt"
+			if e.Status == "" {
+				if p.State != "OPEN" {
+					continue
+				}
+				e.Status = "adopt"
+			}
 			e.ChecksOK, e.ChecksPending, e.ChecksFail = countChecks(p.StatusCheckRollup)
 			out = append(out, e)
 			continue

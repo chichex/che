@@ -1643,11 +1643,18 @@ func TestAdoptHandler_PropagatesQueryParam(t *testing.T) {
 	}
 }
 
-// TestAction_AdoptRejectsNonValidateClose: defensa server-side — un POST a
-// un flow distinto de validate/close sobre una entity adopt devuelve 400
-// sin llamar al runner. El UI oculta los botones, pero un cliente
-// manipulado podría intentarlo.
-func TestAction_AdoptRejectsNonValidateClose(t *testing.T) {
+// TestAction_AdoptRejectsOutOfSetFlows: sobre una entity adopt, los flows
+// fuera del set fijo por kind se rechazan con 409 (el gate los marca
+// Available=false). El UI oculta los botones, pero un cliente manipulado
+// podría intentarlo.
+//
+// Sets (ver adoptGates en preflight.go):
+//   - KindPR (adopt):    validate
+//   - KindFused (adopt): validate
+//
+// Cualquier otro flow para esos kinds → 409 con razón "no aplica desde
+// adopt — usá explore/execute/validate ...".
+func TestAction_AdoptRejectsOutOfSetFlows(t *testing.T) {
 	src := &fixedSource{snap: Snapshot{
 		LastOK: time.Now(),
 		NWO:    "demo/che",
@@ -1662,15 +1669,18 @@ func TestAction_AdoptRejectsNonValidateClose(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	for _, flow := range []string{"iterate", "execute", "explore"} {
+	// close ahora también está fuera del set para adopt (post abril 2026):
+	// la decisión humana de cerrar/mergear vive en el state machine real,
+	// no en la puerta de entrada.
+	for _, flow := range []string{"iterate", "execute", "explore", "close"} {
 		// Adopt KindPR: data-entity=PRNumber.
 		resp, err := http.Post(ts.URL+"/action/"+flow+"/301", "", nil)
 		if err != nil {
 			t.Fatalf("POST adopt+%s: %v", flow, err)
 		}
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusBadRequest {
-			t.Errorf("adopt+%s: got %d want 400", flow, resp.StatusCode)
+		if resp.StatusCode != http.StatusConflict {
+			t.Errorf("adopt+%s: got %d want 409", flow, resp.StatusCode)
 		}
 		// Adopt KindFused: data-entity=IssueNumber.
 		resp2, err := http.Post(ts.URL+"/action/"+flow+"/500", "", nil)
@@ -1678,18 +1688,19 @@ func TestAction_AdoptRejectsNonValidateClose(t *testing.T) {
 			t.Fatalf("POST adopt-fused+%s: %v", flow, err)
 		}
 		resp2.Body.Close()
-		if resp2.StatusCode != http.StatusBadRequest {
-			t.Errorf("adopt-fused+%s: got %d want 400", flow, resp2.StatusCode)
+		if resp2.StatusCode != http.StatusConflict {
+			t.Errorf("adopt-fused+%s: got %d want 409", flow, resp2.StatusCode)
 		}
 	}
 	if fr.count() != 0 {
-		t.Errorf("runner should not be called for disallowed flows; got %d calls", fr.count())
+		t.Errorf("runner should not be called for out-of-set flows; got %d calls", fr.count())
 	}
 }
 
-// TestAction_AdoptAllowsValidateAndClose: validate y close SÍ pasan sobre
-// adopt. Para KindPR, TargetRef=PRNumber (resolveTargetRef).
-func TestAction_AdoptAllowsValidateAndClose(t *testing.T) {
+// TestAction_AdoptAllowsValidate: validate SÍ pasa sobre adopt para KindPR
+// y KindFused (set fijo de adopt). Para KindPR, TargetRef=PRNumber
+// (resolveTargetRef).
+func TestAction_AdoptAllowsValidate(t *testing.T) {
 	src := &fixedSource{snap: Snapshot{
 		LastOK: time.Now(),
 		NWO:    "demo/che",
@@ -1720,9 +1731,10 @@ func TestAction_AdoptAllowsValidateAndClose(t *testing.T) {
 	}
 }
 
-// TestDrawerAdopt_RendersOnlyValidateAndClose: el drawer de una entidad
-// adopt no debe ofrecer iterate/execute/explore, solo validate y close.
-func TestDrawerAdopt_RendersOnlyValidateAndClose(t *testing.T) {
+// TestDrawerAdopt_RendersOnlySetButtons: el drawer de una entidad adopt
+// solo debe ofrecer los botones del set fijo por kind. Para KindPR =
+// validate. iterate/execute/explore/close NO aparecen.
+func TestDrawerAdopt_RendersOnlySetButtons(t *testing.T) {
 	src := &fixedSource{snap: Snapshot{
 		LastOK: time.Now(),
 		NWO:    "demo/che",
@@ -1745,17 +1757,15 @@ func TestDrawerAdopt_RendersOnlyValidateAndClose(t *testing.T) {
 	if !strings.Contains(got, `hx-post="/action/validate/301"`) {
 		t.Errorf("adopt drawer: missing validate button")
 	}
-	if !strings.Contains(got, `hx-post="/action/close/301"`) {
-		t.Errorf("adopt drawer: missing close button")
-	}
-	// iterate/execute/explore no deben aparecer.
+	// iterate/execute/explore/close no deben aparecer en adopt — fuera del set.
 	for _, forbidden := range []string{
 		`hx-post="/action/iterate/301"`,
 		`hx-post="/action/execute/301"`,
 		`hx-post="/action/explore/301"`,
+		`hx-post="/action/close/301"`,
 	} {
 		if strings.Contains(got, forbidden) {
-			t.Errorf("adopt drawer: encontré %s (no debería)", forbidden)
+			t.Errorf("adopt drawer: encontré %s (no debería — adopt es puerta de entrada, close vive en el state machine)", forbidden)
 		}
 	}
 	// Ref al PR sí, al issue no.
@@ -1764,6 +1774,44 @@ func TestDrawerAdopt_RendersOnlyValidateAndClose(t *testing.T) {
 	}
 	if strings.Contains(got, "#0") {
 		t.Errorf("adopt drawer: no debería renderear '#0' como issue fantasma")
+	}
+}
+
+// TestDrawerAdopt_FusedRendersOnlyValidate: drawer de KindFused adopt =
+// solo botón validate (set fijo de adopt para fused). iterate/execute/
+// explore/close NO aparecen.
+func TestDrawerAdopt_FusedRendersOnlyValidate(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		NWO:    "demo/che",
+		Entities: []Entity{
+			{Kind: KindFused, IssueNumber: 500, PRNumber: 302, IssueTitle: "issue", PRTitle: "fused PR", Status: "adopt"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/drawer/500")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	got := string(body)
+
+	if !strings.Contains(got, `hx-post="/action/validate/500"`) {
+		t.Errorf("fused adopt drawer: missing validate button")
+	}
+	for _, forbidden := range []string{
+		`hx-post="/action/iterate/500"`,
+		`hx-post="/action/execute/500"`,
+		`hx-post="/action/explore/500"`,
+		`hx-post="/action/close/500"`,
+	} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("fused adopt drawer: encontré %s (fuera del set)", forbidden)
+		}
 	}
 }
 

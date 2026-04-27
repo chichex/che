@@ -254,6 +254,93 @@ func TestCombineEntities_FiltersClosedAdoptPRs(t *testing.T) {
 	}
 }
 
+// TestCombineEntities_PRWithCheLabelDirect cubre el contrato post-stateref
+// v0.0.61: si un PR tiene un label che:* directo (sin issue linkeado, o con
+// issue sin che:*), `applyLabels` setea Status desde ese label y NO se pisa
+// con "adopt". Antes el override forzaba Status="adopt" aunque el PR ya
+// tuviera che:validated/che:executed/etc. directo.
+//
+// Casos cubiertos:
+//   - PR sin closingIssuesReferences + che:validated directo en el PR →
+//     Status="validated", NO "adopt".
+//   - PR sin closingIssuesReferences sin ningún che:* en ningún lado →
+//     Status="adopt" (el caso real de adopción).
+//   - PR con closingIssuesReferences pero issue sin che:* y PR con
+//     che:executed directo → Status="executed", NO "adopt".
+//   - PR con closingIssuesReferences, issue sin che:*, PR sin che:* →
+//     Status="adopt" (fallback honesto al adopt).
+func TestCombineEntities_PRWithCheLabelDirect(t *testing.T) {
+	prs := []ghPR{
+		// PR sin issue, con che:validated directo → respeta el estado.
+		{Number: 200, Title: "PR validated directo", State: "OPEN",
+			Labels: []ghLabel{{Name: "che:validated"}}},
+		// PR sin issue, sin che:* → adopt legítimo.
+		{Number: 201, Title: "PR adopt puro", State: "OPEN"},
+		// PR con issue sin che:* + che:executed directo en el PR.
+		{Number: 202, Title: "PR fused executed directo", State: "OPEN",
+			Labels:                  []ghLabel{{Name: "che:executed"}},
+			ClosingIssuesReferences: []ghCloseRef{{Number: 300}}},
+		// PR con issue sin che:* + sin che:* en el PR → adopt fused.
+		{Number: 203, Title: "PR fused adopt", State: "OPEN",
+			ClosingIssuesReferences: []ghCloseRef{{Number: 301}}},
+	}
+	issues := []ghIssue{
+		{Number: 300, Title: "issue sin che:*", Labels: []ghLabel{{Name: "ct:plan"}}},
+		{Number: 301, Title: "issue sin che:*", Labels: []ghLabel{{Name: "ct:plan"}}},
+	}
+	entities := combineEntities(issues, prs)
+
+	got := map[int]Entity{}
+	for _, e := range entities {
+		got[e.PRNumber] = e
+	}
+
+	// Caso 1: PR sin issue + che:validated directo → Status="validated".
+	pr200, ok := got[200]
+	if !ok {
+		t.Fatalf("PR #200 (che:validated directo) debería aparecer en entities")
+	}
+	if pr200.Status != "validated" {
+		t.Errorf("PR #200 Status: got %q want %q (post-stateref el che:* directo del PR manda)", pr200.Status, "validated")
+	}
+	if pr200.Kind != KindPR {
+		t.Errorf("PR #200 Kind: got %v want KindPR", pr200.Kind)
+	}
+
+	// Caso 2: PR sin issue, sin che:* → Status="adopt" (legítimo).
+	pr201, ok := got[201]
+	if !ok {
+		t.Fatalf("PR #201 (sin che:*) debería aparecer en entities")
+	}
+	if pr201.Status != "adopt" {
+		t.Errorf("PR #201 Status: got %q want %q (sin che:* en ningún lado → adopt)", pr201.Status, "adopt")
+	}
+
+	// Caso 3: fused (issue sin che:*) + che:executed directo en el PR.
+	pr202, ok := got[202]
+	if !ok {
+		t.Fatalf("PR #202 (fused executed directo) debería aparecer en entities")
+	}
+	if pr202.Status != "executed" {
+		t.Errorf("PR #202 Status: got %q want %q (issue sin che:* pero PR con che:executed)", pr202.Status, "executed")
+	}
+	if pr202.Kind != KindFused {
+		t.Errorf("PR #202 Kind: got %v want KindFused (hay issue linkeado)", pr202.Kind)
+	}
+
+	// Caso 4: fused sin che:* en ningún lado → adopt.
+	pr203, ok := got[203]
+	if !ok {
+		t.Fatalf("PR #203 (fused adopt) debería aparecer en entities")
+	}
+	if pr203.Status != "adopt" {
+		t.Errorf("PR #203 Status: got %q want %q (issue sin che:* y PR sin che:*)", pr203.Status, "adopt")
+	}
+	if pr203.Kind != KindFused {
+		t.Errorf("PR #203 Kind: got %v want KindFused", pr203.Kind)
+	}
+}
+
 func TestCombineEntities_PRVerdictFromLabels(t *testing.T) {
 	issues, err := parseIssues(readFixture(t, "issues.json"))
 	if err != nil {

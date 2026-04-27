@@ -74,13 +74,90 @@ var allFlows = []string{flowExplore, flowValidate, flowIterate, flowExecute, flo
 // re-explore desde che:plan, ver explore.go:665-677), el Reason sugiere la
 // alternativa manual (editar body, resetear labels) en vez de loopear al
 // usuario.
+//
+// Caso especial "adopt" = puerta de entrada al state machine. Una entity en
+// Status="adopt" no tiene labels che:* todavía: el flow real no va a poder
+// gatear nada estructural (no hay verdict, no hay che:plan, no hay nada).
+// Cualquier gate basado en "este flow espera che:X" daría falso negativo —
+// el humano viene a usar adopt JUSTO PARA aplicar che:* por primera vez.
+// Por eso devolvemos un set fijo por kind con todos los flows del set
+// habilitados sin chequeos. El resto queda Available=false con razón
+// "no aplica en adopt — usá <set>".
 func computeGates(e Entity) FlowGates {
+	if e.Column() == "adopt" {
+		return adoptGates(e)
+	}
 	return FlowGates{
 		flowExplore:  gateExplore(e),
 		flowValidate: gateValidate(e),
 		flowIterate:  gateIterate(e),
 		flowExecute:  gateExecute(e),
 		flowClose:    gateClose(e),
+	}
+}
+
+// adoptGates devuelve el set fijo por kind para entities en columna "adopt".
+// Reflejan la decisión de UX (acordada con el usuario abril 2026): adopt es
+// la puerta de entrada al state machine, los flows del set arrancan el
+// pipeline. Todos enabled sin gates — los gates reales corren dentro del
+// flow cuando aplica (validate vía stateref, etc.). El resto deshabilitado.
+//
+// Sets:
+//   - KindIssue: explore + execute + validate (el "plan" del usuario es
+//     explore, ver judgment-call en commit message). KindIssue en adopt es
+//     un edge-case actual (combineEntities skippea issues sin che:*) pero
+//     definimos el set por defensa / uso futuro.
+//   - KindFused: validate (el path canónico de adopt para PRs con issue
+//     untracked — el flow valida vía stateref con fallback al PR).
+//   - KindPR: validate (PR huérfano sin issue — idéntico al fused-adopt
+//     desde el punto de vista del flow).
+//
+// iterate, close, idea NO entran al set: iterate necesita verdict previo
+// (no aplica desde cero), close necesita PR mergeable (decisión humana
+// post-validate), idea no es flow.
+func adoptGates(e Entity) FlowGates {
+	if e.Locked {
+		return FlowGates{
+			flowExplore:  {false, lockedReason(e)},
+			flowValidate: {false, lockedReason(e)},
+			flowIterate:  {false, lockedReason(e)},
+			flowExecute:  {false, lockedReason(e)},
+			flowClose:    {false, lockedReason(e)},
+		}
+	}
+	const notInAdopt = "no aplica desde adopt — usá explore/execute/validate para entrar al state machine"
+	switch e.Kind {
+	case KindIssue:
+		return FlowGates{
+			flowExplore:  {true, ""},
+			flowExecute:  {true, ""},
+			flowValidate: {true, ""},
+			flowIterate:  {false, notInAdopt},
+			flowClose:    {false, notInAdopt},
+		}
+	case KindFused:
+		return FlowGates{
+			flowValidate: {true, ""},
+			flowExplore:  {false, notInAdopt},
+			flowExecute:  {false, notInAdopt},
+			flowIterate:  {false, notInAdopt},
+			flowClose:    {false, notInAdopt},
+		}
+	case KindPR:
+		return FlowGates{
+			flowValidate: {true, ""},
+			flowExplore:  {false, "explore solo aplica a issues — este card es un PR sin issue linkeado"},
+			flowExecute:  {false, "execute solo aplica a issues — este card es un PR"},
+			flowIterate:  {false, notInAdopt},
+			flowClose:    {false, notInAdopt},
+		}
+	}
+	return FlowGates{
+		flowExplore:  {false, "kind desconocido"},
+		flowValidate: {false, "kind desconocido"},
+		flowIterate:  {false, "kind desconocido"},
+		flowExecute:  {false, "kind desconocido"},
+		flowClose:    {false, "kind desconocido"},
 	}
 }
 

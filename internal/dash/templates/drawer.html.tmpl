@@ -47,33 +47,26 @@
     </div>
 
     <div class="drawer-actions">
-      {{/* Solo validate y close: los dos flows que pueden operar sobre un
-           PR untracked. validate/close resuelven via stateref fallback al
-           PR cuando el issue no tiene che:* (ver internal/flow/stateref). */}}
+      {{/* Adopt = puerta de entrada al state machine. Set fijo por kind:
+           KindPR adopt → validate. validate resuelve via stateref con
+           fallback al PR cuando no hay issue con che:* (ver
+           internal/flow/stateref). iterate/close/execute/explore NO entran:
+           viven en las columnas del state machine post-validate. */}}
       {{$bv := flowBtnState "validate" .RunningFlow .Gates (printf "validate !%d" .PRNumber)}}
       <button class="btn warn"
               hx-post="/action/validate/{{$key}}"
               hx-target="#modal-slot"
               hx-swap="innerHTML"
               {{if $bv.Disabled}}disabled{{end}} title="{{$bv.Title}}">validate</button>
-      {{$bc := flowBtnState "close" .RunningFlow .Gates (printf "close !%d (mergea el PR)" .PRNumber)}}
-      <button class="btn danger"
-              hx-post="/action/close/{{$key}}"
-              hx-target="#modal-slot"
-              hx-swap="innerHTML"
-              {{if $bc.Disabled}}disabled{{end}} title="{{$bc.Title}}">close</button>
       <a class="btn ghost" style="margin-left:auto"
          href="https://github.com/{{.NWO}}/pull/{{.PRNumber}}"
          target="_blank" rel="noopener">ver en GH</a>
     </div>
-    {{/* Reasons inline: cuando alguna acción está bloqueada por gate (no por
-         RunningFlow), mostramos el motivo bajo la fila de botones. El humano
-         ve EXACTAMENTE por qué no puede ejecutar sin tener que hover sobre
-         cada botón. Si no hay bloqueos, el bloque entero se omite. */}}
-    {{if or $bv.BlockedReason $bc.BlockedReason}}
+    {{/* Reasons inline: cuando validate está bloqueado por gate (no por
+         RunningFlow), mostramos el motivo bajo la fila de botones. */}}
+    {{if $bv.BlockedReason}}
     <div class="drawer-blocked-reasons">
-      {{if $bv.BlockedReason}}<div class="reason"><span class="flow">validate</span> ⛔ {{$bv.BlockedReason}}</div>{{end}}
-      {{if $bc.BlockedReason}}<div class="reason"><span class="flow">close</span> ⛔ {{$bc.BlockedReason}}</div>{{end}}
+      <div class="reason"><span class="flow">validate</span> ⛔ {{$bv.BlockedReason}}</div>
     </div>
     {{end}}
 
@@ -168,19 +161,15 @@
         {{$showIterate := false}}{{$showClose := false}}
         {{if eq .Status "adopt"}}
           {{/* Fused en adopt: el issue linkeado no tiene che:*, así que el
-               lifecycle che no aplica — solo validate/close. */}}
+               lifecycle che no arrancó. Set fijo de adopt para fused →
+               solo validate (puerta de entrada). close vive en el state
+               machine post-validate. */}}
           {{$bv := flowBtnState "validate" .RunningFlow .Gates (printf "validate !%d" .PRNumber)}}
           <button class="btn warn"
                   hx-post="/action/validate/{{.IssueNumber}}"
                   hx-target="#modal-slot"
                   hx-swap="innerHTML"
                   {{if $bv.Disabled}}disabled{{end}} title="{{$bv.Title}}">validate</button>
-          {{$bc := flowBtnState "close" .RunningFlow .Gates (printf "close !%d" .PRNumber)}}
-          <button class="btn danger"
-                  hx-post="/action/close/{{.IssueNumber}}"
-                  hx-target="#modal-slot"
-                  hx-swap="innerHTML"
-                  {{if $bc.Disabled}}disabled{{end}} title="{{$bc.Title}}">close</button>
         {{else}}
           {{$showIterate = true}}
           {{$bi := flowBtnState "iterate" .RunningFlow .Gates (printf "iterate !%d" .PRNumber)}}
@@ -337,7 +326,33 @@
            "iterate ⛔ ..." si el botón iterate ni siquiera se renderiza
            para este Status). */}}
       {{$shownExplore := false}}{{$shownExecute := false}}{{$shownValidate := false}}{{$shownIterate := false}}
-      {{if eq .Status "idea"}}
+      {{if eq .Status "adopt"}}
+        {{/* Issue-only en adopt: puerta de entrada al state machine. Set
+             fijo = explore + execute + validate. Edge case actual (issues
+             sin che:* se skipean en combineEntities) — el set queda como
+             defensa para cuando un issue caiga en adopt en el futuro. */}}
+        {{$shownExplore = true}}
+        {{$be := flowBtnState "explore" .RunningFlow .Gates (printf "explore #%d" .IssueNumber)}}
+        <button class="btn primary"
+                hx-post="/action/explore/{{.IssueNumber}}"
+                hx-target="#modal-slot"
+                hx-swap="innerHTML"
+                {{if $be.Disabled}}disabled{{end}} title="{{$be.Title}}">explore</button>
+        {{$shownExecute = true}}
+        {{$bx := flowBtnState "execute" .RunningFlow .Gates (printf "execute #%d" .IssueNumber)}}
+        <button class="btn primary"
+                hx-post="/action/execute/{{.IssueNumber}}"
+                hx-target="#modal-slot"
+                hx-swap="innerHTML"
+                {{if $bx.Disabled}}disabled{{end}} title="{{$bx.Title}}">execute</button>
+        {{$shownValidate = true}}
+        {{$bv := flowBtnState "validate" .RunningFlow .Gates (printf "validate #%d" .IssueNumber)}}
+        <button class="btn warn"
+                hx-post="/action/validate/{{.IssueNumber}}"
+                hx-target="#modal-slot"
+                hx-swap="innerHTML"
+                {{if $bv.Disabled}}disabled{{end}} title="{{$bv.Title}}">validate</button>
+      {{else if eq .Status "idea"}}
         {{$shownExplore = true}}
         {{$be := flowBtnState "explore" .RunningFlow .Gates (printf "explore #%d" .IssueNumber)}}
         <button class="btn primary"
