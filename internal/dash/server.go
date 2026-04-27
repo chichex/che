@@ -50,13 +50,25 @@ var staticFS embed.FS
 
 // Options son los flags que toma `che dash`.
 type Options struct {
-	Port    int
-	Repo    string // "" => cwd
-	NoOpen  bool
-	Poll    int    // segundos entre polls del GhSource; también usado como hx-trigger
-	Mock    bool   // true => MockSource en vez de GhSource
-	Version string // versión del binario che que arrancó el dash; se muestra en el topbar
+	Port int
+	// PortExplicit indica que el usuario pasó --port en la CLI. Cuando es
+	// false (default), si Port está ocupado escaneamos los siguientes
+	// portFallbackRange puertos hasta encontrar uno libre — patrón pensado
+	// para el caso típico de tener varios `che dash` corriendo en paralelo
+	// (uno por repo). Cuando es true, respetamos el pedido y fallamos con
+	// "address already in use" en vez de hacer fallback silencioso.
+	PortExplicit bool
+	Repo         string // "" => cwd
+	NoOpen       bool
+	Poll         int    // segundos entre polls del GhSource; también usado como hx-trigger
+	Mock         bool   // true => MockSource en vez de GhSource
+	Version      string // versión del binario che que arrancó el dash; se muestra en el topbar
 }
+
+// portFallbackRange es cuántos puertos consecutivos prueba listenWithFallback
+// después del pedido. 50 cubre con holgura el caso de tener varios dashs
+// abiertos sin chocar con servicios random más arriba.
+const portFallbackRange = 50
 
 // Run arranca el server y bloquea hasta que ctx se cancele o haya un error
 // fatal. stdout se usa para mensajes informativos ("listening on ..."), y
@@ -89,16 +101,21 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	srv.repoPath = opts.Repo
 	srv.version = opts.Version
 
-	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(opts.Port))
+	ln, err := listenWithFallback(opts.Port, !opts.PortExplicit)
+	if err != nil {
+		return err
+	}
+	addr := ln.Addr().String()
+	if actualPort := ln.Addr().(*net.TCPAddr).Port; actualPort != opts.Port {
+		// Aviso explícito cuando hicimos fallback — el operador suele
+		// tener bookmark de :7777 y queremos que vea el cambio antes de
+		// abrir el browser.
+		fmt.Fprintf(stdout, "che dash: puerto %d ocupado, usando %d\n", opts.Port, actualPort)
+	}
 	httpSrv := &http.Server{
 		Addr:              addr,
 		Handler:           srv,
 		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", addr, err)
 	}
 
 	url := "http://" + addr
@@ -1263,6 +1280,37 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.FS(staticSub))))
 
 	return mux
+}
+
+// listenWithFallback intenta net.Listen sobre 127.0.0.1:port. Si falla y
+// allowFallback es true, escanea hasta portFallbackRange puertos consecutivos
+// hacia arriba buscando uno libre. Devuelve el listener resultante; el caller
+// lee el puerto efectivo de ln.Addr() para construir la URL real.
+//
+// Sin fallback (allowFallback=false): un solo intento y propagamos el error
+// envuelto. Pensado para `--port` explícito — si el usuario pinó un puerto y
+// está ocupado, queremos romper visiblemente, no irnos a otro lado.
+func listenWithFallback(port int, allowFallback bool) (net.Listener, error) {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	ln, err := net.Listen("tcp", addr)
+	if err == nil {
+		return ln, nil
+	}
+	if !allowFallback {
+		return nil, fmt.Errorf("listen %s: %w", addr, err)
+	}
+	firstErr := err
+	for i := 1; i <= portFallbackRange; i++ {
+		next := port + i
+		if next > 65535 {
+			break
+		}
+		alt := net.JoinHostPort("127.0.0.1", strconv.Itoa(next))
+		if ln, err := net.Listen("tcp", alt); err == nil {
+			return ln, nil
+		}
+	}
+	return nil, fmt.Errorf("listen %s y los próximos %d puertos: %w", addr, portFallbackRange, firstErr)
 }
 
 // openBrowser abre url con el opener nativo de la plataforma.

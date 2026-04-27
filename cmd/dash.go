@@ -42,12 +42,17 @@ Flags:
 		// sentido imprimir el Usage de cobra.
 		cmd.SilenceUsage = true
 		return dash.Run(ctx, dash.Options{
-			Port:    dashPort,
-			Repo:    dashRepo,
-			NoOpen:  dashNoOpen,
-			Poll:    dashPoll,
-			Mock:    dashMock,
-			Version: Version,
+			Port: dashPort,
+			// PortExplicit distingue "el usuario pinó --port" del default. Sin
+			// pin, si el puerto está ocupado el server hace fallback al próximo
+			// libre — útil para correr varios `che dash` en paralelo (uno por
+			// repo). Con pin, fallamos con el error original.
+			PortExplicit: cmd.Flags().Changed("port"),
+			Repo:         dashRepo,
+			NoOpen:       dashNoOpen,
+			Poll:         dashPoll,
+			Mock:         dashMock,
+			Version:      Version,
 		}, cmd.OutOrStdout(), cmd.ErrOrStderr())
 	},
 }

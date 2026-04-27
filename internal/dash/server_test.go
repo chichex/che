@@ -2,6 +2,7 @@ package dash
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,70 @@ import (
 	"testing"
 	"time"
 )
+
+// TestListenWithFallback_PicksNextWhenBusy: motivación del cambio — correr
+// `che dash` en dos repos a la vez con el puerto default no debe morir; el
+// segundo elige otro puerto libre.
+func TestListenWithFallback_PicksNextWhenBusy(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen busy: %v", err)
+	}
+	defer busy.Close()
+	busyPort := busy.Addr().(*net.TCPAddr).Port
+
+	ln, err := listenWithFallback(busyPort, true)
+	if err != nil {
+		t.Fatalf("listenWithFallback: %v", err)
+	}
+	defer ln.Close()
+	got := ln.Addr().(*net.TCPAddr).Port
+	if got == busyPort {
+		t.Fatalf("listener bound to busy port %d", got)
+	}
+	if got <= busyPort || got > busyPort+portFallbackRange {
+		t.Fatalf("port %d out of fallback range (%d, %d]", got, busyPort, busyPort+portFallbackRange)
+	}
+}
+
+// TestListenWithFallback_RespectsExplicit: cuando el usuario pinó el puerto
+// con --port, no hacemos fallback silencioso — devolvemos el error original
+// para que vea que su pedido no se cumplió.
+func TestListenWithFallback_RespectsExplicit(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen busy: %v", err)
+	}
+	defer busy.Close()
+	busyPort := busy.Addr().(*net.TCPAddr).Port
+
+	ln, err := listenWithFallback(busyPort, false)
+	if err == nil {
+		ln.Close()
+		t.Fatal("expected error when explicit port busy, got nil")
+	}
+}
+
+// TestListenWithFallback_FreePort: con el puerto libre no toca nada — caso
+// happy path para que un cambio futuro al loop de fallback no rompa el caso
+// "puerto vacante" silenciosamente.
+func TestListenWithFallback_FreePort(t *testing.T) {
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	port := probe.Addr().(*net.TCPAddr).Port
+	probe.Close()
+
+	ln, err := listenWithFallback(port, true)
+	if err != nil {
+		t.Fatalf("listenWithFallback: %v", err)
+	}
+	defer ln.Close()
+	if got := ln.Addr().(*net.TCPAddr).Port; got != port {
+		t.Fatalf("port: got %d want %d", got, port)
+	}
+}
 
 // newTestServer es el helper de todos los tests: MockSource + repo ficticio +
 // poll de 15s (valor no relevante en tests, pero necesitamos uno válido).
