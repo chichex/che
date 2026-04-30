@@ -1,39 +1,45 @@
-# PR5b — Engine core: notas de ejecución
+# EXEC_NOTES — Issue #55 ([#50 PR6c] Drop labels v1)
 
-## Estado del PR
+## Estado: BLOQUEADO. No se ejecutó ningún cambio de código.
 
-Cubre todo lo que el scope de #53 pide:
+## Razón
 
-- **Invocación del agente** vía `engine.Invoker` (interface). 1 agente por step para PR5b — multi-agente + aggregator quedan para PR5c, pero `Step.Agents []string` ya tiene el shape multi.
-- **Parser de markers** (`engine.ParseMarker` + `engine.ParseStreamMarker`). Regex case-sensitive del PRD §3.c, sólo última línea no vacía, soporte text + stream-json.
-- **Distinción error técnico → stop**. `Invoker.Invoke` que devuelve `error != nil` mapea a `StopReasonTechnicalError`.
-- **Default sin marker → next**. Output exitoso sin marker reconocido se trata como `[next]`.
-- **Validación step destino**. `[goto: foo]` con `foo` no en pipeline → `StopReasonUnknownStep`.
-- **Cap global de 20 transiciones**. `MaxTransitions = 20`, no configurable. Stop con `StopReasonLoopCap` al alcanzarlo.
+El plan de #55 dice textualmente: *"Borrar el módulo viejo cuando **todos los flows migraron**."* Las dependencias declaradas no están listas:
 
-Tests: 33 (16 engine + 17 marker). Toda la suite del repo (`go test ./...`) verde.
+| Dep | Issue | Estado actual | PR asociado |
+|---|---|---|---|
+| PR6a — `internal/labels` v2 con shim | #64 | `che:plan` (no ejecutado) | ninguno |
+| PR6b — Migración flow por flow a labels v2 | #67 | `che:plan` (no ejecutado) | ninguno |
 
-## Decisiones / desviaciones
+Verificado contra `gh issue view 64/67` y `gh pr list --search "PR6a OR PR6b OR labels v2"` (cero resultados).
 
-### 1. Parser incluido en este PR (era PR5a)
+## Por qué no se puede ejecutar parcial
 
-El issue lista PR5a (spec formal del parser de markers) como dependencia, pero PR5a no estaba mergeado al momento de ejecutar #53. Como el scope explícito de PR5b también dice "parser" y el parser no es trivial de separar del engine sin duplicar tipos, lo incluí en `internal/engine/marker.go`. Si más adelante PR5a se mergea con un paquete separado (ej. `internal/markerparse`), un follow-up trivial reemplaza las llamadas internas y elimina `marker.go`.
+- El paquete `internal/labels` v2 (con `che:state:<step>` / `applying:` / `lock:` derivados de `pipeline.Pipeline`) **no existe** en el repo. Solo está el v1 (9 estados `che:*` hardcoded en `internal/labels/labels.go`, `lock.go`, `scope.go`).
+- 19 archivos del codebase importan `internal/labels` activamente:
+  - Flows: `idea`, `explore`, `execute`, `validate`, `iterate`, `close`
+  - `internal/flow/stateref/stateref.go`
+  - `internal/dash/gh_source.go`
+  - `internal/tui/model.go`
+  - `internal/startup/checks.go`
+  - `cmd/unlock.go`, `cmd/migrate_labels.go`
+  - tests asociados
+- Borrar el módulo v1 sin haber introducido v2 ni migrado los call sites = build roto y todos los flows caídos. Esto contradice la regla del repo (`feedback_pr_refactor_workflow.md`): refactors grandes en PRs secuenciales con shims temporales.
 
-### 2. Tipos `Pipeline`/`Step` definidos localmente (no `internal/pipeline`)
+## Qué hace falta antes de retomar #55
 
-PR2 (`internal/pipeline`: types + Default) tampoco está en main todavía. Para que este PR sea self-contained y testeable sin esperar PR2, definí versiones minimales de `Pipeline` y `Step` dentro del paquete `engine`. Cuando PR2 merguea, un follow-up wirea `engine.RunPipeline` para consumir `pipeline.Pipeline` directamente — el shape es compatible (`Step{Name, Agents}` matchea el subset que el motor necesita).
+1. **Implementar #64 (PR6a)**: nuevo paquete (p. ej. `internal/labelsv2` o `internal/labels/v2`) con generadores de:
+   - `che:state:<step>` y `che:state:applying:<step>` derivados de `pipeline.Pipeline`
+   - `che:lock:<ts>:<pid-host>` con TTL/heartbeat helpers
+   - el v1 sigue intacto (shim coexistente).
+2. **Implementar #67 (PR6b)**: migrar uno a uno los 6 flows + dash + cmds + TUI + startup checks a leer/escribir vía v2. Tests verdes en cada PR. Posiblemente sub-PRs (1 por flow) según la nota del PRD §10.
+3. **Retomar #55 (este PR)**: ejecución trivial una vez completada la migración —
+   - `git rm internal/labels/labels.go internal/labels/lock.go internal/labels/scope.go` y sus tests asociados (`labels_test.go`, `lock_test.go`, `scope_test.go`, `hardcoded_test.go`).
+   - Verificar con `goimports`/`go build ./...` que no quedan referencias.
+   - Borrar el subcomando `che migrate-labels` viejo (`cmd/migrate_labels.go`) si la migración la asume el comando nuevo `che pipeline migrate-labels` (PR8 #62) — coordinar con #62 según el orden real de merge.
 
-### 3. `Invoker` como interface, no acoplado a `internal/agent` ni a PR1
+## Recomendación
 
-PR1 (`internal/agentregistry`) no está en main. El motor define una `Invoker` interface chica (`Invoke(ctx, agent, input) (output, format, err)`) para no acoplarse al CLI de claude ni al registry. La implementación concreta que resuelve agente → binario via `agentregistry` y dispatcha al `internal/agent.Run` actual queda para un follow-up (probablemente cuando se haga el wireup CLI en PR4 o como parte del entry runner de PR5d).
-
-### 4. `Options.EntryStep` ya soportado
-
-El scope formal de PR5b no incluye el flag `--from` (eso va en PR5d), pero el motor expone `Options.EntryStep` para que los tests del motor puedan empezar desde el medio del pipeline sin reconstruir todo. PR5d sólo tiene que cablear ese campo desde el CLI — sin cambios al motor.
-
-## Pendientes (intencionalmente fuera de scope)
-
-- **Multi-agente + aggregator** — PR5c. El motor actual invoca `step.Agents[0]`.
-- **Entry agent + flag `--from`** — PR5d. El motor soporta `EntryStep` interno; falta el CLI y la corrida del entry agent antes del primer step.
-- **Cancelación parcial (SIGTERM + grace + SIGKILL)** — PR5c, junto con multi-agente.
-- **Wiring real con `internal/agent.Run`** — follow-up cuando PR1 + PR2 estén en main. Por ahora el motor funciona con cualquier `Invoker`, lo cual es suficiente para el wireup del comando `che pipeline simulate` (PR4) que usa un dry-run invoker.
+- Devolver #55 a `che:plan` (o `che:idea`) y bloquearlo detrás de #64 + #67.
+- Cerrar este worktree sin merge. El scope real de #55 son ~5 archivos borrados + cleanup de imports y se ejecuta en minutos una vez que #64/#67 estén mergeados; no tiene sentido abrir un PR vacío hoy.
+- Alternativa: si el harness exige que este PR exista para no romper la cadena, mergear este `EXEC_NOTES.md`-only PR como recordatorio explícito y reabrir #55 cuando se desbloquee (poco recomendado — ensucia git history).
