@@ -92,6 +92,23 @@ func runPipelineRun(ctx context.Context, out, errOut io.Writer, mgr *pipeline.Ma
 	// agente; PR5c follow-up wirea multi-agente sin tocar este mapeo).
 	ep := toEnginePipeline(r.Pipeline)
 
+	// Pre-vuelo: si el invoker es el liveInvoker (built-ins-only en v1),
+	// caminar el pipeline y rechazar agentes custom con un mensaje humano
+	// ANTES de llamar al engine. Sin esto, el engine arranca, invoca al
+	// primer step, recibe el error técnico ("requires custom-agent
+	// wiring") y lo mapea a StopReasonTechnicalError → exit 1 con un
+	// stop opaco. Con el pre-vuelo el usuario ve directamente qué agentes
+	// no soportamos, sin tener que decodificar el stop técnico.
+	//
+	// Tests inyectan un fakeInvoker que NO es *liveInvoker, así que el
+	// type-assert los deja pasar (y los tests pueden seguir usando
+	// agentes ficticios como "agent-a", "entry-agent", etc).
+	if li, ok := inv.(*liveInvoker); ok {
+		if err := li.checkBuiltinsOnly(ep); err != nil {
+			return err
+		}
+	}
+
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -166,15 +183,19 @@ func describeMarker(m engine.Marker) string {
 }
 
 // toEnginePipeline convierte el shape on-disk al shape del motor.
-// El campo Aggregator (Steps y Entry) NO se mapea en v1 — PR5b/PR5d
-// ignoran esa metadata por single-agent. El follow-up post-PR5c wirea
-// el AggregatorKind acá sin cambiar callers.
+// Mapeamos Aggregator tanto en Steps como en Entry: el motor PR5c ya
+// consume Step.Aggregator en multi-agente, y el Entry preserva el
+// campo para que el follow-up de multi-agente en el entry no tenga
+// que tocar este mapping. En single-agent (el único modo que corre
+// hoy en producción) el motor ignora el campo, así que copiarlo es
+// preventivo, no funcional.
 func toEnginePipeline(p pipeline.Pipeline) engine.Pipeline {
 	ep := engine.Pipeline{Steps: make([]engine.Step, 0, len(p.Steps))}
 	for _, s := range p.Steps {
 		ep.Steps = append(ep.Steps, engine.Step{
-			Name:   s.Name,
-			Agents: append([]string(nil), s.Agents...),
+			Name:       s.Name,
+			Agents:     append([]string(nil), s.Agents...),
+			Aggregator: engine.AggregatorKind(s.Aggregator),
 		})
 	}
 	if p.Entry != nil {
@@ -228,6 +249,56 @@ func (li *liveInvoker) Invoke(ctx context.Context, agentName string, input strin
 		return res.Stdout, engine.FormatText, err
 	}
 	return res.Stdout, engine.FormatText, nil
+}
+
+// checkBuiltinsOnly recorre el pipeline (entry + steps) y devuelve un
+// error humano cuando alguna referencia apunta a un agente custom (no
+// built-in). v1 sólo soporta los 3 built-ins (claude-opus/sonnet/haiku);
+// el wiring para subagents custom de Claude Code es follow-up.
+//
+// El walk se hace acá (cmd/) y no en el engine porque el engine es
+// agnóstico al concepto de "built-in vs custom" — esa distinción la
+// conoce el agentregistry y el liveInvoker, y queremos que el engine
+// siga corriendo con cualquier Invoker (incluyendo los fakes de los
+// tests, que usan nombres ficticios).
+func (li *liveInvoker) checkBuiltinsOnly(ep engine.Pipeline) error {
+	var custom []string
+	seen := map[string]bool{}
+	check := func(name string) {
+		if name == "" || seen[name] {
+			return
+		}
+		seen[name] = true
+		a, ok := li.registry.Get(name)
+		if !ok {
+			// Agente desconocido: dejarlo pasar; el engine lo va a
+			// reportar via StopReasonTechnicalError con el error original
+			// del invoker ("agent X not found in registry"). Esa ruta ya
+			// produce un mensaje accionable distinto al "custom-agent
+			// wiring" — no la pisamos acá.
+			return
+		}
+		if a.Source != agentregistry.SourceBuiltin {
+			custom = append(custom, fmt.Sprintf("%s (source=%s)", name, a.Source))
+		}
+	}
+	if ep.Entry != nil {
+		for _, a := range ep.Entry.Agents {
+			check(a)
+		}
+	}
+	for _, s := range ep.Steps {
+		for _, a := range s.Agents {
+			check(a)
+		}
+	}
+	if len(custom) > 0 {
+		return fmt.Errorf(
+			"pipeline references custom agents not yet supported in v1 (only built-ins claude-opus/claude-sonnet/claude-haiku run today): %s — custom-agent wiring lands in a follow-up; meanwhile use a built-in or run `che pipeline simulate` for a dry-run",
+			strings.Join(custom, ", "),
+		)
+	}
+	return nil
 }
 
 // Asegurar que liveInvoker implementa engine.Invoker en compile-time.

@@ -547,14 +547,17 @@ func runEntry(ctx context.Context, p Pipeline, inv Invoker, input string, nameTo
 
 	if ctx != nil && ctx.Err() != nil {
 		// Cancelación temprana antes de invocar — propagar como stop
-		// técnico, igual que el loop principal hace.
+		// técnico, igual que el loop principal hace. El formato del
+		// StopDetail ("context cancelled before <…> start: …") matchea
+		// el de runStep para que callers que log/parsean el detail vean
+		// shape consistente entre entry y steps.
 		er.Marker = Marker{Kind: MarkerStop}
 		er.Resolved = "technical-error"
 		er.Err = ctx.Err()
 		return er, 0, &Run{
 			Stopped:    true,
 			StopReason: StopReasonTechnicalError,
-			StopDetail: ctx.Err().Error(),
+			StopDetail: "context cancelled before entry start: " + ctx.Err().Error(),
 		}
 	}
 

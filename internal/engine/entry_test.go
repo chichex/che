@@ -302,6 +302,61 @@ func TestEntry_StreamJSONFormat(t *testing.T) {
 	}
 }
 
+// TestEntry_GotoMasLoopGatillaCap: regresión sobre la intersección
+// entry-goto + loop entre steps + cap.
+//
+// Pipeline: entry hace [goto: a]; step `a` hace [goto: b]; step `b`
+// hace [goto: a]. Sin cap, el motor entraría en loop infinito a↔b.
+// Con cap, MaxTransitions corta limpio y reporta StopReasonLoopCap.
+//
+// El test importa porque cubre el cruce de dos features que se
+// agregaron en PRs distintos (entry-goto en PR5d, loop cap en PR5b):
+// queremos saber, vía test, que el cap atrapa también los loops que
+// arrancan vía entry-goto, no sólo los que arrancan vía primer step.
+func TestEntry_GotoMasLoopGatillaCap(t *testing.T) {
+	p := Pipeline{
+		Entry: &EntrySpec{Agents: []string{"entry-agent"}},
+		Steps: []Step{
+			{Name: "a", Agents: []string{"agent-a"}},
+			{Name: "b", Agents: []string{"agent-b"}},
+		},
+	}
+	inv := newFakeInvoker(func(agent string, _ int) (string, OutputFormat, error) {
+		switch agent {
+		case "entry-agent":
+			return "[goto: a]", FormatText, nil
+		case "agent-a":
+			return "[goto: b]", FormatText, nil
+		case "agent-b":
+			return "[goto: a]", FormatText, nil
+		}
+		t.Fatalf("agente inesperado %q", agent)
+		return "", FormatText, nil
+	})
+	run, err := RunPipeline(context.Background(), p, inv, Options{})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !run.Stopped {
+		t.Fatalf("Stopped=false; esperaba true (loop cap)")
+	}
+	if run.StopReason != StopReasonLoopCap {
+		t.Errorf("StopReason=%q want %q (detail=%q)", run.StopReason, StopReasonLoopCap, run.StopDetail)
+	}
+	if run.Transitions != MaxTransitions {
+		t.Errorf("Transitions=%d want %d (cap)", run.Transitions, MaxTransitions)
+	}
+	// El entry corrió y fue registrado, pero NO debe contar como
+	// transición — el cap protege contra loops entre steps, no contra
+	// el entry (que corre una sola vez por corrida).
+	if run.Entry == nil {
+		t.Fatalf("Run.Entry=nil; esperaba EntryRun (entry corrió antes del loop)")
+	}
+	if run.Entry.StartStep != "a" {
+		t.Errorf("Entry.StartStep=%q want a", run.Entry.StartStep)
+	}
+}
+
 // TestEntry_FromConPipelineEntryYStepDesconocido: --from con step que
 // no existe en el pipeline → unknown-step (sin tocar el entry). El
 // override manual no debe pasar por el entry incluso cuando es inválido.

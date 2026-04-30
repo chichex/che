@@ -79,6 +79,21 @@ func validateEntry(e Entry) error {
 			}
 		}
 	}
+	// PR5d: el motor sólo invoca Agents[0] del entry — multi-agente +
+	// aggregator en el entry es follow-up (mirror de PR5c para steps).
+	// Sin esta regla, un pipeline con `entry: {agents: [a, b, c]}` se
+	// cargaría OK y el motor correría sólo `a`, descartando `b` y `c`
+	// silenciosamente. Rechazar al cargar es más honesto que hacerlo
+	// silently truncate.
+	if len(e.Agents) > 1 {
+		return &LoadError{
+			Field: "entry.agents",
+			Reason: fmt.Sprintf(
+				"entry declares %d agents but multi-agent entry is not supported yet (follow-up); use a single agent for now",
+				len(e.Agents),
+			),
+		}
+	}
 	if e.Aggregator != "" && !e.Aggregator.IsValid() {
 		return &LoadError{
 			Field: "entry.aggregator",
