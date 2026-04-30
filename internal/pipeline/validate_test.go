@@ -180,6 +180,29 @@ func TestValidate_EntryRequiresAgents(t *testing.T) {
 	}
 }
 
+// TestValidate_EntryRejectsMultiAgent: el motor sólo invoca Agents[0]
+// del entry en v1 (multi-agente + aggregator es follow-up). Aceptar
+// >1 agente al cargar significa truncar silenciosamente — la
+// validación tiene que rechazarlo con un mensaje accionable.
+func TestValidate_EntryRejectsMultiAgent(t *testing.T) {
+	p := Pipeline{
+		Version: CurrentVersion,
+		Entry:   &Entry{Agents: []string{"a", "b"}},
+		Steps:   []Step{{Name: "x", Agents: []string{"a"}}},
+	}
+	err := Validate(p)
+	var le *LoadError
+	if !errors.As(err, &le) {
+		t.Fatalf("err type = %T (%v), want *LoadError", err, err)
+	}
+	if le.Field != "entry.agents" {
+		t.Errorf("Field = %q, want entry.agents", le.Field)
+	}
+	if !strings.Contains(le.Reason, "multi-agent") {
+		t.Errorf("Reason = %q, expected mention of multi-agent", le.Reason)
+	}
+}
+
 // TestValidate_EntryAggregatorPresets: misma regla que para Step pero
 // scope al entry — mensaje y campo distinto.
 func TestValidate_EntryAggregatorPresets(t *testing.T) {
