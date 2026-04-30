@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/chichex/che-cli/main/schemas/pipeline.json",
+  "title": "che pipeline",
+  "description": "Declarative pipeline definition for che (https://github.com/chichex/che-cli). One file = one pipeline. The filename (without .json) is the pipeline name. The runtime engine, loader and label generator live in che — this schema only describes the on-disk shape.",
+  "type": "object",
+  "required": ["version", "steps"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional. URL pointing to this schema for IDE autocomplete (e.g. VSCode/Cursor). Ignored by the loader."
+    },
+    "version": {
+      "const": 1,
+      "description": "Schema version. Must be 1 in che v1 — the loader rejects unknown versions and asks for upgrade."
+    },
+    "entry": {
+      "$ref": "#/$defs/entry",
+      "description": "Optional gate that runs before the steps. Receives the input (prompt/issue/PR) and emits a marker that picks the starting step ([goto: X]), proceeds to the first step ([next]) or rejects the input ([stop])."
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered list of stages. The engine runs them top-to-bottom; jumps (forward or backward) are emitted by agents via [goto: <step_name>] markers. No flow-control metadata lives in this JSON.",
+      "items": { "$ref": "#/$defs/step" }
+    }
+  },
+  "$defs": {
+    "stepName": {
+      "type": "string",
+      "pattern": "^[a-z_][a-z0-9_]*$",
+      "description": "Step identifier. Must match the same fragment used by the [goto: <name>] marker parser: lowercase letters / digits / underscores, starting with a letter or underscore."
+    },
+    "agentRef": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Reference to a built-in agent (claude-opus / claude-sonnet / claude-haiku) or a custom agent auto-discovered from .claude/agents/. Plugin agents use the namespaced form 'plugin:agent'."
+    },
+    "aggregator": {
+      "type": "string",
+      "enum": ["majority", "unanimous", "first_blocker"],
+      "description": "Policy for resolving conflicting markers when a step / entry has more than one agent. Default when omitted: 'majority'. See PRD §3.d for full semantics."
+    },
+    "step": {
+      "type": "object",
+      "required": ["name", "agents"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "$ref": "#/$defs/stepName" },
+        "agents": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/agentRef" },
+          "description": "Agents that run at this step. They run in parallel when more than one. Repeating the same agent yields N parallel instances of it."
+        },
+        "aggregator": { "$ref": "#/$defs/aggregator" },
+        "_comment": {
+          "type": "string",
+          "description": "Free-form comment ignored by the loader. The pipeline wizard injects these to document each step inline."
+        }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "required": ["agents"],
+      "additionalProperties": false,
+      "properties": {
+        "agents": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/agentRef" }
+        },
+        "aggregator": { "$ref": "#/$defs/aggregator" }
+      }
+    }
+  }
+}
