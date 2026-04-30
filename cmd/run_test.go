@@ -8,9 +8,10 @@ import (
 	"testing"
 
 	"github.com/chichex/che/internal/engine"
+	"github.com/chichex/che/internal/runner"
 )
 
-// fakeInvoker para los tests de cmd/run: el responder dispatcha por
+// fakeRunInvoker para los tests de cmd/run: el responder dispatcha por
 // nombre del agente, y el invoker NO spawnea nada — todo en memoria.
 type fakeRunInvoker struct {
 	responder func(agent string) (string, engine.OutputFormat, error)
@@ -34,6 +35,16 @@ const minimalPipelineWithEntry = `{
   ]
 }`
 
+// autoArgs es un atajo: arma runRunArgs en modo auto-loop con el
+// pipeline + fromStep dados.
+func autoArgs(pipelineFlag, fromStep string) runRunArgs {
+	return runRunArgs{
+		pipelineFlag: pipelineFlag,
+		fromStep:     fromStep,
+		mode:         runner.ModeAuto,
+	}
+}
+
 // TestRun_EntryNextEjecutaTodosLosSteps: entry [next] → arranca primer
 // step + corre todos.
 func TestRun_EntryNextEjecutaTodosLosSteps(t *testing.T) {
@@ -49,7 +60,7 @@ func TestRun_EntryNextEjecutaTodosLosSteps(t *testing.T) {
 		},
 	}
 	var out, errOut bytes.Buffer
-	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, "with-entry", "", "")
+	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, runner.AutoSelector, autoArgs("with-entry", ""))
 	if err != nil {
 		t.Fatalf("runPipelineRun: %v\nout=%s", err, out.String())
 	}
@@ -83,7 +94,7 @@ func TestRun_EntryGotoSaltaSteps(t *testing.T) {
 		},
 	}
 	var out, errOut bytes.Buffer
-	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, "with-entry", "", "")
+	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, runner.AutoSelector, autoArgs("with-entry", ""))
 	if err != nil {
 		t.Fatalf("runPipelineRun: %v", err)
 	}
@@ -116,7 +127,7 @@ func TestRun_EntryStopExitNoEsError(t *testing.T) {
 		},
 	}
 	var out, errOut bytes.Buffer
-	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, "with-entry", "", "")
+	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, runner.AutoSelector, autoArgs("with-entry", ""))
 	if err != nil {
 		t.Fatalf("runPipelineRun: %v (entry stop no debería ser error técnico)", err)
 	}
@@ -142,7 +153,7 @@ func TestRun_FromBypasaaEntry(t *testing.T) {
 		},
 	}
 	var out, errOut bytes.Buffer
-	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, "with-entry", "validate", "")
+	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, runner.AutoSelector, autoArgs("with-entry", "validate"))
 	if err != nil {
 		t.Fatalf("runPipelineRun: %v", err)
 	}
@@ -171,7 +182,7 @@ func TestRun_FromConStepDesconocidoEsError(t *testing.T) {
 		},
 	}
 	var out, errOut bytes.Buffer
-	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, "with-entry", "ghost", "")
+	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, runner.AutoSelector, autoArgs("with-entry", "ghost"))
 	if err == nil {
 		t.Fatalf("runPipelineRun no devolvió error; out=%q", out.String())
 	}
@@ -192,7 +203,7 @@ func TestRun_PipelineSinEntry(t *testing.T) {
 		},
 	}
 	var out, errOut bytes.Buffer
-	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, "plain", "", "")
+	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, runner.AutoSelector, autoArgs("plain", ""))
 	if err != nil {
 		t.Fatalf("runPipelineRun: %v", err)
 	}
@@ -215,7 +226,7 @@ func TestRun_BuiltinFallbackSinFlags(t *testing.T) {
 		},
 	}
 	var out, errOut bytes.Buffer
-	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, "", "", "")
+	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, runner.AutoSelector, autoArgs("", ""))
 	if err != nil {
 		t.Fatalf("runPipelineRun: %v", err)
 	}
@@ -239,11 +250,175 @@ func TestRun_ErrorTecnicoEsExitError(t *testing.T) {
 		},
 	}
 	var out, errOut bytes.Buffer
-	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, "plain", "", "")
+	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, runner.AutoSelector, autoArgs("plain", ""))
 	if err == nil {
 		t.Fatalf("runPipelineRun no devolvió error; out=%q", out.String())
 	}
 	if !strings.Contains(err.Error(), string(engine.StopReasonTechnicalError)) {
 		t.Errorf("err=%v want includes %q", err, engine.StopReasonTechnicalError)
+	}
+}
+
+// --- pickModeAndSelector (PR9a) ---
+
+// TestPickModeAndSelector_AutoYManualMutex: ambos flags juntos = error.
+func TestPickModeAndSelector_AutoYManualMutex(t *testing.T) {
+	_, _, err := pickModeAndSelector(true, true, true, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("se esperaba error por flags mutex")
+	}
+	if !strings.Contains(err.Error(), "mutuamente excluyentes") {
+		t.Errorf("error sin la frase clave: %v", err)
+	}
+}
+
+// TestPickModeAndSelector_ManualSinTTYError: --manual sin TTY se
+// rechaza temprano.
+func TestPickModeAndSelector_ManualSinTTYError(t *testing.T) {
+	_, _, err := pickModeAndSelector(false, false, true, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("se esperaba error por --manual sin tty")
+	}
+	if !strings.Contains(err.Error(), "TTY") {
+		t.Errorf("error sin mención de TTY: %v", err)
+	}
+}
+
+// TestPickModeAndSelector_AutoExplicito: --auto con TTY igual fuerza
+// auto-loop (override del default interactivo).
+func TestPickModeAndSelector_AutoExplicito(t *testing.T) {
+	mode, sel, err := pickModeAndSelector(true, true, false, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if mode != runner.ModeAuto {
+		t.Errorf("mode=%q want auto-loop", mode)
+	}
+	got, _ := sel("step1", []string{"a", "b"})
+	if len(got) != 2 {
+		t.Errorf("selector no es AutoSelector (devolvió %d agentes)", len(got))
+	}
+}
+
+// TestPickModeAndSelector_NoTTYDefaultAuto: sin flags y sin TTY =
+// auto-loop (modo scripteable / dash / CI).
+func TestPickModeAndSelector_NoTTYDefaultAuto(t *testing.T) {
+	mode, sel, err := pickModeAndSelector(false, false, false, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if mode != runner.ModeAuto {
+		t.Errorf("mode=%q want auto-loop", mode)
+	}
+	got, _ := sel("step1", []string{"a", "b", "c"})
+	if len(got) != 3 {
+		t.Errorf("selector no es AutoSelector (devolvió %d agentes)", len(got))
+	}
+}
+
+// TestPickModeAndSelector_TTYDefaultManual: sin flags y con TTY =
+// manual (PromptSelector). No invocamos al selector porque abriría
+// bubbletea — sólo verificamos la rama.
+func TestPickModeAndSelector_TTYDefaultManual(t *testing.T) {
+	mode, sel, err := pickModeAndSelector(true, false, false, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if mode != runner.ModeManual {
+		t.Errorf("mode=%q want manual", mode)
+	}
+	if sel == nil {
+		t.Error("selector nil en modo manual")
+	}
+}
+
+// --- selector subset filtering (PR9a) ---
+
+// TestRun_SelectorManualFiltraSubset: con un selector manual que
+// devuelve sólo el último agente, el motor invoca a ese (no al primero
+// canónico).
+func TestRun_SelectorManualFiltraSubset(t *testing.T) {
+	const pipe = `{
+  "version": 1,
+  "steps": [
+    {"name": "validate_pr", "agents": ["code-reviewer-strict", "code-reviewer-security", "claude-opus"]}
+  ]
+}`
+	mgr, _ := pipelineFixture(t, map[string]string{"work": pipe}, "")
+	inv := &fakeRunInvoker{
+		responder: func(agent string) (string, engine.OutputFormat, error) {
+			return "[next]", engine.FormatText, nil
+		},
+	}
+	manualSel := func(stepName string, agents []string) ([]string, error) {
+		return []string{agents[len(agents)-1]}, nil // último: claude-opus
+	}
+	var out, errOut bytes.Buffer
+	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, manualSel, runRunArgs{
+		pipelineFlag: "work",
+		mode:         runner.ModeManual,
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got := len(inv.calls); got != 1 {
+		t.Fatalf("invocaciones=%d want 1", got)
+	}
+	if inv.calls[0] != "claude-opus" {
+		t.Errorf("motor invocó %q want claude-opus (subset manual)", inv.calls[0])
+	}
+}
+
+// TestRun_SelectorCancelEsExitOk: si el selector devuelve
+// ErrSelectionCancelled, runPipelineRun devuelve nil (exit 0) e
+// imprime el mensaje en stderr.
+func TestRun_SelectorCancelEsExitOk(t *testing.T) {
+	const pipe = `{
+  "version": 1,
+  "steps": [
+    {"name": "explore", "agents": ["claude-opus"]}
+  ]
+}`
+	mgr, _ := pipelineFixture(t, map[string]string{"work": pipe}, "")
+	inv := &fakeRunInvoker{
+		responder: func(agent string) (string, engine.OutputFormat, error) {
+			t.Fatal("invoker no debería haberse llamado tras cancelación")
+			return "", engine.FormatText, nil
+		},
+	}
+	cancelSel := func(string, []string) ([]string, error) {
+		return nil, runner.ErrSelectionCancelled
+	}
+	var out, errOut bytes.Buffer
+	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, cancelSel, runRunArgs{
+		pipelineFlag: "work",
+		mode:         runner.ModeManual,
+	})
+	if err != nil {
+		t.Fatalf("err: %v want nil (cancel es exit 0)", err)
+	}
+	if !strings.Contains(errOut.String(), "cancelado por el usuario") {
+		t.Errorf("stderr sin mensaje de cancelación: %q", errOut.String())
+	}
+}
+
+// TestRun_BannerIncluyeMode: el banner debe incluir el modo (auto-loop
+// / manual) — lo consumen los tests de scripts y la doc.
+func TestRun_BannerIncluyeMode(t *testing.T) {
+	mgr, _ := pipelineFixture(t, map[string]string{
+		"plain": minimalPipeline,
+	}, "")
+	inv := &fakeRunInvoker{
+		responder: func(agent string) (string, engine.OutputFormat, error) {
+			return "[next]", engine.FormatText, nil
+		},
+	}
+	var out, errOut bytes.Buffer
+	err := runPipelineRun(context.Background(), &out, &errOut, mgr, inv, runner.AutoSelector, autoArgs("plain", ""))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !strings.Contains(out.String(), "mode:     auto-loop") {
+		t.Errorf("banner sin 'mode:     auto-loop': %q", out.String())
 	}
 }
