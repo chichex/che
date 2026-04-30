@@ -41,13 +41,38 @@ type Step struct {
 	Aggregator AggregatorKind
 }
 
-// Pipeline es la secuencia ordenada de steps que el motor ejecuta. Sin
-// metadata adicional en este nivel (Entry, Version, etc.) — esos campos
-// son responsabilidad del loader (PR3) y del entry-runner (PR5d). El
-// motor sólo necesita la lista para resolver `[goto: X]` y aplicar el
-// cap.
+// Pipeline es la secuencia ordenada de steps que el motor ejecuta. PR5d
+// agrega un Entry opcional que corre ANTES del primer step y decide desde
+// dónde arrancar (`[next]` → primer step, `[goto: X]` → step X, `[stop]`
+// → no correr nada). Si Entry == nil, el motor arranca desde el primer
+// step directamente (comportamiento PR5b).
 type Pipeline struct {
+	Entry *EntrySpec
 	Steps []Step
+}
+
+// EntrySpec describe el entry agent del pipeline (PRD §5.a). El entry es
+// un validador/router que corre ANTES de los steps y emite un marker que
+// define desde qué step arrancar:
+//   - `[next]` o sin marker → primer step (comportamiento default).
+//   - `[goto: X]` → arrancar en el step X.
+//   - `[stop]` → no correr ningún step (rebote del input).
+//
+// Multi-agente: la struct ya soporta varios agentes + Aggregator, pero
+// PR5d (este PR) sólo invoca al primer agente — igual que PR5b hace con
+// los Steps. El multi-agente + aggregator vive en PR5c/follow-up; cuando
+// PR5c merguee, un cambio mínimo (reemplazar el invoke directo por
+// runStep) habilita el flow multi-agente sin romper el shape.
+type EntrySpec struct {
+	// Agents es la lista de refs a agentes que corren como entry. PR5d
+	// usa Agents[0] solamente (mirror de PR5b para Steps); multi-agente
+	// llega con PR5c.
+	Agents []string
+
+	// Aggregator es la política de resolución cuando len(Agents) > 1.
+	// PR5d preserva el campo para no romper el shape — el motor lo
+	// IGNORA en single-agent (que es el único modo que corre hoy).
+	Aggregator AggregatorKind
 }
 
 // Invoker es el contrato que el motor usa para llamar a un agente. Está
@@ -124,6 +149,18 @@ const (
 	// Idem StopReasonEmptyPipeline: defensa frente a pipelines mal
 	// armados que escaparon al validator.
 	StopReasonNoAgents StopReason = "step has no agents"
+
+	// StopReasonEntryStop: el entry agent emitió `[stop]` (PRD §5.a) —
+	// rebote explícito del input, ningún step corre. Distinto de
+	// StopReasonAgentMarker para que la UX (audit log, dash) pueda
+	// diferenciar "el pipeline rebotó en el entry" de "un step paró el
+	// pipeline en el medio".
+	StopReasonEntryStop StopReason = "entry agent emitted [stop]"
+
+	// StopReasonEntryNoAgents: defensa para EntrySpec con Agents vacío
+	// — análogo a StopReasonNoAgents pero diferenciado para que el
+	// caller sepa que el config del entry está mal, no el de un step.
+	StopReasonEntryNoAgents StopReason = "entry has no agents"
 )
 
 // StepRun captura el outcome de la ejecución de un solo step durante una
@@ -162,6 +199,13 @@ type StepRun struct {
 
 // Run es el resultado completo de una corrida del motor.
 type Run struct {
+	// Entry, si no es nil, captura el outcome del entry agent (PRD §5.a).
+	// Es nil cuando el pipeline no tenía Entry, o cuando el caller usó
+	// `Options.EntryStep` (`--from`) para bypassear el entry. La
+	// presencia de Entry no implica Stopped — el entry puede haber
+	// emitido [next]/[goto: X] y el pipeline siguió corriendo.
+	Entry *EntryRun
+
 	// Steps es la secuencia de StepRun ejecutada, en orden cronológico.
 	Steps []StepRun
 
@@ -182,8 +226,43 @@ type Run struct {
 	// Transitions es la cantidad de transiciones que tomó el motor (cap
 	// en MaxTransitions). Útil para tests, audit log, y para exponer
 	// "transiciones: 14/20" en la UI futura (limitación documentada en
-	// PRD §9).
+	// PRD §9). El entry NO cuenta como transición — el cap protege
+	// contra loops entre steps, no contra el entry mismo (que corre una
+	// sola vez por corrida).
 	Transitions int
+}
+
+// EntryRun captura el outcome del entry agent (PRD §5.a). Análogo a
+// StepRun pero sin Step.Name (el entry no tiene name dentro del
+// pipeline) y con un campo extra StartStep que dice qué step terminó
+// arrancando el motor (vacío si emitió [stop]).
+type EntryRun struct {
+	// Agent es el nombre del agente que el motor invocó como entry.
+	// PR5d corre Agents[0]; multi-agente vive en PR5c follow-up.
+	Agent string
+
+	// Marker es el marker resuelto del entry: el que emitió el agente, o
+	// `[next]` por default (output sin marker + invocación OK), o
+	// `[stop]` cuando hubo error técnico o goto inválido.
+	Marker Marker
+
+	// Resolved indica cómo se llegó a Marker — análogo a StepRun.Resolved:
+	//   - "explicit"          el agente emitió el marker
+	//   - "default-next"      no hubo marker pero la invocación fue OK
+	//   - "technical-error"   la invocación falló
+	//   - "unknown-step"      el goto del entry apuntó a un step inexistente
+	//   - "no-agents"         EntrySpec con Agents vacío (defensa)
+	Resolved string
+
+	// StartStep es el nombre del step desde el que arrancó el motor
+	// después del entry. Vacío si el entry resolvió a [stop] (no
+	// arrancó nada). Si el entry emitió [next], es el primer step del
+	// pipeline; si emitió [goto: X], es X.
+	StartStep string
+
+	// Err captura el error técnico del invoker, si hubo. Sólo informativo
+	// — la decisión de stop ya quedó reflejada en Marker.
+	Err error
 }
 
 // ErrInvokerNil se devuelve si el caller pasa un Invoker nil. El motor no
@@ -193,10 +272,15 @@ var ErrInvokerNil = errors.New("engine: invoker is nil")
 // Options configura una corrida del motor. Todos los campos son opcionales.
 type Options struct {
 	// EntryStep elige el primer step del pipeline a ejecutar. Si está
-	// vacío, el motor arranca desde el primer step de la lista. PR5d
-	// agregará el entry agent y el flag `--from`; PR5b ya soporta el
-	// override interno para que los tests no tengan que reconstruir el
-	// pipeline para empezar desde el medio.
+	// vacío, el motor corre el Entry (si existe) y arranca según su
+	// marker; o arranca desde el primer step si no hay Entry.
+	//
+	// PR5d (este PR): EntryStep != "" BYPASSA el entry agent. Es la
+	// implementación interna del flag CLI `che run --from <step>`
+	// (PRD §5.c) — el override manual del usuario se respeta sin pasar
+	// por el validador del entry. Esto es deliberado: si el usuario
+	// pidió "arrancar desde validate_pr", el entry no debería poder
+	// rebotarlo.
 	EntryStep string
 
 	// Input es el contexto inicial que se pasa al primer step (body del
@@ -208,20 +292,26 @@ type Options struct {
 
 // RunPipeline ejecuta el pipeline secuencialmente:
 //
-//  1. Resuelve el primer step (Options.EntryStep o steps[0]).
+//  1. Resuelve el step inicial:
+//     a. Si Options.EntryStep != "" → ese step (bypassa el entry agent).
+//     b. Si Pipeline.Entry != nil → invoca el entry agent y aplica su
+//        marker (`[next]` → primer step, `[goto: X]` → step X,
+//        `[stop]` → no corre nada y devuelve StopReasonEntryStop).
+//     c. Sin lo anterior → primer step de la lista.
 //  2. Para cada step: pickea el primer agente declarado, invoca via
 //     Invoker, parsea el marker (text o stream-json según el format que
 //     reportó el invoker), y aplica la transición.
 //  3. Cuenta cada transición; al alcanzar MaxTransitions, stop con
-//     StopReasonLoopCap.
+//     StopReasonLoopCap. El entry NO cuenta como transición.
 //  4. Cuando un step emite [next] (o default por output sin marker), el
 //     motor avanza al siguiente step en orden. Si era el último, la
 //     corrida termina ok.
 //
-// PR5b sólo soporta 1 agente por step (el primero de Step.Agents). El
-// motor multi-agente + aggregator + cancelación parcial vive en PR5c —
-// el shape del Step ya lo soporta (Agents []string), así que cuando se
-// implemente PR5c sólo cambia el branch que decide cómo invocar.
+// PR5b/PR5d sólo soportan 1 agente por step y por entry (el primero de
+// la lista). El motor multi-agente + aggregator + cancelación parcial
+// vive en PR5c — el shape del Step y EntrySpec ya lo soportan (Agents
+// []string), así que cuando se implemente PR5c sólo cambia el branch
+// que decide cómo invocar.
 func RunPipeline(ctx context.Context, p Pipeline, inv Invoker, opts Options) (Run, error) {
 	if inv == nil {
 		return Run{}, ErrInvokerNil
@@ -241,8 +331,14 @@ func RunPipeline(ctx context.Context, p Pipeline, inv Invoker, opts Options) (Ru
 		nameToIdx[s.Name] = i
 	}
 
+	run := Run{}
+	currentInput := opts.Input
+
 	currentIdx := 0
-	if opts.EntryStep != "" {
+	switch {
+	case opts.EntryStep != "":
+		// PRD §5.c override manual: el flag `che run --from <step>`
+		// bypassa el entry agent y arranca desde el step pedido.
 		idx, ok := nameToIdx[opts.EntryStep]
 		if !ok {
 			return Run{
@@ -252,10 +348,23 @@ func RunPipeline(ctx context.Context, p Pipeline, inv Invoker, opts Options) (Ru
 			}, nil
 		}
 		currentIdx = idx
+	case p.Entry != nil:
+		// PRD §5.a: el entry agent decide desde dónde arrancar (o si
+		// rebotar el input). runEntry encapsula la invocación + el
+		// parseo del marker; devuelve el step inicial o un Run pre-armado
+		// con [stop] cuando corresponde.
+		entryRun, startIdx, halt := runEntry(ctx, p, inv, currentInput, nameToIdx)
+		run.Entry = entryRun
+		if halt != nil {
+			// Entry abortó la corrida (stop explícito, error técnico,
+			// goto inválido o sin agentes). El Run que devolvemos ya
+			// trae StopReason poblado por runEntry; le agregamos el
+			// EntryRun para audit.
+			halt.Entry = entryRun
+			return *halt, nil
+		}
+		currentIdx = startIdx
 	}
-
-	run := Run{}
-	currentInput := opts.Input
 
 	for {
 		if ctx != nil && ctx.Err() != nil {
@@ -394,5 +503,130 @@ func RunPipeline(ctx context.Context, p Pipeline, inv Invoker, opts Options) (Ru
 			}
 			currentIdx++
 		}
+	}
+}
+
+// runEntry invoca al entry agent del pipeline y resuelve el step inicial
+// (PRD §5.a). Devuelve:
+//
+//   - entryRun: el outcome del entry, no-nil siempre que se haya intentado
+//     correr (incluso si terminó en error técnico). El caller lo guarda
+//     en Run.Entry para audit.
+//   - startIdx: índice del step desde el que arrancar el motor cuando
+//     halt == nil. Sólo válido en ese caso.
+//   - halt: Run pre-armado con Stopped=true cuando el entry decidió no
+//     correr ningún step (stop explícito, error técnico, goto inválido,
+//     sin agentes). nil cuando el motor debe seguir.
+//
+// Multi-agente: PR5d invoca solamente Agents[0] (mirror del comportamiento
+// PR5b para Steps). El campo EntrySpec.Aggregator se preserva en el
+// shape para que el follow-up post-PR5c (que tiene Aggregator + runStep
+// reusables) sólo cambie el branch que decide cómo invocar — sin tocar
+// el contrato de runEntry.
+func runEntry(ctx context.Context, p Pipeline, inv Invoker, input string, nameToIdx map[string]int) (*EntryRun, int, *Run) {
+	entry := p.Entry
+	er := &EntryRun{}
+
+	if len(entry.Agents) == 0 {
+		// Defensa: EntrySpec sin agentes (config inválido escapó al
+		// validator). Halt con razón explícita para que el caller
+		// corrija el JSON, igual que para steps sin agentes.
+		er.Marker = Marker{Kind: MarkerStop}
+		er.Resolved = "no-agents"
+		return er, 0, &Run{
+			Stopped:    true,
+			StopReason: StopReasonEntryNoAgents,
+			StopDetail: "entry has no agents declared",
+		}
+	}
+
+	// PR5d: 1 agente por entry. PR5c follow-up traerá multi-agente +
+	// aggregator (mirror del cambio que va a hacer en runStep).
+	agent := entry.Agents[0]
+	er.Agent = agent
+
+	if ctx != nil && ctx.Err() != nil {
+		// Cancelación temprana antes de invocar — propagar como stop
+		// técnico, igual que el loop principal hace.
+		er.Marker = Marker{Kind: MarkerStop}
+		er.Resolved = "technical-error"
+		er.Err = ctx.Err()
+		return er, 0, &Run{
+			Stopped:    true,
+			StopReason: StopReasonTechnicalError,
+			StopDetail: ctx.Err().Error(),
+		}
+	}
+
+	output, format, invErr := inv.Invoke(ctx, agent, input)
+
+	if invErr != nil {
+		// PRD §3.b paso 4: error técnico → stop automático. Para el
+		// entry esto significa "no podemos validar el input → no
+		// arranquemos".
+		er.Marker = Marker{Kind: MarkerStop}
+		er.Resolved = "technical-error"
+		er.Err = invErr
+		return er, 0, &Run{
+			Stopped:    true,
+			StopReason: StopReasonTechnicalError,
+			StopDetail: fmt.Sprintf("entry agent %q: %v", agent, invErr),
+		}
+	}
+
+	// Parsear marker según format reportado por el invoker. Default a
+	// FormatText cuando el invoker no especifica (zero value).
+	var (
+		marker Marker
+		found  bool
+	)
+	switch format {
+	case FormatStreamJSON:
+		marker, found = ParseStreamMarker(output)
+	default:
+		marker, found = ParseMarker(output)
+	}
+	if !found {
+		// PRD §3.b paso 5 + §5.a: sin marker → asume [next] = arrancar
+		// desde el primer step. Mismo default que en steps.
+		marker = Marker{Kind: MarkerNext}
+		er.Resolved = "default-next"
+	} else {
+		er.Resolved = "explicit"
+	}
+	er.Marker = marker
+
+	switch marker.Kind {
+	case MarkerStop:
+		// Rebote del input — el entry decidió que el pipeline no debe
+		// correr. Reason DIFERENTE de StopReasonAgentMarker para que la
+		// UX pueda diferenciar "rebotó en el entry" de "un step paró".
+		return er, 0, &Run{
+			Stopped:    true,
+			StopReason: StopReasonEntryStop,
+			StopDetail: fmt.Sprintf("entry agent %q emitted [stop]", agent),
+		}
+	case MarkerGoto:
+		idx, ok := nameToIdx[marker.Goto]
+		if !ok {
+			// PRD §3.c "step destino inválido" — convertir a stop con
+			// razón explícita. Igual que en steps; mantener consistencia
+			// hace que el caller no tenga que distinguir entry vs step
+			// para este modo de falla.
+			er.Marker = Marker{Kind: MarkerStop}
+			er.Resolved = "unknown-step"
+			return er, 0, &Run{
+				Stopped:    true,
+				StopReason: StopReasonUnknownStep,
+				StopDetail: fmt.Sprintf("entry emitted [goto: %s] but no such step exists", marker.Goto),
+			}
+		}
+		er.StartStep = marker.Goto
+		return er, idx, nil
+	default:
+		// MarkerNext o MarkerNone normalizado a Next: arrancar desde el
+		// primer step (comportamiento default sin entry).
+		er.StartStep = p.Steps[0].Name
+		return er, 0, nil
 	}
 }
