@@ -18,8 +18,8 @@ import (
 const MaxTransitions = 20
 
 // Step es la unidad mínima del pipeline desde la perspectiva del motor.
-// Sólo necesitamos Name + Agents para invocar — el aggregator y demás
-// metadata viven en el paquete `internal/pipeline` (PR2). Cuando PR2
+// Sólo necesitamos Name + Agents + Aggregator para invocar — el resto de
+// metadata vive en el paquete `internal/pipeline` (PR2). Cuando PR2
 // merguea, un follow-up adapta `engine.Run` para consumir
 // `pipeline.Pipeline` directamente y este tipo desaparece.
 type Step struct {
@@ -29,11 +29,16 @@ type Step struct {
 	Name string
 
 	// Agents es la lista de refs a agentes (built-in o custom) que el
-	// step puede correr. PR5b sólo invoca al primero — el motor
-	// multi-agente + aggregator vive en PR5c. La lista se preserva
-	// completa para que la UX (CLI/dash) muestre los candidatos al
-	// usuario y para que PR5c la consuma sin cambiar el shape.
+	// step debe correr. Si len > 1, los agentes corren en paralelo y
+	// Aggregator decide cómo resolver markers en conflicto. Un agente
+	// repetido equivale a N instancias paralelas (best-of-N con el
+	// mismo modelo).
 	Agents []string
+
+	// Aggregator selecciona la política de resolución cuando len(Agents)>1.
+	// Vacío == default (`majority`). Para 1 agente, el campo se ignora —
+	// `runStep` produce el mismo outcome con cualquier preset.
+	Aggregator AggregatorKind
 }
 
 // Pipeline es la secuencia ordenada de steps que el motor ejecuta. Sin
@@ -128,8 +133,9 @@ const (
 type StepRun struct {
 	// Step es el nombre del step que corrió.
 	Step string
-	// Agent es el nombre del agente que el motor invocó. PR5b corre el
-	// primero de la lista; PR5c (multi-agente) extenderá esto a una lista.
+	// Agent es el nombre del agente que produjo el marker resuelto en
+	// modo single-agente. Cuando hay multi-agente (len(Step.Agents)>1)
+	// queda vacío y el detalle vive en AgentResults.
 	Agent string
 	// Marker es el marker resuelto: el que emitió el agente, o el default
 	// `[next]` cuando no hubo marker y la invocación fue exitosa, o
@@ -140,10 +146,18 @@ type StepRun struct {
 	//   - "default-next"      no hubo marker pero la invocación fue OK
 	//   - "technical-error"   la invocación falló
 	//   - "unknown-step"      el goto apuntó a un step inexistente
+	//   - "aggregator"        multi-agente, decidido por el aggregator
 	Resolved string
 	// Err captura el error técnico del invoker, si hubo. Sólo informativo
 	// — la decisión de stop ya quedó reflejada en Marker.
 	Err error
+	// AgentResults trae el detalle por agente en modo multi-agente
+	// (len(Step.Agents)>1). En modo single-agente queda nil — el caller
+	// puede ignorarlo o leer Marker/Agent directamente.
+	AgentResults []AgentResult
+	// AggregatorReason explica cómo el aggregator llegó al Marker en modo
+	// multi-agente. Vacío en modo single-agente.
+	AggregatorReason string
 }
 
 // Run es el resultado completo de una corrida del motor.
@@ -278,51 +292,76 @@ func RunPipeline(ctx context.Context, p Pipeline, inv Invoker, opts Options) (Ru
 			return run, nil
 		}
 
-		// PR5b: 1 agente por step. PR5c trae multi-agente + aggregator.
-		agent := step.Agents[0]
+		// runStep maneja tanto el caso single-agent (len==1) como multi-
+		// agent (len>1, paralelo + aggregator + cancelación parcial). En
+		// single-agent no hay aggregator visible al caller — runStep
+		// resuelve idénticamente al motor pre-PR5c.
+		outcome := runStep(ctx, step, inv, currentInput)
 
-		output, format, invErr := inv.Invoke(ctx, agent, currentInput)
+		stepRun := StepRun{Step: step.Name}
 
-		stepRun := StepRun{
-			Step:  step.Name,
-			Agent: agent,
+		if len(step.Agents) == 1 {
+			// Single-agent: preservamos el shape histórico (Agent + Resolved
+			// "explicit"/"default-next"/"technical-error") para no romper
+			// callers existentes ni los tests heredados.
+			stepRun.Agent = step.Agents[0]
+			if len(outcome.Results) == 1 {
+				ar := outcome.Results[0]
+				stepRun.Err = ar.Err
+				switch {
+				case ar.Err != nil:
+					stepRun.Resolved = "technical-error"
+				case ar.Marker.Kind == MarkerNone:
+					stepRun.Resolved = "default-next"
+				default:
+					stepRun.Resolved = "explicit"
+				}
+			}
+		} else {
+			// Multi-agent: detalle por-agente + razón del aggregator.
+			stepRun.AgentResults = outcome.Results
+			stepRun.AggregatorReason = outcome.AggregatorReason
+			stepRun.Resolved = "aggregator"
+			// Propagar el primer error técnico (si lo hubo) para que los
+			// callers que sólo miran StepRun.Err vean algo útil sin tener
+			// que iterar AgentResults.
+			if outcome.TechnicalError != nil {
+				stepRun.Err = outcome.TechnicalError
+			}
 		}
 
-		if invErr != nil {
-			// PRD §3.b paso 4: "Si la invocación falla (timeout, error de
-			// red, exit code distinto de 0 del binario, crash) → trata el
-			// outcome como [stop] automático".
-			stepRun.Marker = Marker{Kind: MarkerStop}
-			stepRun.Resolved = "technical-error"
-			stepRun.Err = invErr
+		marker := outcome.Marker
+		if marker.Kind == MarkerNone {
+			marker = Marker{Kind: MarkerNext}
+		}
+		stepRun.Marker = marker
+
+		// Caso "todos los agentes errorearon técnicamente y aggregator
+		// resolvió [stop]": tratamos como StopReasonTechnicalError igual
+		// que en el motor single-agente. Esto preserva el contrato
+		// histórico (un agente que falla → stop técnico).
+		if marker.Kind == MarkerStop && outcome.TechnicalError != nil {
 			run.Steps = append(run.Steps, stepRun)
 			run.Stopped = true
 			run.StopReason = StopReasonTechnicalError
-			run.StopDetail = fmt.Sprintf("agent %q in step %q: %v", agent, step.Name, invErr)
+			if len(step.Agents) == 1 {
+				run.StopDetail = fmt.Sprintf("agent %q in step %q: %v", step.Agents[0], step.Name, outcome.TechnicalError)
+			} else {
+				run.StopDetail = fmt.Sprintf("step %q: %s; first error: %v", step.Name, outcome.AggregatorReason, outcome.TechnicalError)
+			}
 			return run, nil
 		}
 
-		// Parsear marker según format. Default a FormatText cuando el
-		// invoker no especifica (zero value).
-		var (
-			marker Marker
-			found  bool
-		)
-		switch format {
-		case FormatStreamJSON:
-			marker, found = ParseStreamMarker(output)
-		default:
-			marker, found = ParseMarker(output)
+		// Cancelación externa del ctx parent (señal, deadline). Si el
+		// outcome devolvió [stop] con error de ctx, mapeamos a stop
+		// técnico igual que el bloque inicial del loop.
+		if marker.Kind == MarkerStop && ctx != nil && ctx.Err() != nil {
+			run.Steps = append(run.Steps, stepRun)
+			run.Stopped = true
+			run.StopReason = StopReasonTechnicalError
+			run.StopDetail = ctx.Err().Error()
+			return run, nil
 		}
-
-		if !found {
-			// PRD §3.b paso 5 + §3.c: "Si no hay marker → asume [next]".
-			marker = Marker{Kind: MarkerNext}
-			stepRun.Resolved = "default-next"
-		} else {
-			stepRun.Resolved = "explicit"
-		}
-		stepRun.Marker = marker
 
 		// Validación de step destino para [goto: X] — PRD §3.c "Step
 		// destino inválido": convertir a stop con razón explícita.
@@ -339,11 +378,6 @@ func RunPipeline(ctx context.Context, p Pipeline, inv Invoker, opts Options) (Ru
 		}
 
 		run.Steps = append(run.Steps, stepRun)
-		// Para PR5b el "input" de cada step se mantiene como el input
-		// original. Cuando PR5c+ traiga el "context base" + outputs
-		// previos, este es el lugar donde se enriquece. Documentar acá
-		// para que el follow-up sepa qué reemplazar.
-		_ = output
 
 		switch marker.Kind {
 		case MarkerStop:
