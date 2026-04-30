@@ -172,12 +172,12 @@ func LockLabel() string {
 }
 
 // LockLabelAt es la versión inyectable de LockLabel: permite tests
-// determinísticos pasando timestamp, pid y host explícitos. No exportada
-// para evitar uso en producción — el caller productivo debe usar
-// LockLabel() para que el lock sea realmente único por proceso.
+// determinísticos pasando timestamp, pid y host explícitos. Exportada
+// (sufijo `At`) para que tests puedan inyectar inputs determinísticos;
+// en código productivo siempre usar LockLabel() para que el lock
+// identifique al proceso real.
 //
-// Exportada con sufijo `At` para que el contrato (deterministic from
-// inputs) sea evidente al lector. Ver lock_test.go para ejemplos.
+// Ver pipelinelabels_test.go (TestLockLabelAt_*) para ejemplos.
 func LockLabelAt(t time.Time, pid int, host string) string {
 	if host == "" {
 		host = "unknown-host"
