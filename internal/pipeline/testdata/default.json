@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "steps": [
+    {
+      "name": "idea",
+      "agents": [
+        "claude-opus"
+      ]
+    },
+    {
+      "name": "explore",
+      "agents": [
+        "claude-opus"
+      ]
+    },
+    {
+      "name": "validate_issue",
+      "agents": [
+        "plan-reviewer-strict",
+        "plan-reviewer-pragmatic",
+        "claude-opus"
+      ]
+    },
+    {
+      "name": "execute",
+      "agents": [
+        "claude-opus"
+      ]
+    },
+    {
+      "name": "validate_pr",
+      "agents": [
+        "code-reviewer-strict",
+        "code-reviewer-security",
+        "claude-opus"
+      ]
+    },
+    {
+      "name": "close",
+      "agents": [
+        "claude-opus"
+      ]
+    }
+  ]
+}
