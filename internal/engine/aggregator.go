@@ -1,5 +1,7 @@
 package engine
 
+import "strconv"
+
 // Aggregator resuelve los markers que emiten N agentes corriendo en paralelo
 // dentro del mismo step. PRD §3.d expone 3 presets fijos
 // (`majority`/`unanimous`/`first_blocker`) — cada uno implementa esta
@@ -17,6 +19,14 @@ package engine
 //
 // Si todos los agentes terminan sin que el aggregator haya decidido, el
 // motor llama Finalize para forzar una decisión sobre el set completo.
+//
+// Contrato Feed/Finalize: el motor llama Feed exactamente una vez por agente
+// que termina (hasta `expected` veces, donde expected = len(step.Agents) en
+// la construcción) salvo short-circuit. Cuando un Feed devuelve Decided=true,
+// el motor deja de alimentar al aggregator y NO llama Finalize. Cuando todos
+// los agentes terminaron sin Decided=true, el motor llama Finalize una sola
+// vez. Los aggregators pueden asumir esa secuencia: Feed* (≤expected) → o
+// bien (a) un Feed que devolvió Decided, o (b) Finalize sobre lo acumulado.
 //
 // Las implementaciones DEBEN ser puras (no compartir estado entre runs).
 // El motor crea una instancia nueva por step.
@@ -136,6 +146,12 @@ func markerFromKey(k markerKey) Marker {
 // effectiveMarker normaliza un AgentResult a un marker votable. Errores
 // técnicos cuentan como [stop] (PRD §3.b paso 4). MarkerNone cuenta como
 // [next] (PRD §3.b paso 5).
+//
+// Invariante: Err≠nil ⇒ se trata como [stop], indistinguible del [stop]
+// explícito emitido por el agente. Los aggregators presets actuales no
+// diferencian "stop por error" de "stop explícito" — si un futuro
+// aggregator necesita esa distinción, debe inspeccionar AgentResult.Err
+// directamente antes de pasar por effectiveMarker.
 func effectiveMarker(r AgentResult) Marker {
 	if r.Err != nil {
 		return Marker{Kind: MarkerStop}
@@ -251,7 +267,7 @@ func (a *unanimousAgg) Feed(r AgentResult) AggregatorOutcome {
 		return AggregatorOutcome{
 			Decided: true,
 			Marker:  markerFromKey(*a.first),
-			Reason:  "unanimous: all " + itoa(a.expected) + " agents agreed on " + describeKey(*a.first),
+			Reason:  "unanimous: all " + strconv.Itoa(a.expected) + " agents agreed on " + describeKey(*a.first),
 		}
 	}
 	return AggregatorOutcome{}
@@ -333,29 +349,5 @@ func describeKey(k markerKey) string {
 }
 
 func formatVoteReason(prefix string, k markerKey, count, total int) string {
-	return prefix + ": " + itoa(count) + "/" + itoa(total) + " votes for " + describeKey(k)
-}
-
-// itoa local (evita pull de strconv para una función trivial).
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+	return prefix + ": " + strconv.Itoa(count) + "/" + strconv.Itoa(total) + " votes for " + describeKey(k)
 }

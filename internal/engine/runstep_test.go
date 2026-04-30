@@ -400,6 +400,35 @@ func TestRunPipeline_StepMultiAgenteErrorTecnicoMapeaATechReason(t *testing.T) {
 	}
 }
 
+func TestRunStep_SingleAgenteIgnoraAggregator(t *testing.T) {
+	// Con 1 agente, runStep debe producir el mismo outcome con cualquiera
+	// de los 3 presets (PRD §3.d: el aggregator se ignora en single-agent).
+	// Iteramos los 3 kinds + el default ("") y verificamos que el marker
+	// final sea idéntico.
+	for _, kind := range []AggregatorKind{"", AggMajority, AggUnanimous, AggFirstBlocker} {
+		kind := kind
+		t.Run(string(kind), func(t *testing.T) {
+			inv := newFakeInvoker(func(agent string, _ int) (string, OutputFormat, error) {
+				return "hola\n[next]", FormatText, nil
+			})
+			step := Step{Name: "s", Agents: []string{"a"}, Aggregator: kind}
+			out := runStep(context.Background(), step, inv, "input")
+			if out.Marker.Kind != MarkerNext {
+				t.Errorf("kind=%q Marker.Kind=%v want next", kind, out.Marker.Kind)
+			}
+			if len(out.Results) != 1 {
+				t.Fatalf("kind=%q Results=%d want 1", kind, len(out.Results))
+			}
+			if out.Results[0].Agent != "a" {
+				t.Errorf("kind=%q Result.Agent=%q want a", kind, out.Results[0].Agent)
+			}
+			if out.TechnicalError != nil {
+				t.Errorf("kind=%q TechnicalError=%v want nil", kind, out.TechnicalError)
+			}
+		})
+	}
+}
+
 // newFakeInvokerWith: mismo shape que newFakeInvoker pero sin tracking
 // (los tests de paralelismo usan atómicos externos).
 func newFakeInvokerWith(fn func(string, int) (string, OutputFormat, error)) *fakeInvoker {

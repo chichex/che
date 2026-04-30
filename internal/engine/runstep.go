@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"sync"
 )
 
@@ -93,6 +94,34 @@ func runStep(ctx context.Context, step Step, inv Invoker, input string) stepOutc
 		aggKind = AggMajority
 	}
 	agg := NewAggregator(aggKind, n)
+	if agg == nil {
+		// Config error: kind desconocido. Cancelamos los agentes ya
+		// disparados y drenamos el channel para no leakear goroutines, y
+		// devolvemos [stop] con razón explícita. El motor mapeará a
+		// StopReasonTechnicalError vía TechnicalError.
+		cancel()
+		var drained []AgentResult
+		for r := range resultsCh {
+			ar := AgentResult{Agent: r.agent}
+			if r.err != nil {
+				ar.Cancelled = true
+			} else {
+				switch r.format {
+				case FormatStreamJSON:
+					ar.Marker, _ = ParseStreamMarker(r.output)
+				default:
+					ar.Marker, _ = ParseMarker(r.output)
+				}
+			}
+			drained = append(drained, ar)
+		}
+		return stepOutcome{
+			Marker:           Marker{Kind: MarkerStop},
+			AggregatorReason: "unknown aggregator kind: " + string(aggKind),
+			Results:          drained,
+			TechnicalError:   errors.New("unknown aggregator kind: " + string(aggKind)),
+		}
+	}
 
 	var (
 		decided        bool
@@ -115,18 +144,28 @@ func runStep(ctx context.Context, step Step, inv Invoker, input string) stepOutc
 		// Distinguir cancelado-por-aggregator de error-real es importante:
 		// el aggregator ignora cancelados (no votan), y el audit log no los
 		// reporta como error.
-		if r.err != nil && stepCtx.Err() != nil && decided {
+		//
+		// Cubrimos dos casos:
+		//   a) decided=true: el aggregator decidió y nosotros llamamos
+		//      cancel() — los Invoke pendientes verán ctx cancelado y
+		//      devolverán err. Esos son cancelaciones internas.
+		//   b) errors.Is(r.err, context.Canceled): el invoker reportó
+		//      explícitamente ctx.Canceled (parent cancelado externamente
+		//      o stepCtx). Cuando stepCtx.Err() != nil, sabemos que el
+		//      árbol está cancelado y NO es un error técnico del agente.
+		// En ambos casos, audit log fiel: Cancelled=true, Err=nil.
+		if r.err != nil && stepCtx.Err() != nil && (decided || errors.Is(r.err, context.Canceled)) {
 			ar.Cancelled = true
 			results = append(results, ar)
 			continue
 		}
 
 		if r.err != nil {
-			// Error técnico real (no cancelación-por-aggregator). El parent
-			// ctx puede haberse cancelado externamente — en ese caso lo
-			// trataremos como error técnico también (consistente con el
-			// motor single-agente, donde ctx.Err() externo gatilla
-			// StopReasonTechnicalError).
+			// Error técnico real (no cancelación). El parent ctx puede
+			// haberse cancelado externamente con un error que NO es
+			// context.Canceled — eso lo seguimos tratando como técnico
+			// (consistente con el motor single-agente: ctx.Err() externo
+			// gatilla StopReasonTechnicalError).
 			ar.Err = r.err
 			ar.Marker = Marker{Kind: MarkerStop}
 			if firstTechErr == nil {
