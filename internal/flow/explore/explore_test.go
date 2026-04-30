@@ -194,7 +194,9 @@ func TestGateBasic(t *testing.T) {
 		{
 			name: "already planned",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:plan"},
+				// Post-PR6b: el flow chequea v2 (`che:state:explore`) en lugar
+				// del viejo `che:plan`.
+				{Name: "ct:plan"}, {Name: "che:state:explore"},
 			}},
 			wantErr: "ya avanzó en el pipeline",
 		},
@@ -281,15 +283,17 @@ func minimalResponseJSON() string {
 // pasaron por explore, y (b) issues "crudos" sin ningún label ct:* que
 // explore va a reclassificar antes de explorar. che:locked excluye siempre.
 func TestFilterCandidates(t *testing.T) {
+	// Post-PR6b: filterCandidates chequea labels v2 (`che:state:*` /
+	// `che:state:applying:*`) en lugar de los viejos `che:plan` / etc.
 	in := []Issue{
-		{Number: 1, Title: "idea clasica", Labels: []Label{{Name: "ct:plan"}, {Name: "che:idea"}}},
-		{Number: 2, Title: "ya explorada", Labels: []Label{{Name: "ct:plan"}, {Name: "che:plan"}}},
-		{Number: 3, Title: "ejecutandose", Labels: []Label{{Name: "ct:plan"}, {Name: "che:executing"}}},
-		{Number: 4, Title: "ejecutada", Labels: []Label{{Name: "ct:plan"}, {Name: "che:executed"}}},
-		{Number: 5, Title: "locked con ct:plan", Labels: []Label{{Name: "ct:plan"}, {Name: "che:idea"}, {Name: "che:locked"}}},
+		{Number: 1, Title: "idea clasica", Labels: []Label{{Name: "ct:plan"}, {Name: "che:state:idea"}}},
+		{Number: 2, Title: "ya explorada", Labels: []Label{{Name: "ct:plan"}, {Name: "che:state:explore"}}},
+		{Number: 3, Title: "ejecutandose", Labels: []Label{{Name: "ct:plan"}, {Name: "che:state:applying:execute"}}},
+		{Number: 4, Title: "ejecutada", Labels: []Label{{Name: "ct:plan"}, {Name: "che:state:execute"}}},
+		{Number: 5, Title: "locked con ct:plan", Labels: []Label{{Name: "ct:plan"}, {Name: "che:state:idea"}, {Name: "che:locked"}}},
 		{Number: 6, Title: "raw sin labels", Labels: nil},
 		{Number: 7, Title: "raw con type y size", Labels: []Label{{Name: "type:feature"}, {Name: "size:m"}}},
-		{Number: 8, Title: "raw con che preexistente", Labels: []Label{{Name: "che:plan"}}},
+		{Number: 8, Title: "raw con che preexistente", Labels: []Label{{Name: "che:state:explore"}}},
 		{Number: 9, Title: "raw locked", Labels: []Label{{Name: "che:locked"}}},
 	}
 	got := filterCandidates(in)

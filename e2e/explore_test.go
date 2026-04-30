@@ -99,14 +99,14 @@ func TestExplore_IssueMissingCtPlan_ClassifiesAndContinues(t *testing.T) {
 	if len(posts) < 3 {
 		t.Fatalf("expected at least 3 POST labels (reclassify + lock + transition), got %d; calls=%v", len(posts), posts)
 	}
-	posts[0].AssertArgsContain(t, "labels[]=ct:plan", "labels[]=che:idea")
+	posts[0].AssertArgsContain(t, "labels[]=ct:plan", "labels[]=che:state:idea")
 	reclassArgs := strings.Join(posts[0].Args, " ")
 	if strings.Contains(reclassArgs, "type:feature") || strings.Contains(reclassArgs, "size:m") {
 		t.Fatalf("reclassify POST debería preservar type/size existentes; args=%v", posts[0].Args)
 	}
 	postsByLabel := findLabelPostsByLabel(inv, 99)
-	if postsByLabel["che:plan"] != 1 {
-		t.Fatalf("expected exactly 1 POST adding che:plan, got %d", postsByLabel["che:plan"])
+	if postsByLabel["che:state:explore"] != 1 {
+		t.Fatalf("expected exactly 1 POST adding che:state:explore, got %d", postsByLabel["che:state:explore"])
 	}
 }
 
@@ -142,7 +142,7 @@ func TestExplore_IssueMissingCtPlan_NoTypeSize_AppliesInferred(t *testing.T) {
 	}
 	posts[0].AssertArgsContain(t,
 		"labels[]=ct:plan",
-		"labels[]=che:idea",
+		"labels[]=che:state:idea",
 		"labels[]=type:feature",
 		"labels[]=size:m",
 	)
@@ -151,14 +151,14 @@ func TestExplore_IssueMissingCtPlan_NoTypeSize_AppliesInferred(t *testing.T) {
 	for _, c := range labelCreates {
 		joined += " " + strings.Join(c.Args, " ")
 	}
-	for _, expected := range []string{"ct:plan", "che:idea", "type:feature", "size:m"} {
+	for _, expected := range []string{"ct:plan", "che:state:idea", "type:feature", "size:m"} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected gh label create for %q; calls=%v", expected, labelCreates)
 		}
 	}
 	postsByLabel := findLabelPostsByLabel(inv, 77)
-	if postsByLabel["che:plan"] != 1 {
-		t.Fatalf("expected exactly 1 POST adding che:plan, got %d", postsByLabel["che:plan"])
+	if postsByLabel["che:state:explore"] != 1 {
+		t.Fatalf("expected exactly 1 POST adding che:state:explore, got %d", postsByLabel["che:state:explore"])
 	}
 }
 
@@ -250,8 +250,8 @@ func TestExplore_IssueMissingCtPlan_WithPreexistingStatus_PreservesStatus(t *tes
 	}
 	posts[0].AssertArgsContain(t, "labels[]=ct:plan")
 	reclassArgs := strings.Join(posts[0].Args, " ")
-	if strings.Contains(reclassArgs, "che:idea") {
-		t.Fatalf("reclassify debería preservar che:plan y NO agregar che:idea; args=%v", posts[0].Args)
+	if strings.Contains(reclassArgs, "che:state:idea") {
+		t.Fatalf("reclassify debería preservar che:state:explore y NO agregar che:state:idea; args=%v", posts[0].Args)
 	}
 	for _, c := range inv.For("claude") {
 		joined := strings.Join(c.Args, " ")
@@ -334,14 +334,14 @@ func TestExplore_GoldenPath(t *testing.T) {
 	if len(deletes) != 2 {
 		t.Fatalf("expected 2 state-label DELETE (idea + planning), got %d", len(deletes))
 	}
-	deletes[0].AssertArgsContain(t, "issues/42/labels/che:idea")
-	deletes[1].AssertArgsContain(t, "issues/42/labels/che:planning")
+	deletes[0].AssertArgsContain(t, "issues/42/labels/che:state:idea")
+	deletes[1].AssertArgsContain(t, "issues/42/labels/che:state:applying:explore")
 	postsByLabel := findLabelPostsByLabel(inv, 42)
-	if postsByLabel["che:planning"] != 1 {
-		t.Fatalf("expected 1 POST adding che:planning, got %d", postsByLabel["che:planning"])
+	if postsByLabel["che:state:applying:explore"] != 1 {
+		t.Fatalf("expected 1 POST adding che:state:applying:explore, got %d", postsByLabel["che:state:applying:explore"])
 	}
-	if postsByLabel["che:plan"] != 1 {
-		t.Fatalf("expected 1 POST adding che:plan, got %d", postsByLabel["che:plan"])
+	if postsByLabel["che:state:explore"] != 1 {
+		t.Fatalf("expected 1 POST adding che:state:explore, got %d", postsByLabel["che:state:explore"])
 	}
 	// No aplicar ct:exec desde explore.
 	if postsByLabel["ct:exec"] != 0 {
@@ -379,11 +379,11 @@ func TestExplore_IssueCtPlanWithoutStatusIdea_EnsuresRemoveLabel(t *testing.T) {
 	// El bug: si no Ensure-amos el label que vamos a --remove-label, gh
 	// falla con "not found" y la transición nunca ocurre. El fix garantiza
 	// que ambos extremos (Add y Remove) existan en el repo.
-	createIdea := inv.FindCalls("gh", "label", "create", "che:idea")
+	createIdea := inv.FindCalls("gh", "label", "create", "che:state:idea")
 	if len(createIdea) == 0 {
 		t.Fatalf("expected `gh label create status:idea` before transition; calls=%v", inv.For("gh"))
 	}
-	createPlan := inv.FindCalls("gh", "label", "create", "che:plan")
+	createPlan := inv.FindCalls("gh", "label", "create", "che:state:explore")
 	if len(createPlan) == 0 {
 		t.Fatalf("expected `gh label create status:plan` before transition; calls=%v", inv.For("gh"))
 	}
@@ -392,14 +392,14 @@ func TestExplore_IssueCtPlanWithoutStatusIdea_EnsuresRemoveLabel(t *testing.T) {
 	if len(deletes) != 2 {
 		t.Fatalf("expected 2 state-label DELETE, got %d", len(deletes))
 	}
-	deletes[0].AssertArgsContain(t, "issues/115/labels/che:idea")
-	deletes[1].AssertArgsContain(t, "issues/115/labels/che:planning")
+	deletes[0].AssertArgsContain(t, "issues/115/labels/che:state:idea")
+	deletes[1].AssertArgsContain(t, "issues/115/labels/che:state:applying:explore")
 	postsByLabel := findLabelPostsByLabel(inv, 115)
-	if postsByLabel["che:planning"] != 1 {
-		t.Fatalf("expected 1 POST adding che:planning, got %d", postsByLabel["che:planning"])
+	if postsByLabel["che:state:applying:explore"] != 1 {
+		t.Fatalf("expected 1 POST adding che:state:applying:explore, got %d", postsByLabel["che:state:applying:explore"])
 	}
-	if postsByLabel["che:plan"] != 1 {
-		t.Fatalf("expected 1 POST adding che:plan, got %d", postsByLabel["che:plan"])
+	if postsByLabel["che:state:explore"] != 1 {
+		t.Fatalf("expected 1 POST adding che:state:explore, got %d", postsByLabel["che:state:explore"])
 	}
 }
 
@@ -562,7 +562,7 @@ func TestExplore_LabelEditFailsAfterComment_Exit2_WarnsOrphan(t *testing.T) {
 	// shadowea cualquier matcher de fallo registrado después. Consumable=true
 	// para que solo el POST adding che:plan falle, los demás (Lock/Unlock,
 	// transiciones previas) caen al catch-all subsiguiente.
-	env.ExpectGh(`^api -X POST repos/\{owner\}/\{repo\}/issues/42/labels.*labels\[\]=che:plan(\s|$)`).
+	env.ExpectGh(`^api -X POST repos/\{owner\}/\{repo\}/issues/42/labels.*labels\[\]=che:state:explore(\s|$)`).
 		Consumable().
 		RespondExitWithError(1, "422 validation failed\n")
 	scriptExplorePrechecks(env)
@@ -636,8 +636,8 @@ func TestExplore_MissingConsolidatedPlan_Exit3(t *testing.T) {
 	}
 	for _, e := range inv.For("gh") {
 		joined := strings.Join(e.Args, " ")
-		if strings.Contains(joined, "--add-label che:plan ") || strings.HasSuffix(joined, "--add-label che:plan") {
-			t.Fatalf("transition to che:plan should NOT happen on missing consolidated_plan: %v", e.Args)
+		if strings.Contains(joined, "--add-label che:state:explore ") || strings.HasSuffix(joined, "--add-label che:state:explore") {
+			t.Fatalf("transition to che:state:explore should NOT happen on missing consolidated_plan: %v", e.Args)
 		}
 	}
 }
