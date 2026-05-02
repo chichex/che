@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,21 +12,37 @@ import (
 	"github.com/chichex/che/internal/agentregistry"
 	"github.com/chichex/che/internal/engine"
 	"github.com/chichex/che/internal/pipeline"
+	"github.com/chichex/che/internal/runner"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
 
+// Flags de `che run`. Globales al package porque cobra los lee del
+// commando y runPipelineRun se invoca por código directo (sin Flags
+// real) desde los tests.
 var (
-	runFromStep string
-	runInput    string
+	runFromStep     string
+	runInput        string
+	runPipelineFlag string
+	runAutoFlag     bool
+	runManualFlag   bool
 )
 
 var runCmd = &cobra.Command{
 	Use:   "run [pipeline]",
-	Short: "ejecuta un pipeline (entry agent + steps + markers)",
-	Long: `run resuelve un pipeline (jerarquía: arg posicional > config.default >
-built-in, PRD §7.b) y lo ejecuta a través del engine: corre el entry
-agent (si hay), parsea su marker, y dispara los steps en orden hasta
-[stop] o hasta el último step.
+	Short: "ejecuta un pipeline (entry agent + steps + markers; auto/manual)",
+	Long: `run resuelve un pipeline (jerarquía: --pipeline > arg posicional >
+config.default > built-in, PRD §7.b) y lo ejecuta a través del engine:
+corre el entry agent (si hay), parsea su marker, y dispara los steps
+en orden hasta [stop] o hasta el último step.
+
+Modos (PRD §3.e):
+
+  - auto-loop (default sin TTY): corre todos los agentes declarados en
+    cada step. Es el modo del dash, CI y scripts. Forzar con --auto.
+  - manual (default con TTY): por cada step abre un wizard donde el
+    usuario tilda el subset de agentes a correr (default: todos
+    preseleccionados). Forzar con --manual.
 
 Override manual del entry: usá '--from <step>' para bypassear el entry
 y arrancar directamente desde el step pedido (PRD §5.c). Útil para
@@ -34,8 +51,8 @@ input.
 
 Esta v1 sólo invoca a los 3 agentes built-in (claude-opus/sonnet/haiku)
 vía el binario 'claude'. Pipelines que referencien agentes custom
-emitirán [stop] técnico — el wiring de subagents custom de Claude Code
-llega en un follow-up.`,
+emitirán un error humano con el listado de los agentes no soportados —
+el wiring de subagents custom de Claude Code llega en un follow-up.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
@@ -47,14 +64,26 @@ llega en un follow-up.`,
 		if err != nil {
 			return fmt.Errorf("init pipeline manager: %s", formatLoadError(err))
 		}
-		flag := ""
-		if len(args) == 1 {
+		// Jerarquía: --pipeline gana sobre arg posicional. Si ambos
+		// vienen, --pipeline es explícito y prima.
+		flag := runPipelineFlag
+		if flag == "" && len(args) == 1 {
 			flag = args[0]
 		}
-		// Live invoker: usa internal/agent.Run para los built-ins. Tests
-		// pasan un fake via runPipelineRun directo.
+		stdinIsTTY := isatty.IsTerminal(os.Stdin.Fd())
+		mode, sel, err := pickModeAndSelector(stdinIsTTY, runAutoFlag, runManualFlag, cmd.ErrOrStderr())
+		if err != nil {
+			return err
+		}
+		// Live invoker: usa internal/agent.Run para los built-ins.
+		// Tests pasan un fake via runPipelineRun directo.
 		inv := newLiveInvoker()
-		return runPipelineRun(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), mgr, inv, flag, runFromStep, runInput)
+		return runPipelineRun(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), mgr, inv, sel, runRunArgs{
+			pipelineFlag: flag,
+			fromStep:     runFromStep,
+			input:        runInput,
+			mode:         mode,
+		})
 	},
 }
 
@@ -63,15 +92,72 @@ func init() {
 		"step desde el que arrancar — bypassa el entry agent (PRD §5.c)")
 	runCmd.Flags().StringVar(&runInput, "input", "",
 		"input inicial del pipeline (texto libre que recibe el entry o el primer step)")
+	runCmd.Flags().StringVar(&runPipelineFlag, "pipeline", "",
+		"nombre del pipeline a correr (override del arg posicional)")
+	runCmd.Flags().BoolVar(&runAutoFlag, "auto", false,
+		"forzar modo auto-loop (todos los agentes), aunque stdin sea TTY")
+	runCmd.Flags().BoolVar(&runManualFlag, "manual", false,
+		"forzar modo manual (selector de agentes por step), aunque stdin no sea TTY")
 	rootCmd.AddCommand(runCmd)
 }
 
-// runPipelineRun es la función testeable: resuelve el pipeline, lo
-// convierte al shape del engine, dispara la ejecución y formatea el
-// outcome. Separar el wiring del invocador concreto permite que los
-// tests inyecten un fake sin spawnear el CLI de claude.
-func runPipelineRun(ctx context.Context, out, errOut io.Writer, mgr *pipeline.Manager, inv engine.Invoker, pipelineFlag, fromStep, input string) error {
-	r, err := mgr.Resolve(pipelineFlag)
+// pickModeAndSelector resuelve el par (Mode, Selector) según las flags
+// y el TTY:
+//
+//   - --auto y --manual a la vez: error (mutex).
+//   - --auto: ModeAuto + AutoSelector (siempre, ignora TTY).
+//   - --manual sin TTY: error (no podemos abrir el wizard sin tty).
+//   - --manual con TTY: ModeManual + PromptSelector.
+//   - sin flags + TTY: ModeManual + PromptSelector (default
+//     interactivo).
+//   - sin flags + no-TTY: ModeAuto + AutoSelector (default
+//     scripteable).
+//
+// El error de --manual sin TTY se reporta antes de invocar al manager
+// para fallar barato y darle al usuario la opción de re-lanzar con
+// --auto.
+func pickModeAndSelector(stdinIsTTY, auto, manual bool, stderr io.Writer) (runner.Mode, runner.Selector, error) {
+	if auto && manual {
+		return "", nil, errors.New("--auto y --manual son mutuamente excluyentes")
+	}
+	if manual && !stdinIsTTY {
+		return "", nil, errors.New("--manual requiere stdin TTY (estás en un pipe / redirección): usá --auto o quitá la redirección")
+	}
+	if auto || (!manual && !stdinIsTTY) {
+		return runner.ModeAuto, runner.AutoSelector, nil
+	}
+	// Caso TTY (con o sin --manual explícito).
+	return runner.ModeManual, runner.PromptSelector(stderr), nil
+}
+
+// runRunArgs agrupa los parámetros de runPipelineRun para mantener la
+// firma legible. Inyectable desde tests sin tocar las flags globales.
+type runRunArgs struct {
+	pipelineFlag string
+	fromStep     string
+	input        string
+	mode         runner.Mode
+}
+
+// runPipelineRun es la función testeable: resuelve el pipeline, aplica
+// el selector por step (auto = todos, manual = subset elegido por el
+// usuario), lo convierte al shape del engine, dispara la ejecución y
+// formatea el outcome.
+//
+// Flujo:
+//  1. Resolver pipeline.
+//  2. Imprimir banner (pipeline, source, mode, from si aplica).
+//  3. ResolveSelections con el selector — manual abre wizard, auto
+//     devuelve la lista completa. Cancelación es exit 0.
+//  4. toEnginePipeline preserva Entry+Aggregator (PR5d) y aplica el
+//     subset elegido por step (PR9a).
+//  5. Pre-vuelo checkBuiltinsOnly si el invoker es el liveInvoker.
+//  6. engine.RunPipeline corre el motor (entry + steps + markers).
+//  7. writeRunSummary imprime el outcome.
+//  8. Exit semántico: stop técnico → error; stop por agente / entry /
+//     loop cap → exit 0 (outcome legítimo).
+func runPipelineRun(ctx context.Context, out, errOut io.Writer, mgr *pipeline.Manager, inv engine.Invoker, sel runner.Selector, args runRunArgs) error {
+	r, err := mgr.Resolve(args.pipelineFlag)
 	if err != nil {
 		return fmt.Errorf("%s", formatLoadError(err))
 	}
@@ -82,15 +168,26 @@ func runPipelineRun(ctx context.Context, out, errOut io.Writer, mgr *pipeline.Ma
 	}
 	fmt.Fprintf(out, "pipeline: %s\n", r.Name)
 	fmt.Fprintf(out, "source:   %s (%s)\n", r.Source, src)
-	if fromStep != "" {
-		fmt.Fprintf(out, "from:     %s (entry bypassed)\n", fromStep)
+	fmt.Fprintf(out, "mode:     %s\n", args.mode)
+	if args.fromStep != "" {
+		fmt.Fprintf(out, "from:     %s (entry bypassed)\n", args.fromStep)
 	}
 	fmt.Fprintln(out, "")
 
-	// Convertir pipeline.Pipeline → engine.Pipeline. v1 ignora el
-	// Aggregator de Steps/Entry (PR5b/PR5d sólo invocan al primer
-	// agente; PR5c follow-up wirea multi-agente sin tocar este mapeo).
-	ep := toEnginePipeline(r.Pipeline)
+	// Resolver subset por step (manual abre wizard, auto = todos).
+	// Cancelación es exit 0, no error técnico.
+	sels, err := runner.ResolveSelections(r.Pipeline, sel)
+	if err != nil {
+		if errors.Is(err, runner.ErrSelectionCancelled) {
+			fmt.Fprintln(errOut, "che run: cancelado por el usuario.")
+			return nil
+		}
+		return err
+	}
+
+	// Convertir pipeline.Pipeline → engine.Pipeline. Preserva Entry
+	// y Aggregator (PR5d) y aplica el subset elegido por step (PR9a).
+	ep := toEnginePipeline(r.Pipeline, sels)
 
 	// Pre-vuelo: si el invoker es el liveInvoker (built-ins-only en v1),
 	// caminar el pipeline y rechazar agentes custom con un mensaje humano
@@ -113,8 +210,8 @@ func runPipelineRun(ctx context.Context, out, errOut io.Writer, mgr *pipeline.Ma
 		ctx = context.Background()
 	}
 	run, err := engine.RunPipeline(ctx, ep, inv, engine.Options{
-		EntryStep: fromStep,
-		Input:     input,
+		EntryStep: args.fromStep,
+		Input:     args.input,
 	})
 	if err != nil {
 		return fmt.Errorf("engine: %w", err)
@@ -122,8 +219,9 @@ func runPipelineRun(ctx context.Context, out, errOut io.Writer, mgr *pipeline.Ma
 
 	writeRunSummary(out, run)
 
-	// Exit semántico: stop técnico → 1; stop por agente o entry → 2;
-	// completado ok → 0. Cobra lo traduce vía SilenceErrors+RunE.
+	// Exit semántico: stop técnico → 1; stop por agente o entry o loop
+	// cap → 0 (outcome legítimo del pipeline). Cobra lo traduce vía
+	// SilenceErrors+RunE.
 	if run.Stopped {
 		switch run.StopReason {
 		case engine.StopReasonTechnicalError, engine.StopReasonEmptyPipeline,
@@ -189,12 +287,24 @@ func describeMarker(m engine.Marker) string {
 // que tocar este mapping. En single-agent (el único modo que corre
 // hoy en producción) el motor ignora el campo, así que copiarlo es
 // preventivo, no funcional.
-func toEnginePipeline(p pipeline.Pipeline) engine.Pipeline {
+//
+// `sels` filtra los agentes de cada step al subset elegido por el
+// selector (auto = todos, manual = subset del wizard). Steps sin
+// override mantienen su lista canónica. Entry NO se filtra: el modo
+// manual aplica sólo a los steps (PR9a) — el entry corre completo o
+// se bypassea entero con --from.
+func toEnginePipeline(p pipeline.Pipeline, sels runner.Selections) engine.Pipeline {
 	ep := engine.Pipeline{Steps: make([]engine.Step, 0, len(p.Steps))}
 	for _, s := range p.Steps {
+		agents := append([]string(nil), s.Agents...)
+		if sels != nil {
+			if subset, ok := sels[s.Name]; ok {
+				agents = filterPreservingOrder(s.Agents, subset)
+			}
+		}
 		ep.Steps = append(ep.Steps, engine.Step{
 			Name:       s.Name,
-			Agents:     append([]string(nil), s.Agents...),
+			Agents:     agents,
 			Aggregator: engine.AggregatorKind(s.Aggregator),
 		})
 	}
@@ -205,6 +315,25 @@ func toEnginePipeline(p pipeline.Pipeline) engine.Pipeline {
 		}
 	}
 	return ep
+}
+
+// filterPreservingOrder devuelve los elementos de `canonical` que están
+// en `subset`, en el orden de canonical. Útil para que la lista del
+// motor conserve la prioridad del JSON aunque el wizard haya devuelto
+// el subset en otro orden (caso típico: el usuario tildó la box 3 y
+// luego la 1).
+func filterPreservingOrder(canonical, subset []string) []string {
+	keep := make(map[string]bool, len(subset))
+	for _, a := range subset {
+		keep[a] = true
+	}
+	out := make([]string, 0, len(subset))
+	for _, a := range canonical {
+		if keep[a] {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // liveInvoker mapea agentes built-in a `internal/agent.Run` (claude
