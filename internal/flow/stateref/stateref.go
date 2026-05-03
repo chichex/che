@@ -143,28 +143,25 @@ func (r Resolution) HasLabel(name string) bool {
 //
 // REMOVE IN PR6d: junto con las constantes v1 viejas, este set se reduce a
 // solo v2.
-var stateLabelSet = map[string]struct{}{
+var stateLabelSet = func() map[string]struct{} {
+	out := map[string]struct{}{
+		// v2 (modelo derivado del pipeline declarativo)
+		pipelinelabels.StateIdea:               {},
+		pipelinelabels.StateApplyingExplore:    {},
+		pipelinelabels.StateExplore:            {},
+		pipelinelabels.StateApplyingExecute:    {},
+		pipelinelabels.StateExecute:            {},
+		pipelinelabels.StateApplyingValidatePR: {},
+		pipelinelabels.StateValidatePR:         {},
+		pipelinelabels.StateApplyingClose:      {},
+		pipelinelabels.StateClose:              {},
+	}
 	// v1 (legacy — REMOVE IN PR6d)
-	labels.CheIdea:       {},
-	labels.ChePlanning:   {},
-	labels.ChePlan:       {},
-	labels.CheExecuting:  {},
-	labels.CheExecuted:   {},
-	labels.CheValidating: {},
-	labels.CheValidated:  {},
-	labels.CheClosing:    {},
-	labels.CheClosed:     {},
-	// v2 (modelo derivado del pipeline declarativo)
-	pipelinelabels.StateIdea:               {},
-	pipelinelabels.StateApplyingExplore:    {},
-	pipelinelabels.StateExplore:            {},
-	pipelinelabels.StateApplyingExecute:    {},
-	pipelinelabels.StateExecute:            {},
-	pipelinelabels.StateApplyingValidatePR: {},
-	pipelinelabels.StateValidatePR:         {},
-	pipelinelabels.StateApplyingClose:      {},
-	pipelinelabels.StateClose:              {},
-}
+	for _, l := range labels.V1LegacyStates() {
+		out[l] = struct{}{}
+	}
+	return out
+}()
 
 // hasCheStateLabel devuelve true si names contiene al menos uno de los
 // labels de máquina de estados.

@@ -35,27 +35,15 @@ import (
 	"github.com/chichex/che/internal/pipelinelabels"
 )
 
-// v1StateLabels son los 9 labels del modelo viejo. El gate los rechaza con
-// mensaje accionable apuntando a `che migrate-labels-v2`. REMOVE IN PR6d.
-var v1StateLabels = []string{
-	labels.CheIdea,
-	labels.ChePlanning,
-	labels.ChePlan,
-	labels.CheExecuting,
-	labels.CheExecuted,
-	labels.CheValidating,
-	labels.CheValidated,
-	labels.CheClosing,
-	labels.CheClosed,
-}
-
 // rejectV1Labels devuelve un error accionable si la lista contiene labels
 // del modelo viejo. Wirea ValidateNoMixedLabels para detectar mezcla v1+v2.
+//
+// REMOVE IN PR6d junto con `labels.V1LegacyStates`/`ValidateNoMixedLabels`.
 func rejectV1Labels(kind string, number int, current []string) error {
 	if err := labels.ValidateNoMixedLabels(current); err != nil {
 		return fmt.Errorf("%s #%d: %w", kind, number, err)
 	}
-	for _, v1 := range v1StateLabels {
+	for _, v1 := range labels.V1LegacyStates() {
 		for _, l := range current {
 			if l == v1 {
 				return fmt.Errorf("%s #%d tiene labels v1 (%s); este flow opera sobre el modelo v2 (`che:state:*`). Corré `che migrate-labels-v2` antes de cerrar, o ajustá los labels a mano", kind, number, v1)

@@ -8,9 +8,24 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/pipelinelabels"
 	"github.com/spf13/cobra"
+)
+
+// Strings literales de los 9 labels v1 — son entrada de migración (input,
+// no runtime). Post-PR6c el paquete labels ya no exporta constantes para
+// estos; este subcomando es uno de los 3 sitios (junto con dash y los
+// guards rejectV1Labels) que reconoce v1 como string opaco.
+const (
+	v1CheIdea       = "che:idea"
+	v1ChePlanning   = "che:planning"
+	v1ChePlan       = "che:plan"
+	v1CheExecuting  = "che:executing"
+	v1CheExecuted   = "che:executed"
+	v1CheValidating = "che:validating"
+	v1CheValidated  = "che:validated"
+	v1CheClosing    = "che:closing"
+	v1CheClosed     = "che:closed"
 )
 
 // v2Pair representa un mapping v1 → v2 que `che migrate-labels-v2` aplica
@@ -38,15 +53,15 @@ type v2Pair struct {
 // log.Warn pero mapeamos igual.
 func v2MigrationPairs() []v2Pair {
 	return []v2Pair{
-		{V1: labels.CheIdea, V2: pipelinelabels.StateIdea},
-		{V1: labels.ChePlanning, V2: pipelinelabels.StateApplyingExplore},
-		{V1: labels.ChePlan, V2: pipelinelabels.StateExplore},
-		{V1: labels.CheExecuting, V2: pipelinelabels.StateApplyingExecute},
-		{V1: labels.CheExecuted, V2: pipelinelabels.StateExecute},
-		{V1: labels.CheValidating, V2: pipelinelabels.StateApplyingValidatePR},
-		{V1: labels.CheValidated, V2: pipelinelabels.StateValidatePR},
-		{V1: labels.CheClosing, V2: pipelinelabels.StateApplyingClose},
-		{V1: labels.CheClosed, V2: pipelinelabels.StateClose},
+		{V1: v1CheIdea, V2: pipelinelabels.StateIdea},
+		{V1: v1ChePlanning, V2: pipelinelabels.StateApplyingExplore},
+		{V1: v1ChePlan, V2: pipelinelabels.StateExplore},
+		{V1: v1CheExecuting, V2: pipelinelabels.StateApplyingExecute},
+		{V1: v1CheExecuted, V2: pipelinelabels.StateExecute},
+		{V1: v1CheValidating, V2: pipelinelabels.StateApplyingValidatePR},
+		{V1: v1CheValidated, V2: pipelinelabels.StateValidatePR},
+		{V1: v1CheClosing, V2: pipelinelabels.StateApplyingClose},
+		{V1: v1CheClosed, V2: pipelinelabels.StateClose},
 	}
 }
 
@@ -178,7 +193,7 @@ func runMigrateLabelsV2(out io.Writer, repo string, dryRun bool) error {
 		fmt.Fprintf(out, "issue #%d %q\n", iss.Number, iss.Title)
 		for _, a := range actions {
 			// Caveat de validating: warn pero migra. Ver doc del paquete.
-			if a.V1 == labels.CheValidating {
+			if a.V1 == v1CheValidating {
 				fmt.Fprintf(out, "  warn: %s en v1 cubría plan+PR; mapeo a %s puede no encajar si el run era plan-validate\n", a.V1, a.V2)
 			}
 			if dryRun {

@@ -34,32 +34,18 @@ import (
 	planpkg "github.com/chichex/che/internal/plan"
 )
 
-// v1StateLabels son los 9 labels del modelo viejo. Los gates de los flows
-// migrados a v2 los rechazan con mensaje accionable que sugiere
-// `che migrate-labels-v2` — si avanzaran, mezclaríamos v1+v2 en el issue/PR
-// (estado ilegal en ambas máquinas). REMOVE IN PR6d junto con el shim.
-var v1StateLabels = []string{
-	labels.CheIdea,
-	labels.ChePlanning,
-	labels.ChePlan,
-	labels.CheExecuting,
-	labels.CheExecuted,
-	labels.CheValidating,
-	labels.CheValidated,
-	labels.CheClosing,
-	labels.CheClosed,
-}
-
 // rejectV1Labels devuelve un error accionable si la lista contiene algún
 // label v1 del modelo viejo. Wirea ValidateNoMixedLabels para detectar
 // mezclas v1+v2 (caso intermedio: alguien aplicó che:state:* a mano sobre
 // un issue v1) y, si todo es v1-only, devuelve un error apuntando a
 // migrate-labels-v2.
+//
+// REMOVE IN PR6d junto con `labels.V1LegacyStates`/`ValidateNoMixedLabels`.
 func rejectV1Labels(kind string, number int, current []string) error {
 	if err := labels.ValidateNoMixedLabels(current); err != nil {
 		return fmt.Errorf("%s #%d: %w", kind, number, err)
 	}
-	for _, v1 := range v1StateLabels {
+	for _, v1 := range labels.V1LegacyStates() {
 		for _, l := range current {
 			if l == v1 {
 				return fmt.Errorf("%s #%d tiene labels v1 (%s); este flow opera sobre el modelo v2 (`che:state:*`). Corré `che migrate-labels-v2` antes de validar, o ajustá los labels a mano", kind, number, v1)
