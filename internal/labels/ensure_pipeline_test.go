@@ -81,3 +81,58 @@ func TestExpectedForPipeline_NoLockLabels(t *testing.T) {
 		}
 	}
 }
+
+// TestStyleFor_KnownLabelsHaveColor: para cada label conocido del
+// pipeline default verificamos que styleFor devuelve un color (no
+// vacío) — si no, init-labels va a crear el label sin estilo y el
+// dashboard queda gris.
+//
+// Verificamos también colores específicos para los grupos (applying,
+// approve/changes-requested/needs-human). Si la tabla cambia (ej. el
+// equipo elige otra paleta), este test rompe deliberadamente para
+// forzar update.
+func TestStyleFor_KnownLabelsHaveColor(t *testing.T) {
+	cases := []struct {
+		label     string
+		wantColor string
+	}{
+		{"che:state:idea", "cccccc"},
+		{"che:state:explore", "1d76db"},
+		{"che:state:execute", "1d76db"},
+		{"che:state:close", "0e8a16"},
+		{"che:state:applying:explore", "fbca04"},
+		{"che:state:applying:execute", "fbca04"},
+		{"che:state:applying:close", "fbca04"},
+		{"che:state:validate_issue", "1d76db"},
+		{"che:state:validate_pr", "1d76db"},
+		{"validated:approve", "0e8a16"},
+		{"plan-validated:approve", "0e8a16"},
+		{"validated:changes-requested", "f6a51e"},
+		{"plan-validated:changes-requested", "f6a51e"},
+		{"validated:needs-human", "b60205"},
+		{"plan-validated:needs-human", "b60205"},
+		{CtPlan, "5319e7"},
+		{CheLocked, "d93f0b"},
+	}
+	for _, c := range cases {
+		t.Run(c.label, func(t *testing.T) {
+			got := styleFor(c.label)
+			if got.Color != c.wantColor {
+				t.Errorf("styleFor(%q).Color = %q, want %q", c.label, got.Color, c.wantColor)
+			}
+			if got.Description == "" {
+				t.Errorf("styleFor(%q).Description está vacío — todo label conocido debería describirse", c.label)
+			}
+		})
+	}
+}
+
+// TestStyleFor_UnknownReturnsZero: un label no listado devuelve
+// LabelStyle{} (color y description vacíos). EnsureWithStyle interpreta
+// eso como "no pisar el estilo manual del repo" — backward-compat.
+func TestStyleFor_UnknownReturnsZero(t *testing.T) {
+	got := styleFor("type:bug")
+	if got.Color != "" || got.Description != "" {
+		t.Errorf("styleFor(unknown).Color/Description debería ser vacío, got %+v", got)
+	}
+}

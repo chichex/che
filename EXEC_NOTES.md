@@ -125,6 +125,34 @@ target — el comment va al issue raíz cuando está disponible.
 
 ## Lo que no se hizo (pendiente para PRs siguientes)
 
+0. **PR7-followup-X: Deprecar `labels.Lock` (mutex `che:locked`) y unificar
+   en `internal/lock`.** Hoy cada flow aplica AMBOS al arrancar (mutex
+   viejo + heartbeat lock nuevo) — ver el patrón `labels.Lock(...)
+   defer labels.Unlock(...)` arriba del `runguard.AcquireLock(...)
+   defer runguard.ReleaseLock(...)` en cada flow. Eso duplica
+   round-trips a `gh` y deja al usuario final con DOS labels de "estoy
+   ocupado" cuando se activa `CHE_LOCK_HEARTBEAT=1`. Trigger para hacer
+   el follow-up: cuando `CHE_LOCK_HEARTBEAT=1` haya corrido en N runs
+   reales sin incidentes (propuesta: **50 runs en 2 semanas**, contando
+   manualmente en repos donde se active la flag por env).
+
+   Plan:
+   1. Migrar los gates pre-existentes que leen `che:locked`
+      (`internal/labels.IsLocked`, `internal/dash` filterCandidates,
+      cualquier otro consumidor) para que también acepten el formato
+      `che:lock:<ts>:<pid>-<host>` via `pipelinelabels.Parse`. Conocer
+      el dueño/edad del lock es estrictamente más útil que el binario.
+   2. Borrar `labels.Lock` / `labels.Unlock` y todos los call-sites
+      (`internal/flow/{explore,execute,iterate,validate,close}`).
+   3. Cleanup one-shot: subcomando opcional para borrar el label
+      `che:locked` huerfano de repos en uso. No es bloqueante — el
+      label simplemente queda inerte si nadie lo aplica.
+   4. Repos con `che:locked` huérfano por un crash pre-migración: el
+      cleanup script borra el label si la edad supera `<TTL>` desde el
+      commit de migración (heuristic; el binario `che:locked` no lleva
+      timestamp así que no hay forma determinística — la heurística es
+      "si nadie lo refrescó en 5 minutos, asumir muerto").
+
 1. **Default-on**: ambos features arrancan default-off. Cuando estén
    validados en repos reales, un follow-up corto (~10 LoC) puede
    invertir los defaults o borrar las funciones `Enabled()`/
@@ -161,6 +189,38 @@ target — el comment va al issue raíz cuando está disponible.
    nada. Si alguien quiere colores específicos por estado/verdict,
    sumar `--color` y `--description` per-label en EnsureForPipeline
    (tabla en `internal/labels`).
+
+7. **PR7-followup-Y: Matriz e2e con `flag=on` para los 5 flows
+   restantes.** Este PR cubre el happy-path solo para `explore` (ver
+   `e2e/heartbeat_lock_happy_path_test.go` con `TestHeartbeatLock_HappyPath_Explore`,
+   `TestHeartbeatLock_HappyPath_Explore_RunVariant`,
+   `TestHeartbeatLock_StaleEvicted_Explore`). Falta replicar para
+   `execute`, `iterate-pr`, `iterate-plan`, `validate-pr`, `validate-plan`,
+   y `close`. Cada uno requiere:
+
+   - Subtest `t.Run("flag=on", ...)` con `env.SetEnv("CHE_LOCK_HEARTBEAT",
+     "1")` y, en paralelo, un caso similar con `CHE_AUDIT_LOG=1` si se
+     quiere ejercer el audit log también.
+   - Matchers nuevos en el harness para `gh api .../labels` (POST/DELETE
+     de `che:lock:*`) por cada Acquire/Release.
+   - Matchers nuevos para `gh api PATCH .../comments/<id>` si tambien
+     se activa `CHE_AUDIT_LOG=1`.
+   - Estimación: ~30 LoC por flow × 6 flows = ~180 LoC. Bloqueador
+     realista: el harness exige consume-once por matcher (ver
+     `project_e2e_design.md`), así que cada call nuevo necesita su
+     propio matcher en cada test que ejercita ese flow — los catch-alls
+     existentes (`scriptCheLockDefault`, etc.) son non-consumable y
+     pueden absorber muchos pero no todos los casos.
+
+8. **PR7-followup-Z: Post-create re-list en audit log para neutralizar
+   comments fantasma**. `internal/auditlog.Append` hoy hace
+   List → Create-if-missing. Dos runs paralelos sin marker pueden caer
+   en "ambos crean" y queda un comment fantasma. Fix barato: post-create,
+   re-list los comments del issue, filtrar por marker, mantener el más
+   viejo y borrar los demás. Cuesta 1 list + N deletes adicionales pero
+   es una sola vez en la vida del issue (post-create). Es el mismo
+   patrón del post-check de race del lock — vale aplicarlo
+   consistentemente.
 
 ## Compatibilidad con PR6c
 

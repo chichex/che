@@ -22,7 +22,6 @@ import (
 	"github.com/chichex/che/internal/flow/idea"
 	"github.com/chichex/che/internal/flow/runguard"
 	"github.com/chichex/che/internal/labels"
-	"github.com/chichex/che/internal/lock"
 	"github.com/chichex/che/internal/output"
 	"github.com/chichex/che/internal/pipelinelabels"
 	"github.com/chichex/che/internal/plan"
@@ -360,9 +359,9 @@ func Run(issueRef string, opts Opts) ExitCode {
 	// Lock con heartbeat + TTL (PRD §6.d) — opt-in vía CHE_LOCK_HEARTBEAT.
 	// Convive con `labels.Lock` arriba: el binario `che:locked` queda como
 	// mutex simple para flows v1 y este lock agrega identidad + staleness.
-	heartbeat := runguard.AcquireLock(issueRef, "explore", log)
+	heartbeat, lockResult := runguard.AcquireLock(issueRef, "explore", log)
 	defer runguard.ReleaseLock(heartbeat, log)
-	if heartbeat == nil && lock.HeartbeatEnabled() {
+	if lockResult == runguard.AcquireContended {
 		// Lock vivo de otro proceso — abortamos sin tocar nada.
 		return ExitSemantic
 	}

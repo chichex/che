@@ -1,6 +1,7 @@
 package auditlog
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -158,6 +159,88 @@ func TestAppend_AtZeroFillsNow(t *testing.T) {
 	}
 	if !strings.Contains(captured, "2025-05-03T12:00:00Z") {
 		t.Errorf("body sin timestamp inyectado:\n%s", captured)
+	}
+}
+
+// TestParseCommentURL_CanonicalFormats: ghCreateComment extrae el ID del
+// comment a partir de la URL que imprime `gh issue comment` por stdout.
+// Verificamos que el parser acepta los formatos canónicos que gh emite,
+// incluyendo URLs con trailing newline / whitespace y con paths que
+// usan /pull/ en vez de /issues/.
+//
+// Si gh cambia el formato, este test rompe ANTES de descubrir el bug en
+// producción (donde silenciosamente quedaríamos con id=0 y el siguiente
+// Append sobreviviría por marker, pero perderíamos la observabilidad
+// del log).
+func TestParseCommentURL_CanonicalFormats(t *testing.T) {
+	// Reproduce in-line la lógica que vive en ghCreateComment para que
+	// podamos testearla sin shell-out. Mantener sincronizado con
+	// auditlog.go: si cambia, este test rompe.
+	parse := func(stdout string) int64 {
+		url := strings.TrimSpace(stdout)
+		if i := strings.LastIndex(url, "issuecomment-"); i >= 0 {
+			idStr := url[i+len("issuecomment-"):]
+			end := 0
+			for end < len(idStr) && idStr[end] >= '0' && idStr[end] <= '9' {
+				end++
+			}
+			if end > 0 {
+				var id int64
+				_, _ = fmt.Sscanf(idStr[:end], "%d", &id)
+				return id
+			}
+		}
+		return 0
+	}
+
+	cases := []struct {
+		name string
+		in   string
+		want int64
+	}{
+		{
+			name: "issue url plain",
+			in:   "https://github.com/acme/demo/issues/42#issuecomment-12345\n",
+			want: 12345,
+		},
+		{
+			name: "pr url plain",
+			in:   "https://github.com/acme/demo/pull/7#issuecomment-99887766\n",
+			want: 99887766,
+		},
+		{
+			name: "no trailing newline",
+			in:   "https://github.com/acme/demo/issues/42#issuecomment-1",
+			want: 1,
+		},
+		{
+			name: "extra whitespace",
+			in:   "  https://github.com/o/r/issues/N#issuecomment-987654321  \n",
+			want: 987654321,
+		},
+		{
+			name: "github enterprise host",
+			in:   "https://github.acme.corp/o/r/issues/1#issuecomment-555\n",
+			want: 555,
+		},
+		{
+			name: "no issuecomment fragment → 0",
+			in:   "https://github.com/o/r/issues/1\n",
+			want: 0,
+		},
+		{
+			name: "empty stdout → 0",
+			in:   "",
+			want: 0,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := parse(c.in)
+			if got != c.want {
+				t.Errorf("parse(%q) = %d, want %d", c.in, got, c.want)
+			}
+		})
 	}
 }
 

@@ -321,6 +321,329 @@ func TestAcquire_RefFormats(t *testing.T) {
 	}
 }
 
+// TestAcquire_RaceLossByTimestampTieBreak: en la re-list aparece otro
+// lock vivo con timestamp MÁS VIEJO que el nuestro → perdemos por
+// tie-break, retiramos nuestro lock y devolvemos ErrAlreadyLocked.
+//
+// Setup: el primer list devuelve vacío. El POST aplica el nuestro. El
+// segundo list devuelve [nuestro, otro-mas-viejo]. Como el otro tiene
+// timestamp MENOR (más viejo == llegó primero), el otro gana, nosotros
+// retiramos.
+func TestAcquire_RaceLossByTimestampTieBreak(t *testing.T) {
+	withInstantHeartbeat(t)
+	clock := newFakeClock(time.Unix(1700000000, 0))
+	repo := newFakeRepo()
+
+	// El otro lock tiene timestamp 30s más viejo (más temprano). Vamos a
+	// inyectarlo entre el primer list y el segundo via list hook.
+	otherLabel := pipelinelabels.LockLabelAt(clock.Now().Add(-30*time.Second), 999, "other-host")
+
+	listCalls := 0
+	listFn := func(n int) ([]string, error) {
+		listCalls++
+		if listCalls == 1 {
+			return repo.list(n)
+		}
+		// Re-list: agregamos el otro lock.
+		out, _ := repo.list(n)
+		out = append(out, otherLabel)
+		return out, nil
+	}
+
+	_, err := Acquire("42", Options{
+		Now:         clock.Now,
+		PID:         12345,
+		Host:        "test-host",
+		EnsureLabel: func(string) error { return nil },
+		AddLabel:    repo.add,
+		DelLabel:    repo.del,
+		ListLabels:  listFn,
+	})
+	if err == nil {
+		t.Fatal("Acquire ganó la race contra un lock más viejo (debería perder)")
+	}
+	if !errors.Is(err, ErrAlreadyLocked) {
+		t.Errorf("got err %v, want ErrAlreadyLocked", err)
+	}
+	// Nuestro lock debe haberse borrado (el repo no debe contener un
+	// che:lock con nuestro pid). El otro NO está realmente en el repo (lo
+	// inyectamos solo en el list hook), así que el repo debe quedar vacío.
+	got := repo.snapshot()
+	for _, l := range got {
+		p, _ := pipelinelabels.Parse(l)
+		if p.PID == 12345 {
+			t.Errorf("nuestro lock %q quedó en el repo tras race lost", l)
+		}
+	}
+}
+
+// TestAcquire_RaceWinByTimestampTieBreak: en la re-list aparece otro
+// lock vivo con timestamp MÁS NUEVO que el nuestro → ganamos por tie-break,
+// borramos el lock del otro, conservamos el nuestro, retornamos OK.
+func TestAcquire_RaceWinByTimestampTieBreak(t *testing.T) {
+	withInstantHeartbeat(t)
+	clock := newFakeClock(time.Unix(1700000000, 0))
+	repo := newFakeRepo()
+
+	// El otro lock tiene timestamp MÁS NUEVO (10s en el futuro relativo
+	// al nuestro, simulando que llegó después).
+	otherLabel := pipelinelabels.LockLabelAt(clock.Now().Add(10*time.Second), 999, "other-host")
+
+	listCalls := 0
+	listFn := func(n int) ([]string, error) {
+		listCalls++
+		if listCalls == 1 {
+			return repo.list(n)
+		}
+		out, _ := repo.list(n)
+		out = append(out, otherLabel)
+		return out, nil
+	}
+	// Inyectamos el "otro" en el repo para que el del() del race-won lo
+	// pueda borrar de verdad.
+	repoOtherInjected := false
+	listFnWithSideEffect := func(n int) ([]string, error) {
+		out, err := listFn(n)
+		if !repoOtherInjected && listCalls == 2 {
+			repo.add(n, otherLabel)
+			repoOtherInjected = true
+		}
+		return out, err
+	}
+
+	h, err := Acquire("42", Options{
+		Now:         clock.Now,
+		PID:         12345,
+		Host:        "test-host",
+		EnsureLabel: func(string) error { return nil },
+		AddLabel:    repo.add,
+		DelLabel:    repo.del,
+		ListLabels:  listFnWithSideEffect,
+	})
+	if err != nil {
+		t.Fatalf("Acquire perdió contra un lock más nuevo (debería ganar): %v", err)
+	}
+	defer h.Release()
+
+	// El otro lock debe haberse borrado, el nuestro debe quedar.
+	got := repo.snapshot()
+	hasOurs := false
+	for _, l := range got {
+		if l == otherLabel {
+			t.Errorf("lock más nuevo %q no fue borrado tras race won", l)
+		}
+		p, _ := pipelinelabels.Parse(l)
+		if p.PID == 12345 {
+			hasOurs = true
+		}
+	}
+	if !hasOurs {
+		t.Errorf("nuestro lock no quedó aplicado tras race won; repo=%v", got)
+	}
+}
+
+// TestAcquire_RaceTieBreakByPidHost: timestamps idénticos → desempate
+// determinístico por string compare del segmento pid-host. El que tiene
+// pid-host menor lexicográficamente gana.
+//
+// Caso: nuestro pid-host es "12345-test-host", el otro es "999-other-host".
+// "12345..." < "999..." en orden lexicográfico (compara char-a-char,
+// '1' < '9'), así que ganamos.
+func TestAcquire_RaceTieBreakByPidHost(t *testing.T) {
+	withInstantHeartbeat(t)
+	clock := newFakeClock(time.Unix(1700000000, 0))
+	repo := newFakeRepo()
+
+	// Mismo timestamp que el nuestro → fuerza el desempate por pid-host.
+	otherLabel := pipelinelabels.LockLabelAt(clock.Now(), 999, "other-host")
+
+	listCalls := 0
+	listFn := func(n int) ([]string, error) {
+		listCalls++
+		if listCalls == 1 {
+			return repo.list(n)
+		}
+		out, _ := repo.list(n)
+		out = append(out, otherLabel)
+		if listCalls == 2 {
+			repo.add(n, otherLabel)
+		}
+		return out, nil
+	}
+
+	h, err := Acquire("42", Options{
+		Now:         clock.Now,
+		PID:         12345,
+		Host:        "test-host",
+		EnsureLabel: func(string) error { return nil },
+		AddLabel:    repo.add,
+		DelLabel:    repo.del,
+		ListLabels:  listFn,
+	})
+	// "12345-test-host" < "999-other-host" → nosotros ganamos.
+	if err != nil {
+		t.Fatalf("Acquire perdió desempate por pid-host: %v\nour=12345-test-host other=999-other-host", err)
+	}
+	defer h.Release()
+
+	got := repo.snapshot()
+	for _, l := range got {
+		if l == otherLabel {
+			t.Errorf("lock perdedor por pid-host no fue borrado: %q", l)
+		}
+	}
+}
+
+// TestAcquire_RaceTieBreakByPidHost_Lose: caso simétrico — desempate por
+// pid-host donde nosotros perdemos (nuestro pid-host es lexicográficamente
+// MAYOR). Con pid="999" vs other pid="100" + mismo host, "100-..." gana.
+func TestAcquire_RaceTieBreakByPidHost_Lose(t *testing.T) {
+	withInstantHeartbeat(t)
+	clock := newFakeClock(time.Unix(1700000000, 0))
+	repo := newFakeRepo()
+
+	// Mismo host + mismo timestamp + pid menor → el otro gana.
+	otherLabel := pipelinelabels.LockLabelAt(clock.Now(), 100, "test-host")
+
+	listCalls := 0
+	listFn := func(n int) ([]string, error) {
+		listCalls++
+		if listCalls == 1 {
+			return repo.list(n)
+		}
+		out, _ := repo.list(n)
+		out = append(out, otherLabel)
+		return out, nil
+	}
+
+	_, err := Acquire("42", Options{
+		Now:         clock.Now,
+		PID:         999,
+		Host:        "test-host",
+		EnsureLabel: func(string) error { return nil },
+		AddLabel:    repo.add,
+		DelLabel:    repo.del,
+		ListLabels:  listFn,
+	})
+	if err == nil {
+		t.Fatal("Acquire ganó desempate por pid-host (debería perder con pid mayor)")
+	}
+	if !errors.Is(err, ErrAlreadyLocked) {
+		t.Errorf("got err %v, want ErrAlreadyLocked", err)
+	}
+}
+
+// TestAcquire_RaceWithUnparsableOther: el otro lock está malformado
+// (timestamp inválido) → tratado como broken, nosotros ganamos y lo
+// borramos.
+func TestAcquire_RaceWithUnparsableOther(t *testing.T) {
+	withInstantHeartbeat(t)
+	clock := newFakeClock(time.Unix(1700000000, 0))
+	repo := newFakeRepo()
+
+	// Label con prefijo che:lock: pero formato inválido (no parsea).
+	brokenLabel := pipelinelabels.PrefixLock + "not-a-timestamp:bad"
+
+	listCalls := 0
+	listFn := func(n int) ([]string, error) {
+		listCalls++
+		if listCalls == 1 {
+			return repo.list(n)
+		}
+		out, _ := repo.list(n)
+		out = append(out, brokenLabel)
+		if listCalls == 2 {
+			repo.add(n, brokenLabel)
+		}
+		return out, nil
+	}
+
+	h, err := Acquire("42", Options{
+		Now:         clock.Now,
+		PID:         12345,
+		Host:        "test-host",
+		EnsureLabel: func(string) error { return nil },
+		AddLabel:    repo.add,
+		DelLabel:    repo.del,
+		ListLabels:  listFn,
+	})
+	if err != nil {
+		t.Fatalf("Acquire falló contra broken lock (debería ganar): %v", err)
+	}
+	defer h.Release()
+
+	got := repo.snapshot()
+	for _, l := range got {
+		if l == brokenLabel {
+			t.Errorf("broken lock %q no fue borrado", l)
+		}
+	}
+}
+
+// TestAcquire_PostCheckListError: la segunda llamada a listLabels falla
+// → Acquire devuelve ErrPostCheckFailed envuelto, NO asume OK silencioso.
+// El handle devuelto lleva el lock aplicado (para que el caller pueda
+// Release si decide abortar).
+func TestAcquire_PostCheckListError(t *testing.T) {
+	withInstantHeartbeat(t)
+	clock := newFakeClock(time.Unix(1700000000, 0))
+	repo := newFakeRepo()
+
+	listCalls := 0
+	listFn := func(n int) ([]string, error) {
+		listCalls++
+		if listCalls == 1 {
+			return repo.list(n)
+		}
+		return nil, fmt.Errorf("simulated list failure on post-check")
+	}
+
+	var warns []string
+	h, err := Acquire("42", Options{
+		Now:         clock.Now,
+		PID:         12345,
+		Host:        "test-host",
+		EnsureLabel: func(string) error { return nil },
+		AddLabel:    repo.add,
+		DelLabel:    repo.del,
+		ListLabels:  listFn,
+		LogErrf: func(format string, args ...any) {
+			warns = append(warns, fmt.Sprintf(format, args...))
+		},
+	})
+	if err == nil {
+		t.Fatal("Acquire NO debería asumir OK silencioso si la post-check list falla")
+	}
+	if !errors.Is(err, ErrPostCheckFailed) {
+		t.Errorf("got err %v, want wrapped ErrPostCheckFailed", err)
+	}
+	if h == nil {
+		t.Fatal("Acquire debería devolver Handle parcial para que el caller pueda Release")
+	}
+	// El lock debe estar aplicado (el handle lo registra).
+	if h.CurrentLabel() == "" {
+		t.Errorf("Handle.CurrentLabel vacío tras post-check failure; want lock aplicado")
+	}
+	// Debe haber warneado al logger.
+	if len(warns) == 0 {
+		t.Errorf("post-check failure no warneó al logger del caller")
+	}
+	foundPostCheckWarn := false
+	for _, w := range warns {
+		if strings.Contains(w, "post-check") {
+			foundPostCheckWarn = true
+			break
+		}
+	}
+	if !foundPostCheckWarn {
+		t.Errorf("warns no mencionan post-check: %v", warns)
+	}
+	// Y Release debe ser idempotente / no-panic sobre este handle parcial.
+	if relErr := h.Release(); relErr != nil {
+		t.Errorf("Release del handle parcial falló: %v", relErr)
+	}
+}
+
 // TestHeartbeat_KeepsCurrentOnAddFailure: si add falla durante el tick,
 // CurrentLabel se revierte al viejo (no se queda con un label que no está
 // aplicado en GitHub).

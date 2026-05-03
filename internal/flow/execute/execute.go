@@ -31,7 +31,6 @@ import (
 	"github.com/chichex/che/internal/agent"
 	"github.com/chichex/che/internal/flow/runguard"
 	"github.com/chichex/che/internal/labels"
-	"github.com/chichex/che/internal/lock"
 	"github.com/chichex/che/internal/output"
 	"github.com/chichex/che/internal/pipelinelabels"
 	planpkg "github.com/chichex/che/internal/plan"
@@ -339,9 +338,9 @@ func Run(issueRef string, opts Opts) ExitCode {
 	}()
 
 	// Lock con heartbeat + TTL (PRD §6.d) — opt-in vía CHE_LOCK_HEARTBEAT.
-	heartbeat := runguard.AcquireLock(issueRef, "execute", log)
+	heartbeat, lockResult := runguard.AcquireLock(issueRef, "execute", log)
 	defer runguard.ReleaseLock(heartbeat, log)
-	if heartbeat == nil && lock.HeartbeatEnabled() {
+	if lockResult == runguard.AcquireContended {
 		return ExitSemantic
 	}
 

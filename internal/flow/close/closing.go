@@ -32,7 +32,6 @@ import (
 	"github.com/chichex/che/internal/flow/stateref"
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
-	"github.com/chichex/che/internal/lock"
 	"github.com/chichex/che/internal/output"
 	"github.com/chichex/che/internal/pipelinelabels"
 )
@@ -493,9 +492,9 @@ func Run(prRef string, opts Opts) ExitCode {
 	}()
 
 	// Lock con heartbeat + TTL (PRD §6.d) — opt-in.
-	heartbeat := runguard.AcquireLock(stateRef, "close", log)
+	heartbeat, lockResult := runguard.AcquireLock(stateRef, "close", log)
 	defer runguard.ReleaseLock(heartbeat, log)
-	if heartbeat == nil && lock.HeartbeatEnabled() {
+	if lockResult == runguard.AcquireContended {
 		return ExitSemantic
 	}
 	auditTarget := pr.Number

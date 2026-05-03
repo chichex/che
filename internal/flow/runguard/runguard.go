@@ -28,24 +28,41 @@ import (
 	"github.com/chichex/che/internal/output"
 )
 
-// AcquireLock toma el lock con heartbeat sobre `ref`. Si la feature está
-// off (env CHE_LOCK_HEARTBEAT no=1), devuelve nil sin tocar nada (caller
-// debe interpretar nil como "feature off, seguir adelante").
+// AcquireResult clasifica el resultado de un AcquireLock para que el
+// caller pueda ramificar sin parsear errors. Hoy todos los flows usan el
+// mismo path (continuar o abortar) pero el enum permite políticas
+// distintas en el futuro (ej. validate-pr puede querer skip lock al
+// adoptar un PR ajeno).
+type AcquireResult int
+
+const (
+	// AcquireDisabled — feature flag off (CHE_LOCK_HEARTBEAT != 1). Caller
+	// debe seguir adelante sin lock.
+	AcquireDisabled AcquireResult = iota
+	// AcquireOK — lock aplicado limpio, heartbeat corriendo. Caller debe
+	// hacer defer ReleaseLock al final del flow.
+	AcquireOK
+	// AcquireContended — otro proceso ya tiene lock vivo (o ganó la race
+	// por tie-break). Caller debe abortar con ExitSemantic.
+	AcquireContended
+	// AcquireInfraError — red, gh, o falla del post-check. El lock puede
+	// estar parcialmente aplicado. Hoy runguard loggea warn y devuelve
+	// AcquireInfraError; los callers actuales lo tratan como "continuar"
+	// (el binario `che:locked` legacy cubre la sección crítica). Un
+	// caller futuro puede elegir abortar.
+	AcquireInfraError
+)
+
+// AcquireLock toma el lock con heartbeat sobre `ref`. Devuelve el handle
+// (puede ser nil si AcquireResult != AcquireOK) y el resultado clasificado.
 //
-// Si la feature está on:
-//   - Acquire OK → devuelve un Handle vivo (el caller hace defer Release).
-//   - Lock previo vivo (ErrAlreadyLocked) → loggea error y devuelve nil.
-//     El caller debe abortar con ExitSemantic. La forma de distinguir
-//     "feature off" de "lock contended" es chequear lock.HeartbeatEnabled()
-//     después de un nil return.
-//   - Cualquier otro error (red, gh) → loggea warn y devuelve nil. El
-//     caller puede decidir continuar (el flow no tiene heartbeat pero el
-//     binario `che:locked` legacy ya cubrió la sección crítica) o abortar.
-//     Conservamos "continuar" como default para no degradar runs por red
-//     intermitente.
-func AcquireLock(ref, flow string, log *output.Logger) *lock.Handle {
+// Wrapper backward-compat: los callers existentes pueden seguir usando
+// la forma "ignorar el segundo return" — pero los nuevos deberían
+// ramificar por AcquireResult para distinguir "feature off" de "lock
+// contended" sin re-chequear lock.HeartbeatEnabled() después.
+func AcquireLock(ref, flow string, log *output.Logger) (*lock.Handle, AcquireResult) {
 	if !lock.HeartbeatEnabled() {
-		return nil
+		return nil, AcquireDisabled
 	}
 	h, err := lock.Acquire(ref, lock.Options{
 		LogErrf: func(format string, args ...any) {
@@ -58,18 +75,29 @@ func AcquireLock(ref, flow string, log *output.Logger) *lock.Handle {
 		if log != nil {
 			log.Step("lock con heartbeat aplicado", output.F{Labels: []string{h.CurrentLabel()}})
 		}
-		return h
+		return h, AcquireOK
 	}
 	if errors.Is(err, lock.ErrAlreadyLocked) {
 		if log != nil {
 			log.Error("ref bloqueado por otro proceso (heartbeat lock)", output.F{Cause: err})
 		}
-		return nil
+		return nil, AcquireContended
+	}
+	if errors.Is(err, lock.ErrPostCheckFailed) {
+		// El lock SÍ está aplicado pero la verificación de race falló.
+		// Política actual: warn + continuar (el handle queda vivo para
+		// que el caller pueda hacer Release al terminar, manteniendo el
+		// invariante de que el lock no quede huérfano hasta que expire
+		// el TTL).
+		if log != nil {
+			log.Warn("post-check del heartbeat lock falló — sigo con lock aplicado pero sin verificación de race", output.F{Cause: err})
+		}
+		return h, AcquireInfraError
 	}
 	if log != nil {
 		log.Warn("no se pudo aplicar heartbeat lock — sigo con che:locked legacy", output.F{Cause: err})
 	}
-	return nil
+	return nil, AcquireInfraError
 }
 
 // ReleaseLock libera el handle si no es nil. Idempotente. Loggea warn si

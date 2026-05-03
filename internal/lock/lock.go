@@ -59,6 +59,19 @@ var HeartbeatInterval = 60 * time.Second
 // mensaje accionable ("otro flow está corriendo, esperá o revisá").
 var ErrAlreadyLocked = errors.New("ref already locked by another live process")
 
+// ErrPostCheckFailed lo devuelve Acquire cuando logró aplicar su propio
+// lock pero la re-list para detectar races falló. Distingue ese caso del
+// éxito limpio para que el caller pueda decidir abortar (el lock no es
+// confiable) o continuar con un warn. Wrappea el error subyacente para
+// que `errors.Is/As` siga funcionando.
+//
+// Importante: cuando Acquire devuelve este error, el lock SÍ está aplicado
+// en GitHub. El caller que aborta es responsable de invocar Release()
+// sobre el handle adjunto (ver AcquirePostCheckFailedHandle helper si se
+// agrega más adelante). En el wireup actual de runguard, se loggea warn
+// y se sigue — preservando comportamiento pre-tie-break.
+var ErrPostCheckFailed = errors.New("lock: re-list para detectar race lost falló")
+
 // Handle es el resultado de un Acquire exitoso. Mantiene viva la goroutine
 // de heartbeat hasta que el caller llama Release.
 //
@@ -195,35 +208,121 @@ func Acquire(ref string, opts Options) (*Handle, error) {
 		return nil, fmt.Errorf("lock: apply lock %s: %w", label, err)
 	}
 
-	// Post-check de race: re-listar y verificar que el ÚNICO lock vivo es
-	// el nuestro. Si entró otro mientras tanto y es más viejo, ganamos
-	// (POSTes ordenados); si es más nuevo, retiramos el nuestro y
-	// devolvemos ErrAlreadyLocked.
-	existing2, err := listLabels(number)
-	if err != nil {
-		// El lock nuestro está aplicado pero no podemos verificar — en
-		// vez de fallar el flow entero por una falla de red al re-listar,
-		// dejamos pasar y confiamos en el heartbeat para mantener el
-		// estado consistente. El caller puede decidir si proceder.
-		_ = err
-	} else {
-		var others []string
-		for _, l := range existing2 {
-			if l == label {
-				continue
-			}
-			p, perr := pipelinelabels.Parse(l)
-			if perr != nil || p.Kind != pipelinelabels.KindLock {
-				continue
-			}
-			if now().Sub(p.Timestamp) < TTL {
-				others = append(others, l)
-			}
+	// Post-check de race: re-listar y resolver la carrera con tie-breaking
+	// determinístico. Si vemos otro lock vivo en la re-list, comparamos
+	// timestamps:
+	//
+	//   - Nuestro timestamp MENOR: ganamos (llegamos primero). Borramos el
+	//     lock del otro y seguimos. El otro proceso, cuando haga su
+	//     post-check, va a ver el nuestro como ganador y se va a retirar.
+	//   - Nuestro timestamp MAYOR: el otro gana. Borramos el nuestro y
+	//     devolvemos ErrAlreadyLocked.
+	//   - Timestamps iguales: desempate por string-compare del segmento
+	//     `<pid>-<host>` (orden total estable, libre de colisión salvo dos
+	//     procesos con el mismo PID y hostname — caso patológico).
+	//   - El otro lock no se puede parsear (timestamp inválido /
+	//     pid-host malformado): tratado como "broken lock" → nosotros
+	//     ganamos, lo borramos.
+	//
+	// Si la re-list falla con error, devolvemos ErrPostCheckFailed
+	// envuelto: el lock nuestro está aplicado pero no podemos verificar
+	// que seamos los únicos vivos. El caller decide qué hacer (abort vs
+	// continue with warn). La señal NO es "OK" silencioso — eso anularía
+	// completamente la mitigación de race si el segundo list falla por
+	// red intermitente.
+	existing2, listErr := listLabels(number)
+	if listErr != nil {
+		warnFn := opts.LogErrf
+		if warnFn != nil {
+			warnFn("post-check re-list falló para race detection: %v", listErr)
 		}
-		if len(others) > 0 {
-			// Otro proceso entró en la race — retiramos el nuestro.
-			_ = delLabel(number, label)
-			return nil, fmt.Errorf("%w: race lost contra %v", ErrAlreadyLocked, others)
+		// Devolvemos error envuelto pero NO retiramos el lock — el caller
+		// que reciba ErrPostCheckFailed puede decidir abort+release o
+		// continuar (runguard hace lo segundo: warn y proceed).
+		// Construimos un Handle parcial para que el caller pueda Release
+		// si decide abortar.
+		h := &Handle{
+			ref:         ref,
+			number:      number,
+			pid:         pid,
+			host:        host,
+			current:     label,
+			stop:        make(chan struct{}),
+			stopOnce:    sync.Once{},
+			now:         now,
+			ensureLabel: ensureLabel,
+			addLabel:    addLabel,
+			delLabel:    delLabel,
+			listLbls:    listLabels,
+			logErr:      opts.LogErrf,
+		}
+		// No arrancamos heartbeat: el caller probablemente va a Release
+		// inmediatamente. Si decide continuar, va a perder el heartbeat
+		// — costo aceptable porque el lock simplemente expirará por TTL
+		// si el proceso no llega a Release. La goroutine de heartbeat
+		// nunca se lanzó, así que stop puede quedar abierto: la primera
+		// llamada a Release la cierra (vía stopOnce) sin lanzar nada.
+		return h, fmt.Errorf("%w: %v", ErrPostCheckFailed, listErr)
+	}
+	ourTS := now()
+	ourPidHost := fmt.Sprintf("%d-%s", pid, host)
+	var loserOthers []string // locks que perdieron contra nosotros (a borrar)
+	for _, l := range existing2 {
+		if l == label {
+			continue
+		}
+		p, perr := pipelinelabels.Parse(l)
+		if perr != nil {
+			// No es un che:lock:* parseable. Si tiene el prefijo, lo
+			// consideramos broken y nos lo llevamos puesto; si no lo
+			// tiene, no es de nuestro paquete y lo ignoramos.
+			if !strings.HasPrefix(l, pipelinelabels.PrefixLock) {
+				continue
+			}
+			loserOthers = append(loserOthers, l)
+			continue
+		}
+		if p.Kind != pipelinelabels.KindLock {
+			continue
+		}
+		if now().Sub(p.Timestamp) >= TTL {
+			// Stale: limpiamos pero no es contendor.
+			loserOthers = append(loserOthers, l)
+			continue
+		}
+		// Tie-break determinístico contra el otro lock vivo.
+		theirPidHost := fmt.Sprintf("%d-%s", p.PID, p.Host)
+		ourWins := false
+		switch {
+		case ourTS.Before(p.Timestamp):
+			ourWins = true
+		case p.Timestamp.Before(ourTS):
+			ourWins = false
+		default:
+			// Timestamps iguales — desempate por string compare del
+			// pid-host. El menor lexicográfico gana (orden estable).
+			ourWins = ourPidHost < theirPidHost
+		}
+		if ourWins {
+			loserOthers = append(loserOthers, l)
+		} else {
+			// El otro gana. Retiramos el nuestro y avisamos.
+			if delErr := delLabel(number, label); delErr != nil {
+				if opts.LogErrf != nil {
+					opts.LogErrf("race lost: no se pudo borrar nuestro lock %s: %v", label, delErr)
+				}
+			}
+			return nil, fmt.Errorf("%w: race lost contra %s (tie-break por timestamp)", ErrAlreadyLocked, l)
+		}
+	}
+	// Si llegamos acá, ganamos todas las races. Borramos a los perdedores.
+	for _, other := range loserOthers {
+		if delErr := delLabel(number, other); delErr != nil {
+			if opts.LogErrf != nil {
+				opts.LogErrf("race won: no se pudo borrar lock perdedor %s: %v", other, delErr)
+			}
+		} else if opts.LogErrf != nil {
+			opts.LogErrf("race won: borré lock perdedor %s (nuestro pidhost=%s)", other, ourPidHost)
 		}
 	}
 

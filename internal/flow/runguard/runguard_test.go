@@ -7,13 +7,16 @@ import (
 )
 
 // TestAcquireLock_DisabledIsNoop: si CHE_LOCK_HEARTBEAT no está set,
-// AcquireLock devuelve nil sin tocar nada — el caller continúa con el
-// che:locked legacy.
+// AcquireLock devuelve nil + AcquireDisabled sin tocar nada — el caller
+// continúa con el che:locked legacy.
 func TestAcquireLock_DisabledIsNoop(t *testing.T) {
 	t.Setenv("CHE_LOCK_HEARTBEAT", "")
-	h := AcquireLock("42", "explore", output.New(nil))
+	h, res := AcquireLock("42", "explore", output.New(nil))
 	if h != nil {
 		t.Errorf("AcquireLock con env vacío devolvió %v, want nil", h)
+	}
+	if res != AcquireDisabled {
+		t.Errorf("AcquireLock con env vacío devolvió result=%v, want AcquireDisabled", res)
 	}
 }
 

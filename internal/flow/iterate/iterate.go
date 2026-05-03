@@ -39,7 +39,6 @@ import (
 	"github.com/chichex/che/internal/flow/runguard"
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
-	"github.com/chichex/che/internal/lock"
 	"github.com/chichex/che/internal/output"
 	"github.com/chichex/che/internal/pipelinelabels"
 	planpkg "github.com/chichex/che/internal/plan"
@@ -287,9 +286,9 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 	// el mismo `stateRef` que las transiciones (issue raíz si está
 	// linkeado, PR si no) para no aplicar el lock en un lugar y las
 	// transiciones en otro.
-	heartbeat := runguard.AcquireLock(stateRef, "iterate-pr", log)
+	heartbeat, lockResult := runguard.AcquireLock(stateRef, "iterate-pr", log)
 	defer runguard.ReleaseLock(heartbeat, log)
-	if heartbeat == nil && lock.HeartbeatEnabled() {
+	if lockResult == runguard.AcquireContended {
 		return ExitSemantic
 	}
 	auditTarget := pr.Number
@@ -482,9 +481,9 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 	}()
 
 	// Lock con heartbeat + TTL (PRD §6.d) — opt-in.
-	heartbeat := runguard.AcquireLock(issueRef, "iterate-plan", log)
+	heartbeat, lockResult := runguard.AcquireLock(issueRef, "iterate-plan", log)
 	defer runguard.ReleaseLock(heartbeat, log)
-	if heartbeat == nil && lock.HeartbeatEnabled() {
+	if lockResult == runguard.AcquireContended {
 		return ExitSemantic
 	}
 
