@@ -30,6 +30,7 @@ import (
 	"strings"
 
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/pipelinelabels"
 )
 
 // Resolution describe dónde aplicar las transiciones che:* para un PR.
@@ -131,21 +132,36 @@ func (r Resolution) HasLabel(name string) bool {
 	return false
 }
 
-// stateLabelSet es el set de labels de máquina de estados (9 estados
-// prefix che:*). No incluye che:locked — ese es lock del recurso, no
-// estado — ni marker labels (ct:plan) ni verdicts (validated:*).
-// Construimos un map al init para lookup O(1) en hasCheStateLabel.
-var stateLabelSet = map[string]struct{}{
-	labels.CheIdea:       {},
-	labels.ChePlanning:   {},
-	labels.ChePlan:       {},
-	labels.CheExecuting:  {},
-	labels.CheExecuted:   {},
-	labels.CheValidating: {},
-	labels.CheValidated:  {},
-	labels.CheClosing:    {},
-	labels.CheClosed:     {},
-}
+// stateLabelSet es el set de labels de máquina de estados. Incluye AMBAS
+// familias (v1 y v2) durante PR6c para que stateref siga reconociendo issues
+// linkeados de repos no migrados (un PR creado por `che execute` v2 puede
+// tener `closingIssuesReferences` apuntando a un issue legacy v1; sin esto
+// validate/iterate/close PR-mode caerían al PR como si el issue no estuviera
+// trackeado por che). Los gates de los flows migrados rechazan los v1 con
+// mensaje accionable, así que reconocer el label v1 acá no afloja la
+// validación — solo evita falsos negativos en la resolución.
+//
+// REMOVE IN PR6d: junto con las constantes v1 viejas, este set se reduce a
+// solo v2.
+var stateLabelSet = func() map[string]struct{} {
+	out := map[string]struct{}{
+		// v2 (modelo derivado del pipeline declarativo)
+		pipelinelabels.StateIdea:               {},
+		pipelinelabels.StateApplyingExplore:    {},
+		pipelinelabels.StateExplore:            {},
+		pipelinelabels.StateApplyingExecute:    {},
+		pipelinelabels.StateExecute:            {},
+		pipelinelabels.StateApplyingValidatePR: {},
+		pipelinelabels.StateValidatePR:         {},
+		pipelinelabels.StateApplyingClose:      {},
+		pipelinelabels.StateClose:              {},
+	}
+	// v1 (legacy — REMOVE IN PR6d)
+	for _, l := range labels.V1LegacyStates() {
+		out[l] = struct{}{}
+	}
+	return out
+}()
 
 // hasCheStateLabel devuelve true si names contiene al menos uno de los
 // labels de máquina de estados.

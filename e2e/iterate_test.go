@@ -140,6 +140,31 @@ func TestIterate_PlanGoldenPath(t *testing.T) {
 	}
 }
 
+// TestIterate_Plan_OldV1Label_Exit3: issue de un repo no migrado con
+// `che:validated` (v1) en vez de `che:state:validate_pr` (v2). El gate
+// v1-rejection rechaza con exit 3 + mensaje accionable apuntando a
+// `che migrate-labels-v2` antes de tocar el state machine.
+func TestIterate_Plan_OldV1Label_Exit3(t *testing.T) {
+	env := setupIterateEnv(t)
+	scriptIteratePrechecks(env)
+	scriptIterateDetectTargetPlan(env, 88)
+
+	env.ExpectGh(`^issue view 88 --json number,title,body,labels,url,state$`).
+		RespondStdoutFromFixture("iterate/gh_issue_view_old_label_che_validated.json", 0)
+
+	r := env.Run("iterate", "88")
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3 (gate v1 rechaza), got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "v1")
+	harness.AssertContains(t, r.Stderr, "migrate-labels-v2")
+	env.Invocations().AssertNotCalled(t, "claude")
+	posts := env.Invocations().FindCalls("gh", "api", "-X", "POST", "issues/88/labels")
+	if len(posts) > 0 {
+		t.Fatalf("no debería haber POST de labels (gate rechaza); calls=%v", posts)
+	}
+}
+
 // TestIterate_Plan_NoLabel_Exit3: issue sin plan-validated:changes-requested
 // → exit semantic, no llama opus.
 func TestIterate_Plan_NoLabel_Exit3(t *testing.T) {

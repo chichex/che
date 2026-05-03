@@ -3,12 +3,16 @@ package engine
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 )
 
 // fakeInvoker es un Invoker programable: el test setea cómo responder a
 // cada agente y registra cuántas veces se invocó cada uno. Permite
 // verificar el flow del engine sin spawnear procesos reales.
+//
+// Safe for concurrent use: PR5c invoca a múltiples agentes en goroutines
+// paralelas, así que el `calls` map necesita protección.
 type fakeInvoker struct {
 	// responder se llama por cada Invoke. Recibe el agente y la cuenta
 	// de llamadas previas a ESE agente (0-based). Devuelve el output, el
@@ -16,6 +20,7 @@ type fakeInvoker struct {
 	responder func(agent string, callIdx int) (string, OutputFormat, error)
 	// calls cuenta llamadas por agente para que los tests puedan
 	// verificar "se llamó al executor 3 veces, al validator 1".
+	mu    sync.Mutex
 	calls map[string]int
 }
 
@@ -27,8 +32,10 @@ func newFakeInvoker(fn func(agent string, callIdx int) (string, OutputFormat, er
 }
 
 func (f *fakeInvoker) Invoke(ctx context.Context, agent string, input string) (string, OutputFormat, error) {
+	f.mu.Lock()
 	idx := f.calls[agent]
 	f.calls[agent] = idx + 1
+	f.mu.Unlock()
 	return f.responder(agent, idx)
 }
 

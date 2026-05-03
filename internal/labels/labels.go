@@ -1,56 +1,29 @@
 // Package labels centraliza las constantes de los labels que che aplica sobre
 // issues de GitHub, y la máquina de transiciones entre estados. La idea es
-// tener un único lugar donde definir "qué es che:plan", "cómo se pasa de
-// che:plan a che:executing", etc., para que los distintos flows no inventen
-// strings distintas ni violen reglas de la máquina de estados.
+// tener un único lugar donde definir los labels canónicos (validados, marker
+// ct:plan, locked) y la máquina de transiciones para que los flows no
+// inventen strings ni violen reglas.
 //
-// La máquina actual es de 9 estados con prefix `che:*`
-// (idea/planning/plan/executing/executed/validating/validated/closing/closed)
-// y reemplazó al modelo viejo `status:*` de 5 estados. El renombre in-place
-// de labels viejos vive en `cmd/migrate_labels.go`.
+// La máquina de estados de los flows vive en `internal/pipelinelabels` (los
+// labels `che:state:*` derivados del pipeline declarativo). Este paquete
+// importa las constantes v2 desde allí y arma las transiciones válidas en
+// `validTransitions`. Las 21 transiciones cubren los 5 flows (explore /
+// execute / iterate plan / iterate PR / validate / close) con éxito +
+// rollback.
+//
+// El subcomando `che migrate-labels-v2` migra repos vivos del modelo viejo
+// (`che:idea`/`che:plan`/...) al modelo v2 (`che:state:*`). Los strings
+// literales del modelo viejo viven solo en ese subcomando porque son entrada
+// de migración, no uso runtime.
 package labels
 
 import (
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
-)
 
-// Che* labels — máquina de estados con prefix `che:*`. Reemplaza al
-// modelo viejo (`status:*`, 5 estados) post-refactor. La diferencia
-// clave es la introducción de 3 estados transient (planning,
-// validating, closing) y un estado terminal de validate (validated):
-//
-//   - planning   — explore en curso (entre idea y plan).
-//   - plan       — explore terminó OK; existe un plan listo para ejecutar.
-//   - executing  — execute en curso (entre plan y executed); locks el issue.
-//   - executed   — execute terminó OK; hay un PR abierto pendiente de validar.
-//   - validating — validate en curso (sobre plan o sobre PR).
-//   - validated  — validate terminó OK (los 3 verdicts: approve, changes-
-//     requested, needs-human; el verdict concreto vive en los
-//     labels plan-validated:* / validated:*, no acá).
-//   - closing    — close en curso (entre executed/validated y closed).
-//   - closed     — terminal: el issue se cerró, el PR se mergeó/cerró.
-//
-// Los estados transient (`*ing`) sirven como lock optimista: si dos
-// instancias de che corren en paralelo sobre el mismo issue, el segundo
-// ve `che:planning` y aborta. Los rollbacks viven en validTransitions:
-// cualquier `*ing` puede volver al estado anterior si el flow falla.
-//
-// El subcomando `che migrate-labels` renombra in-place los labels viejos
-// `status:*` a los nuevos `che:*` en repos que arrancaron con el modelo
-// viejo (los strings literales viven solo en cmd/migrate_labels.go porque
-// son entrada de migración, no uso runtime).
-const (
-	CheIdea       = "che:idea"
-	ChePlanning   = "che:planning"
-	ChePlan       = "che:plan"
-	CheExecuting  = "che:executing"
-	CheExecuted   = "che:executed"
-	CheValidating = "che:validating"
-	CheValidated  = "che:validated"
-	CheClosing    = "che:closing"
-	CheClosed     = "che:closed"
+	"github.com/chichex/che/internal/pipelinelabels"
 )
 
 // Marker labels que no cambian con el estado — identifican el origen del
@@ -102,136 +75,221 @@ type Transition struct {
 	Add    []string
 }
 
-// validTransitions define la máquina de estados con prefix `che:*`. 21
-// transiciones que cubren los 5 flows (explore / execute / iterate plan /
-// iterate PR / validate / close). Cada `*ing` (planning, executing,
-// validating, closing) tiene una transición de éxito (avanza al estado
-// terminal correspondiente) y una de rollback (vuelve al estado anterior
-// si el flow falla). Los gates de intervención humana no viven acá: están
-// en plan-validated:* (issues) y validated:* (PRs), aplicados por `che
-// validate` por separado.
+// validTransitions define la máquina de estados v2 derivada del pipeline
+// declarativo (`internal/pipelinelabels`). 21 transiciones que cubren los
+// 5 flows (explore / execute / iterate plan / iterate PR / validate /
+// close). Cada `applying:<step>` (transient) tiene una transición de éxito
+// (avanza al estado terminal correspondiente) y una de rollback (vuelve al
+// estado anterior si el flow falla). Los gates de intervención humana no
+// viven acá: están en plan-validated:* (issues) y validated:* (PRs),
+// aplicados por `che validate` por separado.
 //
 // Claves: "from→to".
+//
+// Mapeo (PRD §6.c):
+//
+//	idea       — pipelinelabels.StateIdea
+//	planning   — pipelinelabels.StateApplyingExplore
+//	plan       — pipelinelabels.StateExplore
+//	executing  — pipelinelabels.StateApplyingExecute
+//	executed   — pipelinelabels.StateExecute
+//	validating — pipelinelabels.StateApplyingValidatePR
+//	validated  — pipelinelabels.StateValidatePR
+//	closing    — pipelinelabels.StateApplyingClose
+//	closed     — pipelinelabels.StateClose
 var validTransitions = map[string]Transition{
-	// explore arranca: idea → planning (lock).
-	CheIdea + "→" + ChePlanning: {
-		Remove: []string{CheIdea},
-		Add:    []string{ChePlanning},
+	// explore arranca: idea → applying:explore (lock).
+	pipelinelabels.StateIdea + "→" + pipelinelabels.StateApplyingExplore: {
+		Remove: []string{pipelinelabels.StateIdea},
+		Add:    []string{pipelinelabels.StateApplyingExplore},
 	},
-	// explore termina OK / iterate plan termina OK: planning → plan.
-	ChePlanning + "→" + ChePlan: {
-		Remove: []string{ChePlanning},
-		Add:    []string{ChePlan},
+	// explore termina OK / iterate plan termina OK: applying:explore → explore.
+	pipelinelabels.StateApplyingExplore + "→" + pipelinelabels.StateExplore: {
+		Remove: []string{pipelinelabels.StateApplyingExplore},
+		Add:    []string{pipelinelabels.StateExplore},
 	},
-	// explore rollback: planning → idea (cualquier fallo en explore).
-	ChePlanning + "→" + CheIdea: {
-		Remove: []string{ChePlanning},
-		Add:    []string{CheIdea},
+	// explore rollback: applying:explore → idea (cualquier fallo en explore).
+	pipelinelabels.StateApplyingExplore + "→" + pipelinelabels.StateIdea: {
+		Remove: []string{pipelinelabels.StateApplyingExplore},
+		Add:    []string{pipelinelabels.StateIdea},
 	},
-	// iterate plan rollback: planning → validated (cuando se itera sobre
-	// un plan ya validado y la iteración falla, volvemos al estado previo).
-	ChePlanning + "→" + CheValidated: {
-		Remove: []string{ChePlanning},
-		Add:    []string{CheValidated},
+	// iterate plan rollback: applying:explore → validate_pr (cuando se itera
+	// sobre un plan ya validado y la iteración falla, volvemos al estado
+	// previo).
+	pipelinelabels.StateApplyingExplore + "→" + pipelinelabels.StateValidatePR: {
+		Remove: []string{pipelinelabels.StateApplyingExplore},
+		Add:    []string{pipelinelabels.StateValidatePR},
 	},
-	// iterate plan start: validated → planning (lock — el humano pidió
-	// iterar el plan tras un validate con changes-requested; entramos al
-	// estado transient mientras opus reescribe).
-	CheValidated + "→" + ChePlanning: {
-		Remove: []string{CheValidated},
-		Add:    []string{ChePlanning},
+	// iterate plan start: validate_pr → applying:explore (lock — el humano
+	// pidió iterar el plan tras un validate con changes-requested; entramos
+	// al estado transient mientras opus reescribe).
+	pipelinelabels.StateValidatePR + "→" + pipelinelabels.StateApplyingExplore: {
+		Remove: []string{pipelinelabels.StateValidatePR},
+		Add:    []string{pipelinelabels.StateApplyingExplore},
 	},
 	// execute desde idea (skipping explore — el humano pidió ejecutar
 	// directo sin pasar por explore/plan).
-	CheIdea + "→" + CheExecuting: {
-		Remove: []string{CheIdea},
-		Add:    []string{CheExecuting},
+	pipelinelabels.StateIdea + "→" + pipelinelabels.StateApplyingExecute: {
+		Remove: []string{pipelinelabels.StateIdea},
+		Add:    []string{pipelinelabels.StateApplyingExecute},
 	},
-	// execute desde plan (path normal post-explore).
-	ChePlan + "→" + CheExecuting: {
-		Remove: []string{ChePlan},
-		Add:    []string{CheExecuting},
+	// execute desde explore (path normal post-explore).
+	pipelinelabels.StateExplore + "→" + pipelinelabels.StateApplyingExecute: {
+		Remove: []string{pipelinelabels.StateExplore},
+		Add:    []string{pipelinelabels.StateApplyingExecute},
 	},
-	// iterate PR start: validated → executing (re-ejecutar sobre un PR
-	// ya validado para aplicar el feedback).
-	CheValidated + "→" + CheExecuting: {
-		Remove: []string{CheValidated},
-		Add:    []string{CheExecuting},
+	// iterate PR start: validate_pr → applying:execute (re-ejecutar sobre un
+	// PR ya validado para aplicar el feedback).
+	pipelinelabels.StateValidatePR + "→" + pipelinelabels.StateApplyingExecute: {
+		Remove: []string{pipelinelabels.StateValidatePR},
+		Add:    []string{pipelinelabels.StateApplyingExecute},
 	},
-	// execute / iterate PR termina OK: executing → executed.
-	CheExecuting + "→" + CheExecuted: {
-		Remove: []string{CheExecuting},
-		Add:    []string{CheExecuted},
+	// execute / iterate PR termina OK: applying:execute → execute.
+	pipelinelabels.StateApplyingExecute + "→" + pipelinelabels.StateExecute: {
+		Remove: []string{pipelinelabels.StateApplyingExecute},
+		Add:    []string{pipelinelabels.StateExecute},
 	},
 	// execute rollback desde idea (execute que arrancó sin plan).
-	CheExecuting + "→" + CheIdea: {
-		Remove: []string{CheExecuting},
-		Add:    []string{CheIdea},
+	pipelinelabels.StateApplyingExecute + "→" + pipelinelabels.StateIdea: {
+		Remove: []string{pipelinelabels.StateApplyingExecute},
+		Add:    []string{pipelinelabels.StateIdea},
 	},
-	// execute rollback desde plan (path normal).
-	CheExecuting + "→" + ChePlan: {
-		Remove: []string{CheExecuting},
-		Add:    []string{ChePlan},
+	// execute rollback desde explore (path normal).
+	pipelinelabels.StateApplyingExecute + "→" + pipelinelabels.StateExplore: {
+		Remove: []string{pipelinelabels.StateApplyingExecute},
+		Add:    []string{pipelinelabels.StateExplore},
 	},
-	// iterate PR rollback: executing → validated.
-	CheExecuting + "→" + CheValidated: {
-		Remove: []string{CheExecuting},
-		Add:    []string{CheValidated},
+	// iterate PR rollback: applying:execute → validate_pr.
+	pipelinelabels.StateApplyingExecute + "→" + pipelinelabels.StateValidatePR: {
+		Remove: []string{pipelinelabels.StateApplyingExecute},
+		Add:    []string{pipelinelabels.StateValidatePR},
 	},
-	// validate plan start: plan → validating.
-	ChePlan + "→" + CheValidating: {
-		Remove: []string{ChePlan},
-		Add:    []string{CheValidating},
+	// validate plan start: explore → applying:validate_pr.
+	pipelinelabels.StateExplore + "→" + pipelinelabels.StateApplyingValidatePR: {
+		Remove: []string{pipelinelabels.StateExplore},
+		Add:    []string{pipelinelabels.StateApplyingValidatePR},
 	},
-	// validate PR start: executed → validating.
-	CheExecuted + "→" + CheValidating: {
-		Remove: []string{CheExecuted},
-		Add:    []string{CheValidating},
+	// validate PR start: execute → applying:validate_pr.
+	pipelinelabels.StateExecute + "→" + pipelinelabels.StateApplyingValidatePR: {
+		Remove: []string{pipelinelabels.StateExecute},
+		Add:    []string{pipelinelabels.StateApplyingValidatePR},
 	},
-	// validate termina OK: validating → validated. Aplica para los 3
-	// verdicts (approve / changes-requested / needs-human) — el verdict
-	// concreto vive en los labels plan-validated:* / validated:*, no en
-	// la máquina de estados.
-	CheValidating + "→" + CheValidated: {
-		Remove: []string{CheValidating},
-		Add:    []string{CheValidated},
+	// validate termina OK: applying:validate_pr → validate_pr. Aplica para
+	// los 3 verdicts (approve / changes-requested / needs-human) — el verdict
+	// concreto vive en los labels plan-validated:* / validated:*, no en la
+	// máquina de estados.
+	pipelinelabels.StateApplyingValidatePR + "→" + pipelinelabels.StateValidatePR: {
+		Remove: []string{pipelinelabels.StateApplyingValidatePR},
+		Add:    []string{pipelinelabels.StateValidatePR},
 	},
-	// validate plan rollback: validating → plan.
-	CheValidating + "→" + ChePlan: {
-		Remove: []string{CheValidating},
-		Add:    []string{ChePlan},
+	// validate plan rollback: applying:validate_pr → explore.
+	pipelinelabels.StateApplyingValidatePR + "→" + pipelinelabels.StateExplore: {
+		Remove: []string{pipelinelabels.StateApplyingValidatePR},
+		Add:    []string{pipelinelabels.StateExplore},
 	},
-	// validate PR rollback: validating → executed.
-	CheValidating + "→" + CheExecuted: {
-		Remove: []string{CheValidating},
-		Add:    []string{CheExecuted},
+	// validate PR rollback: applying:validate_pr → execute.
+	pipelinelabels.StateApplyingValidatePR + "→" + pipelinelabels.StateExecute: {
+		Remove: []string{pipelinelabels.StateApplyingValidatePR},
+		Add:    []string{pipelinelabels.StateExecute},
 	},
-	// close PR sin validar: executed → closing (el humano decide cerrar
+	// close PR sin validar: execute → applying:close (el humano decide cerrar
 	// sin pasar por validate; che close warnea pero no bloquea).
-	CheExecuted + "→" + CheClosing: {
-		Remove: []string{CheExecuted},
-		Add:    []string{CheClosing},
+	pipelinelabels.StateExecute + "→" + pipelinelabels.StateApplyingClose: {
+		Remove: []string{pipelinelabels.StateExecute},
+		Add:    []string{pipelinelabels.StateApplyingClose},
 	},
-	// close PR validado: validated → closing (path normal post-validate).
-	CheValidated + "→" + CheClosing: {
-		Remove: []string{CheValidated},
-		Add:    []string{CheClosing},
+	// close PR validado: validate_pr → applying:close (path normal post-validate).
+	pipelinelabels.StateValidatePR + "→" + pipelinelabels.StateApplyingClose: {
+		Remove: []string{pipelinelabels.StateValidatePR},
+		Add:    []string{pipelinelabels.StateApplyingClose},
 	},
-	// close termina OK: closing → closed. Terminal.
-	CheClosing + "→" + CheClosed: {
-		Remove: []string{CheClosing},
-		Add:    []string{CheClosed},
+	// close termina OK: applying:close → close. Terminal.
+	pipelinelabels.StateApplyingClose + "→" + pipelinelabels.StateClose: {
+		Remove: []string{pipelinelabels.StateApplyingClose},
+		Add:    []string{pipelinelabels.StateClose},
 	},
-	// close rollback desde executed.
-	CheClosing + "→" + CheExecuted: {
-		Remove: []string{CheClosing},
-		Add:    []string{CheExecuted},
+	// close rollback desde execute.
+	pipelinelabels.StateApplyingClose + "→" + pipelinelabels.StateExecute: {
+		Remove: []string{pipelinelabels.StateApplyingClose},
+		Add:    []string{pipelinelabels.StateExecute},
 	},
-	// close rollback desde validated.
-	CheClosing + "→" + CheValidated: {
-		Remove: []string{CheClosing},
-		Add:    []string{CheValidated},
+	// close rollback desde validate_pr.
+	pipelinelabels.StateApplyingClose + "→" + pipelinelabels.StateValidatePR: {
+		Remove: []string{pipelinelabels.StateApplyingClose},
+		Add:    []string{pipelinelabels.StateValidatePR},
 	},
+}
+
+// v1LegacyStates lista los 9 labels del modelo viejo (`che:idea`/`che:plan`/...).
+// Existe SOLO para que `ValidateNoMixedLabels` y los guards `rejectV1Labels`
+// de los flows puedan detectar repos a medio migrar y pedir al operador que
+// corra `che migrate-labels-v2`. Los valores son strings literales (no
+// constantes exportadas) porque post-PR6c el modelo v1 ya no es runtime —
+// son entrada de detección, no API.
+//
+// REMOVE IN PR6d: cuando ya no haya repos sin migrar, el guard se vuelve
+// dead code y este slice puede eliminarse.
+var v1LegacyStates = []string{
+	"che:idea",
+	"che:planning",
+	"che:plan",
+	"che:executing",
+	"che:executed",
+	"che:validating",
+	"che:validated",
+	"che:closing",
+	"che:closed",
+}
+
+// V1LegacyStates devuelve los 9 labels del modelo viejo. Los guards
+// `rejectV1Labels` de los flows lo consumen para detectar repos a medio
+// migrar. Devuelve una copia para evitar que el caller lo mute.
+//
+// REMOVE IN PR6d junto con v1LegacyStates.
+func V1LegacyStates() []string {
+	out := make([]string, len(v1LegacyStates))
+	copy(out, v1LegacyStates)
+	return out
+}
+
+// ValidateNoMixedLabels reporta error si el set `labels` contiene
+// simultáneamente labels del modelo viejo (`che:idea`/`che:plan`/...) y del
+// modelo v2 (`che:state:*`/`che:state:applying:*`). Los flows v2 no saben
+// hacer migración in-place; mezclar es síntoma de un repo que no corrió
+// `che migrate-labels-v2`.
+//
+// Ignora labels que no son `che:*` o que sí son `che:*` pero no pertenecen
+// a ninguna de las dos máquinas (p.ej. `che:locked`, `ct:plan`, `type:*`).
+//
+// Returns nil si todos los che:* del set son v2-only o todos son v1-only
+// (o si no hay ninguno). El error lista los labels que mezclan, ordenados,
+// para que el mensaje sea estable.
+//
+// REMOVE IN PR6d: cuando v1 deje de existir, la mezcla es imposible y este
+// helper se elimina junto con `v1LegacyStates`.
+func ValidateNoMixedLabels(labels []string) error {
+	v1Set := map[string]bool{}
+	for _, l := range v1LegacyStates {
+		v1Set[l] = true
+	}
+	var v1Found, v2Found []string
+	for _, l := range labels {
+		if v1Set[l] {
+			v1Found = append(v1Found, l)
+			continue
+		}
+		// Cualquier prefix `che:state:` o `che:state:applying:` es v2.
+		if strings.HasPrefix(l, pipelinelabels.PrefixState) {
+			v2Found = append(v2Found, l)
+		}
+	}
+	if len(v1Found) > 0 && len(v2Found) > 0 {
+		sort.Strings(v1Found)
+		sort.Strings(v2Found)
+		return fmt.Errorf("labels v1 (%s) y v2 (%s) presentes simultáneamente — corré `che migrate-labels-v2` o limpiá a mano",
+			strings.Join(v1Found, ","), strings.Join(v2Found, ","))
+	}
+	return nil
 }
 
 // TransitionFor devuelve la Transition que corresponde a pasar de `from` a
@@ -251,7 +309,7 @@ func TransitionFor(from, to string) (Transition, error) {
 // existan en el repo antes de aplicar el edit: `gh issue edit --remove-label X`
 // falla con "not found" si X no está registrado en el repo — aunque el issue
 // no lo tenga aplicado. Esto cubre el caso de issues marcados con `ct:plan` a
-// mano que nunca pasaron por `che idea`, por lo que `che:idea` jamás se
+// mano que nunca pasaron por `che idea`, por lo que `che:state:idea` jamás se
 // creó en el repo.
 func Apply(ref, from, to string) error {
 	tr, err := TransitionFor(from, to)
@@ -269,11 +327,39 @@ func Apply(ref, from, to string) error {
 
 // Ensure garantiza que un label exista en el repo antes de aplicarlo. Usa
 // `gh label create --force` que es idempotente.
+//
+// Por defecto NO aplica color/description: el label se crea con el color
+// default (gris) la primera vez y subsiguientes runs no lo tocan. Para
+// aplicar estilo, usar EnsureWithStyle.
 func Ensure(name string) error {
 	cmd := exec.Command("gh", "label", "create", name, "--force")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ensuring label %s: %s", name, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// EnsureWithStyle garantiza que el label exista con el color y descripción
+// dados. Pasar `color=""` o `description=""` salta el flag respectivo
+// (compatible con repos existentes — no pisa el estilo configurado a
+// mano salvo que pasemos un valor explícito). El color es un hex de 6
+// chars sin `#`, ej. "fbca04".
+//
+// Idempotente: `gh label create --force` actualiza color/description
+// en cada llamada.
+func EnsureWithStyle(name, color, description string) error {
+	args := []string{"label", "create", name, "--force"}
+	if color != "" {
+		args = append(args, "--color", color)
+	}
+	if description != "" {
+		args = append(args, "--description", description)
+	}
+	cmd := exec.Command("gh", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ensuring label %s (color=%s): %s", name, color, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

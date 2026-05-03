@@ -27,11 +27,34 @@ import (
 	"time"
 
 	"github.com/chichex/che/internal/agent"
+	"github.com/chichex/che/internal/flow/runguard"
 	"github.com/chichex/che/internal/flow/stateref"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
+	"github.com/chichex/che/internal/pipelinelabels"
 	planpkg "github.com/chichex/che/internal/plan"
 )
+
+// rejectV1Labels devuelve un error accionable si la lista contiene algún
+// label v1 del modelo viejo. Wirea ValidateNoMixedLabels para detectar
+// mezclas v1+v2 (caso intermedio: alguien aplicó che:state:* a mano sobre
+// un issue v1) y, si todo es v1-only, devuelve un error apuntando a
+// migrate-labels-v2.
+//
+// REMOVE IN PR6d junto con `labels.V1LegacyStates`/`ValidateNoMixedLabels`.
+func rejectV1Labels(kind string, number int, current []string) error {
+	if err := labels.ValidateNoMixedLabels(current); err != nil {
+		return fmt.Errorf("%s #%d: %w", kind, number, err)
+	}
+	for _, v1 := range labels.V1LegacyStates() {
+		for _, l := range current {
+			if l == v1 {
+				return fmt.Errorf("%s #%d tiene labels v1 (%s); este flow opera sobre el modelo v2 (`che:state:*`). Corré `che migrate-labels-v2` antes de validar, o ajustá los labels a mano", kind, number, v1)
+			}
+		}
+	}
+	return nil
+}
 
 // Target discrimina el tipo de ref que recibió `che validate`. La detección
 // corre contra `gh api repos/{owner}/{repo}/issues/{n}`: ese endpoint devuelve
@@ -409,6 +432,14 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		return ExitSemantic
 	}
 
+	// Rechazar labels v1: si el PR tiene `che:executed` viejo (modelo v1)
+	// el flow no puede transicionar (no hay key v1+v2 cruzada en
+	// validTransitions, además aplicar v2 dejaría mixto). Mensaje accionable.
+	if err := rejectV1Labels("PR", pr.Number, pr.PRLabelNames()); err != nil {
+		log.Error("gate v1 falló", output.F{PR: pr.Number, Cause: err})
+		return ExitSemantic
+	}
+
 	log.Step("aplicando lock che:locked", output.F{PR: pr.Number})
 	if err := labels.Lock(prRef); err != nil {
 		log.Error("no pude aplicar che:locked", output.F{Cause: err})
@@ -426,29 +457,56 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 	stateRes := pr.ResolveStateRef(prRef)
 	stateRef := stateRes.Ref
 
-	// Transición de máquina de estados: che:executed → che:validating.
-	// Si el target no tiene che:executed (humano corrió validate sobre un
+	// Lock con heartbeat + TTL (PRD §6.d) — opt-in. Aplicado al stateRef
+	// (issue raíz si linkeado, PR si no) — alineado con donde van las
+	// transiciones.
+	heartbeat, lockResult := runguard.AcquireLock(stateRef, "validate-pr", log)
+	defer runguard.ReleaseLock(heartbeat, log)
+	if lockResult == runguard.AcquireContended {
+		return ExitSemantic
+	}
+	auditTarget := pr.Number
+	if stateRes.ResolvedToIssue {
+		auditTarget = stateRes.IssueNumber
+	}
+
+	// Si la resolución cayó al issue, repetimos el guard v1 sobre los
+	// labels del issue — `che migrate-labels-v2` puede haber dejado
+	// algún issue mezclado/sin migrar. Si fall back al PR ya validamos
+	// arriba con pr.PRLabelNames().
+	if stateRes.ResolvedToIssue {
+		if err := rejectV1Labels("issue", stateRes.IssueNumber, stateRes.Labels); err != nil {
+			log.Error("gate v1 falló", output.F{Issue: stateRes.IssueNumber, Cause: err})
+			return ExitSemantic
+		}
+	}
+
+	// Transición de máquina de estados: che:state:execute → che:state:applying:validate_pr.
+	// Si el target no tiene che:state:execute (humano corrió validate sobre un
 	// PR no creado por execute, o execute no terminó OK) saltamos la
 	// transición — solo aplicamos los labels validated:* al final.
-	hasExecutedState := stateRes.HasLabel(labels.CheExecuted)
+	hasExecutedState := stateRes.HasLabel(pipelinelabels.StateExecute)
 	var stateValidated bool
 	if hasExecutedState {
 		if stateRes.ResolvedToIssue {
-			log.Step("transicionando issue a che:validating", output.F{Issue: stateRes.IssueNumber})
+			log.Step("transicionando issue a "+pipelinelabels.StateApplyingValidatePR, output.F{Issue: stateRes.IssueNumber})
 		} else {
-			log.Step("transicionando a che:validating", output.F{PR: pr.Number})
+			log.Step("transicionando a "+pipelinelabels.StateApplyingValidatePR, output.F{PR: pr.Number})
 		}
-		if err := labels.Apply(stateRef, labels.CheExecuted, labels.CheValidating); err != nil {
-			log.Error("no pude transicionar a che:validating", output.F{Cause: err})
+		if err := labels.Apply(stateRef, pipelinelabels.StateExecute, pipelinelabels.StateApplyingValidatePR); err != nil {
+			log.Error("no pude transicionar a "+pipelinelabels.StateApplyingValidatePR, output.F{Cause: err})
 			return ExitRetry
 		}
+		runguard.AuditAppend(auditTarget, "validate-pr", pipelinelabels.StateExecute, pipelinelabels.StateApplyingValidatePR, "", log)
 		defer func() {
 			if stateValidated {
 				return
 			}
-			if err := labels.Apply(stateRef, labels.CheValidating, labels.CheExecuted); err != nil {
-				log.Warn(fmt.Sprintf("rollback che:validating → che:executed fallo: %v — revisá labels a mano", err))
+			if err := labels.Apply(stateRef, pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateExecute); err != nil {
+				log.Warn(fmt.Sprintf("rollback %s → %s fallo: %v — revisá labels a mano", pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateExecute, err))
+				return
 			}
+			runguard.AuditAppend(auditTarget, "validate-pr", pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateExecute, "rollback", log)
 		}()
 	}
 
@@ -511,40 +569,41 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		}
 	}
 
-	// Cierre de la transición de máquina de estados: che:validating →
-	// che:validated. Solo aplica si arrancamos con che:executed. El
+	// Cierre de la transición de máquina de estados: che:state:applying:validate_pr →
+	// che:state:validate_pr. Solo aplica si arrancamos con che:state:execute. El
 	// target es el mismo que usamos para abrir la transición (issue si
 	// había closing issue con che:*, PR si no).
 	switch {
 	case hasExecutedState:
 		if stateRes.ResolvedToIssue {
-			log.Step("transicionando issue a che:validated", output.F{Issue: stateRes.IssueNumber})
+			log.Step("transicionando issue a "+pipelinelabels.StateValidatePR, output.F{Issue: stateRes.IssueNumber})
 		} else {
-			log.Step("transicionando a che:validated", output.F{PR: pr.Number})
+			log.Step("transicionando a "+pipelinelabels.StateValidatePR, output.F{PR: pr.Number})
 		}
-		if err := labels.Apply(stateRef, labels.CheValidating, labels.CheValidated); err != nil {
-			log.Warn(fmt.Sprintf("no pude transicionar a che:validated: %v — revisá labels a mano", err))
+		if err := labels.Apply(stateRef, pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateValidatePR); err != nil {
+			log.Warn(fmt.Sprintf("no pude transicionar a %s: %v — revisá labels a mano", pipelinelabels.StateValidatePR, err))
 		} else {
 			stateValidated = true
+			runguard.AuditAppend(auditTarget, "validate-pr", pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateValidatePR, "", log)
 		}
 	case verdict != "" && !stateRes.ResolvedToIssue:
 		// Adopt mode: validate es la puerta de entrada al state machine
 		// para PRs sin che:* previo (v0.0.79 / commit 881c964). No hubo
-		// transición desde che:executed, pero el flow cerró OK con
-		// verdict, así que aplicamos che:validated directo al PR para que
+		// transición desde che:state:execute, pero el flow cerró OK con
+		// verdict, así que aplicamos che:state:validate_pr directo al PR para que
 		// el dash lo mueva fuera de la columna de adopt.
-		log.Step("adopt mode: aplicando che:validated al PR", output.F{PR: pr.Number})
-		if err := labels.Ensure(labels.CheValidated); err != nil {
-			log.Warn(fmt.Sprintf("no pude crear label che:validated en el repo: %v — revisá labels a mano", err))
-		} else if err := labels.AddLabels(pr.Number, labels.CheValidated); err != nil {
-			log.Warn(fmt.Sprintf("no pude aplicar che:validated al PR: %v — revisá labels a mano", err))
+		log.Step("adopt mode: aplicando "+pipelinelabels.StateValidatePR+" al PR", output.F{PR: pr.Number})
+		if err := labels.Ensure(pipelinelabels.StateValidatePR); err != nil {
+			log.Warn(fmt.Sprintf("no pude crear label %s en el repo: %v — revisá labels a mano", pipelinelabels.StateValidatePR, err))
+		} else if err := labels.AddLabels(pr.Number, pipelinelabels.StateValidatePR); err != nil {
+			log.Warn(fmt.Sprintf("no pude aplicar %s al PR: %v — revisá labels a mano", pipelinelabels.StateValidatePR, err))
 		}
 	case verdict != "" && stateRes.ResolvedToIssue:
-		// PR linkeado a un issue con che:* pero NO en che:executed (ej.
-		// che:idea / che:plan). No saltamos estados de la máquina por
+		// PR linkeado a un issue con che:* pero NO en che:state:execute (ej.
+		// che:state:idea / che:state:explore). No saltamos estados de la máquina por
 		// nuestra cuenta: dejamos el verdict aplicado y warnea para que
 		// el humano resuelva.
-		log.Warn(fmt.Sprintf("issue #%d linkeado no estaba en che:executed; aplique che:validated manualmente si corresponde", stateRes.IssueNumber))
+		log.Warn(fmt.Sprintf("issue #%d linkeado no estaba en %s; aplique %s manualmente si corresponde", stateRes.IssueNumber, pipelinelabels.StateExecute, pipelinelabels.StateValidatePR))
 	}
 
 	fmt.Fprintln(stdout, renderReport(results))
@@ -576,8 +635,14 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		log.Error(fmt.Sprintf("issue #%d is not OPEN (state=%s)", issue.Number, issue.State))
 		return ExitSemantic
 	}
-	if !issue.HasLabel(labels.ChePlan) {
-		log.Error(fmt.Sprintf("issue #%d no está en che:plan — corré `che explore %d` primero", issue.Number, issue.Number))
+	// Rechazar v1 antes de chequear la presencia del label v2 — el mensaje
+	// es más útil ("corré migrate-labels-v2") que "no está en che:state:explore".
+	if err := rejectV1Labels("issue", issue.Number, issue.LabelNames()); err != nil {
+		log.Error("gate v1 falló", output.F{Issue: issue.Number, Cause: err})
+		return ExitSemantic
+	}
+	if !issue.HasLabel(pipelinelabels.StateExplore) {
+		log.Error(fmt.Sprintf("issue #%d no está en %s — corré `che explore %d` primero", issue.Number, pipelinelabels.StateExplore, issue.Number))
 		return ExitSemantic
 	}
 	if issue.HasLabel(labels.CheLocked) {
@@ -596,22 +661,32 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		}
 	}()
 
-	// Transición: che:plan → che:validating. El defer revierte si succeded
-	// queda en false al final (rollback a che:plan). LIFO: el unlock corre
-	// después del rollback, garantizando que el lock cubre toda la ventana.
-	log.Step("transicionando a che:validating", output.F{Issue: issue.Number})
-	if err := labels.Apply(issueRef, labels.ChePlan, labels.CheValidating); err != nil {
-		log.Error("no pude transicionar a che:validating", output.F{Cause: err})
+	// Lock con heartbeat + TTL (PRD §6.d) — opt-in.
+	heartbeat, lockResult := runguard.AcquireLock(issueRef, "validate-plan", log)
+	defer runguard.ReleaseLock(heartbeat, log)
+	if lockResult == runguard.AcquireContended {
+		return ExitSemantic
+	}
+
+	// Transición: che:state:explore → che:state:applying:validate_pr. El defer revierte
+	// si succeded queda en false al final (rollback a che:state:explore). LIFO: el
+	// unlock corre después del rollback, garantizando que el lock cubre toda la ventana.
+	log.Step("transicionando a "+pipelinelabels.StateApplyingValidatePR, output.F{Issue: issue.Number})
+	if err := labels.Apply(issueRef, pipelinelabels.StateExplore, pipelinelabels.StateApplyingValidatePR); err != nil {
+		log.Error("no pude transicionar a "+pipelinelabels.StateApplyingValidatePR, output.F{Cause: err})
 		return ExitRetry
 	}
+	runguard.AuditAppend(issue.Number, "validate-plan", pipelinelabels.StateExplore, pipelinelabels.StateApplyingValidatePR, "", log)
 	var stateValidated bool
 	defer func() {
 		if stateValidated {
 			return
 		}
-		if err := labels.Apply(issueRef, labels.CheValidating, labels.ChePlan); err != nil {
-			log.Warn(fmt.Sprintf("rollback che:validating → che:plan fallo: %v — revisá labels a mano", err))
+		if err := labels.Apply(issueRef, pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateExplore); err != nil {
+			log.Warn(fmt.Sprintf("rollback %s → %s fallo: %v — revisá labels a mano", pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateExplore, err))
+			return
 		}
+		runguard.AuditAppend(issue.Number, "validate-plan", pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateExplore, "rollback", log)
 	}()
 
 	// Parseamos el plan consolidado del body. Dos modos de fallo semantic:
@@ -677,12 +752,13 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		}
 	}
 
-	// Cierre de la transición: che:validating → che:validated.
-	log.Step("transicionando a che:validated", output.F{Issue: issue.Number})
-	if err := labels.Apply(issueRef, labels.CheValidating, labels.CheValidated); err != nil {
-		log.Warn(fmt.Sprintf("no pude transicionar a che:validated: %v — revisá labels a mano", err))
+	// Cierre de la transición: che:state:applying:validate_pr → che:state:validate_pr.
+	log.Step("transicionando a "+pipelinelabels.StateValidatePR, output.F{Issue: issue.Number})
+	if err := labels.Apply(issueRef, pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateValidatePR); err != nil {
+		log.Warn(fmt.Sprintf("no pude transicionar a %s: %v — revisá labels a mano", pipelinelabels.StateValidatePR, err))
 	} else {
 		stateValidated = true
+		runguard.AuditAppend(issue.Number, "validate-plan", pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateValidatePR, "", log)
 	}
 
 	fmt.Fprintln(stdout, renderReport(results))
@@ -1376,6 +1452,19 @@ func (i *Issue) HasLabel(name string) bool {
 	return false
 }
 
+// LabelNames proyecta i.Labels al slice de nombres. Útil para alimentar
+// helpers de validación como rejectV1Labels y ValidateNoMixedLabels.
+func (i *Issue) LabelNames() []string {
+	if i == nil {
+		return nil
+	}
+	out := make([]string, 0, len(i.Labels))
+	for _, l := range i.Labels {
+		out = append(out, l.Name)
+	}
+	return out
+}
+
 // FetchIssue corre `gh issue view <ref> --json ...` para el modo plan. Trae
 // un superset mínimo: number/title/body/labels/url/state. Los comments se
 // fetchean aparte con FetchIssueComments porque es consistente con cómo se
@@ -1632,7 +1721,7 @@ type PlanCandidate struct {
 // :needs-human visibles: el humano puede re-validar tras editar el plan.
 func ListPlanCandidates() ([]PlanCandidate, error) {
 	cmd := exec.Command("gh", "issue", "list",
-		"--label", labels.ChePlan,
+		"--label", pipelinelabels.StateExplore,
 		"--state", "open",
 		"--json", "number,title,url,labels",
 		"--limit", "50")

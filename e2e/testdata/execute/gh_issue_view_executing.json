@@ -6,6 +6,6 @@
   "state": "OPEN",
   "labels": [
     {"name": "ct:plan"},
-    {"name": "che:executing"}
+    {"name": "che:state:applying:execute"}
   ]
 }

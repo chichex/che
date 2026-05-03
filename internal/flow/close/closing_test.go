@@ -10,6 +10,7 @@ import (
 	"github.com/chichex/che/internal/flow/stateref"
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/pipelinelabels"
 )
 
 // Helper para construir PRs con labels/refs sin repetir struct literal.
@@ -347,16 +348,16 @@ func TestCloseFromStateRes(t *testing.T) {
 		want string
 	}{
 		{"empty", stateref.Resolution{}, ""},
-		{"executed only", stateref.Resolution{Labels: []string{labels.CheExecuted}}, labels.CheExecuted},
-		{"validated only", stateref.Resolution{Labels: []string{labels.CheValidated}}, labels.CheValidated},
-		{"both → validated wins", stateref.Resolution{Labels: []string{labels.CheExecuted, labels.CheValidated}}, labels.CheValidated},
+		{"execute only", stateref.Resolution{Labels: []string{pipelinelabels.StateExecute}}, pipelinelabels.StateExecute},
+		{"validate_pr only", stateref.Resolution{Labels: []string{pipelinelabels.StateValidatePR}}, pipelinelabels.StateValidatePR},
+		{"both → validate_pr wins", stateref.Resolution{Labels: []string{pipelinelabels.StateExecute, pipelinelabels.StateValidatePR}}, pipelinelabels.StateValidatePR},
 		{"noise labels don't interfere", stateref.Resolution{Labels: []string{"ct:plan", "priority:high"}}, ""},
-		{"validated from issue", stateref.Resolution{
+		{"validate_pr from issue", stateref.Resolution{
 			Ref:             "122",
-			Labels:          []string{labels.CheValidated, "ct:plan"},
+			Labels:          []string{pipelinelabels.StateValidatePR, "ct:plan"},
 			ResolvedToIssue: true,
 			IssueNumber:     122,
-		}, labels.CheValidated},
+		}, pipelinelabels.StateValidatePR},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -375,7 +376,7 @@ func TestPullRequest_ResolveStateRef_ViaIssue(t *testing.T) {
 		if n != 122 {
 			return nil, fmt.Errorf("unexpected n=%d", n)
 		}
-		return []string{"ct:plan", labels.CheExecuted}, nil
+		return []string{"ct:plan", pipelinelabels.StateExecute}, nil
 	})()
 
 	pr := mkPR(140, withLabel(labels.ValidatedChangesRequested), withClosing(122))
@@ -389,8 +390,8 @@ func TestPullRequest_ResolveStateRef_ViaIssue(t *testing.T) {
 	if r.Ref != "122" {
 		t.Fatalf("expected Ref=122, got %q", r.Ref)
 	}
-	if !r.HasLabel(labels.CheExecuted) {
-		t.Fatalf("expected issue's che:executed to be in Labels: %v", r.Labels)
+	if !r.HasLabel(pipelinelabels.StateExecute) {
+		t.Fatalf("expected issue's %s to be in Labels: %v", pipelinelabels.StateExecute, r.Labels)
 	}
 	if r.HasLabel(labels.ValidatedChangesRequested) {
 		t.Fatalf("PR's validated:changes-requested shouldn't be on the issue-resolution")
@@ -405,7 +406,7 @@ func TestPullRequest_ResolveStateRef_Fallback(t *testing.T) {
 		return nil, nil
 	})()
 
-	pr := mkPR(140, withLabel(labels.CheExecuted))
+	pr := mkPR(140, withLabel(pipelinelabels.StateExecute))
 	r := pr.ResolveStateRef("140")
 	if r.ResolvedToIssue {
 		t.Fatalf("expected fallback to PR, got %+v", r)
@@ -413,8 +414,8 @@ func TestPullRequest_ResolveStateRef_Fallback(t *testing.T) {
 	if r.Ref != "140" {
 		t.Fatalf("expected Ref=140 (PR), got %q", r.Ref)
 	}
-	if !r.HasLabel(labels.CheExecuted) {
-		t.Fatalf("expected PR's che:executed in Labels: %v", r.Labels)
+	if !r.HasLabel(pipelinelabels.StateExecute) {
+		t.Fatalf("expected PR's %s in Labels: %v", pipelinelabels.StateExecute, r.Labels)
 	}
 }
 

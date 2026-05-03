@@ -1,0 +1,13 @@
+{
+  "number": 7,
+  "title": "PR de un repo no migrado: tiene che:executed (v1) en vez de che:state:execute",
+  "url": "https://github.com/acme/demo/pull/7",
+  "state": "OPEN",
+  "isDraft": false,
+  "headRefName": "feat/legacy",
+  "mergeable": "MERGEABLE",
+  "mergeStateStatus": "CLEAN",
+  "author": {"login": "acme-bot"},
+  "closingIssuesReferences": [],
+  "labels": [{"name": "che:executed"}]
+}

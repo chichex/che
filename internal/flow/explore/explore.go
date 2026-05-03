@@ -20,8 +20,10 @@ import (
 	"github.com/chichex/che/internal/agent"
 	"github.com/chichex/che/internal/comments"
 	"github.com/chichex/che/internal/flow/idea"
+	"github.com/chichex/che/internal/flow/runguard"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
+	"github.com/chichex/che/internal/pipelinelabels"
 	"github.com/chichex/che/internal/plan"
 )
 
@@ -354,21 +356,36 @@ func Run(issueRef string, opts Opts) ExitCode {
 		}
 	}()
 
-	// Transición idea → planning (lock de máquina de estados). El rollback
-	// (planning → idea) lo hace el defer si succeeded queda en false.
-	progress("transicionando label a che:planning…")
-	if err := labels.Apply(issueRef, labels.CheIdea, labels.ChePlanning); err != nil {
+	// Lock con heartbeat + TTL (PRD §6.d) — opt-in vía CHE_LOCK_HEARTBEAT.
+	// Convive con `labels.Lock` arriba: el binario `che:locked` queda como
+	// mutex simple para flows v1 y este lock agrega identidad + staleness.
+	heartbeat, lockResult := runguard.AcquireLock(issueRef, "explore", log)
+	defer runguard.ReleaseLock(heartbeat, log)
+	if lockResult == runguard.AcquireContended {
+		// Lock vivo de otro proceso — abortamos sin tocar nada.
+		return ExitSemantic
+	}
+
+	// Transición idea → applying:explore (lock de máquina de estados). El
+	// rollback (applying:explore → idea) lo hace el defer si succeeded queda
+	// en false.
+	progress("transicionando label a " + pipelinelabels.StateApplyingExplore + "…")
+	if err := labels.Apply(issueRef, pipelinelabels.StateIdea, pipelinelabels.StateApplyingExplore); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
+	runguard.AuditAppend(issue.Number, "explore", pipelinelabels.StateIdea, pipelinelabels.StateApplyingExplore, "", log)
 	var succeeded bool
 	defer func() {
 		if succeeded {
 			return
 		}
-		if err := labels.Apply(issueRef, labels.ChePlanning, labels.CheIdea); err != nil {
-			fmt.Fprintf(stderr, "warning: rollback che:planning → che:idea fallo: %v — revisá labels a mano\n", err)
+		if err := labels.Apply(issueRef, pipelinelabels.StateApplyingExplore, pipelinelabels.StateIdea); err != nil {
+			fmt.Fprintf(stderr, "warning: rollback %s → %s fallo: %v — revisá labels a mano\n",
+				pipelinelabels.StateApplyingExplore, pipelinelabels.StateIdea, err)
+			return
 		}
+		runguard.AuditAppend(issue.Number, "explore", pipelinelabels.StateApplyingExplore, pipelinelabels.StateIdea, "rollback", log)
 	}()
 
 	a := opts.Agent
@@ -407,12 +424,13 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitRetry
 	}
 
-	progress("transicionando label a che:plan…")
-	if err := labels.Apply(issueRef, labels.ChePlanning, labels.ChePlan); err != nil {
+	progress("transicionando label a " + pipelinelabels.StateExplore + "…")
+	if err := labels.Apply(issueRef, pipelinelabels.StateApplyingExplore, pipelinelabels.StateExplore); err != nil {
 		fmt.Fprintf(stderr, "error: editing labels: %v\n", err)
 		fmt.Fprintf(stderr, "warning: comentario posteado (%s) pero label no cambió; corré de nuevo o editá a mano\n", commentURL)
 		return ExitRetry
 	}
+	runguard.AuditAppend(issue.Number, "explore", pipelinelabels.StateApplyingExplore, pipelinelabels.StateExplore, "", log)
 	succeeded = true
 
 	fmt.Fprintf(stdout, "Explored %s\n", issue.URL)
@@ -488,14 +506,14 @@ func filterCandidates(issues []Issue) []Candidate {
 			continue // otro flow lo tiene agarrado.
 		}
 		if i.HasLabel(labels.CtPlan) {
-			if i.HasLabel(labels.ChePlanning) ||
-				i.HasLabel(labels.ChePlan) ||
-				i.HasLabel(labels.CheExecuting) ||
-				i.HasLabel(labels.CheExecuted) ||
-				i.HasLabel(labels.CheValidating) ||
-				i.HasLabel(labels.CheValidated) ||
-				i.HasLabel(labels.CheClosing) ||
-				i.HasLabel(labels.CheClosed) {
+			if i.HasLabel(pipelinelabels.StateApplyingExplore) ||
+				i.HasLabel(pipelinelabels.StateExplore) ||
+				i.HasLabel(pipelinelabels.StateApplyingExecute) ||
+				i.HasLabel(pipelinelabels.StateExecute) ||
+				i.HasLabel(pipelinelabels.StateApplyingValidatePR) ||
+				i.HasLabel(pipelinelabels.StateValidatePR) ||
+				i.HasLabel(pipelinelabels.StateApplyingClose) ||
+				i.HasLabel(pipelinelabels.StateClose) {
 				continue
 			}
 			cheIdeas = append(cheIdeas, Candidate{Number: i.Number, Title: i.Title})
@@ -614,7 +632,7 @@ func reclassifyIssue(ref string, issue *Issue, log *output.Logger) error {
 
 	toAdd := []string{labels.CtPlan}
 	if !hasStatus {
-		toAdd = append(toAdd, labels.CheIdea)
+		toAdd = append(toAdd, pipelinelabels.StateIdea)
 	} else {
 		log.Warn("issue con che:* preexistente sin ct:plan; preservando el estado actual",
 			output.F{Issue: issue.Number})
@@ -654,6 +672,13 @@ func reclassifyIssue(ref string, issue *Issue, log *output.Logger) error {
 // gateBasic valida las precondiciones: open + ct:plan + NO está más allá
 // de che:idea (planning/plan/executing/executed/validating/validated/
 // closing/closed → el issue ya avanzó en el pipeline, explore no aplica).
+//
+// También rechaza issues con labels del modelo viejo (`che:idea`,
+// `che:plan`, …): el flow migrado a v2 escribe `che:state:*` y no sabe
+// hacer migración in-place del label viejo, así que dejarlo correr
+// produciría un estado mixto (v1 + v2 simultáneos) ilegal en ambas
+// máquinas. La migración de repos vivos vive en `migrate-labels-v2`
+// (subcomando dedicado, fuera del scope de PR6b).
 func gateBasic(i *Issue) error {
 	if i.State != "OPEN" {
 		return fmt.Errorf("issue #%d is closed", i.Number)
@@ -661,15 +686,23 @@ func gateBasic(i *Issue) error {
 	if !i.HasLabel(labels.CtPlan) {
 		return fmt.Errorf("issue #%d is missing label ct:plan (not created by `che idea`?)", i.Number)
 	}
+	// Detectar labels v1 (modelo viejo) antes de avanzar — si el repo
+	// no corrió migrate-labels-v2, mezclar v1+v2 deja al issue en estado
+	// inconsistente. REMOVE IN PR6d.
+	for _, v1 := range labels.V1LegacyStates() {
+		if i.HasLabel(v1) {
+			return fmt.Errorf("issue #%d tiene labels v1 (%s); este flow opera sobre el modelo v2 (`che:state:*`). Corré `che migrate-labels-v2` antes de explorar, o ajustá los labels a mano", i.Number, v1)
+		}
+	}
 	for _, beyond := range []string{
-		labels.ChePlanning,
-		labels.ChePlan,
-		labels.CheExecuting,
-		labels.CheExecuted,
-		labels.CheValidating,
-		labels.CheValidated,
-		labels.CheClosing,
-		labels.CheClosed,
+		pipelinelabels.StateApplyingExplore,
+		pipelinelabels.StateExplore,
+		pipelinelabels.StateApplyingExecute,
+		pipelinelabels.StateExecute,
+		pipelinelabels.StateApplyingValidatePR,
+		pipelinelabels.StateValidatePR,
+		pipelinelabels.StateApplyingClose,
+		pipelinelabels.StateClose,
 	} {
 		if i.HasLabel(beyond) {
 			return fmt.Errorf("issue #%d ya avanzó en el pipeline (%s presente) — explore no aplica", i.Number, beyond)

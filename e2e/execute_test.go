@@ -102,10 +102,10 @@ func TestExecute_GoldenPath(t *testing.T) {
 	// che:executing). 2) executing→executed (DELETE che:executing + POST
 	// che:executed). awaiting-human ya no se aplica (el gate vive en
 	// plan-validated:* / validated:*).
-	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executing"); len(got) != 1 {
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:applying:execute"); len(got) != 1 {
 		t.Fatalf("expected 1 POST adding che:executing, got %d", len(got))
 	}
-	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executed"); len(got) != 1 {
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:execute"); len(got) != 1 {
 		t.Fatalf("expected 1 POST adding che:executed, got %d", len(got))
 	}
 
@@ -125,7 +125,7 @@ func TestExecute_IssueNotStatusPlan_Exit3(t *testing.T) {
 	if r.ExitCode != 3 {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
-	harness.AssertContains(t, r.Stderr, "che:idea, che:plan ni che:validated")
+	harness.AssertContains(t, r.Stderr, "che:state:idea, che:state:explore ni che:state:validate_pr")
 	env.Invocations().AssertNotCalled(t, "claude")
 }
 
@@ -173,7 +173,8 @@ func TestExecute_IssueAlreadyExecuting_Exit3(t *testing.T) {
 	if r.ExitCode != 3 {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
-	harness.AssertContains(t, r.Stderr, "executing")
+	// Post-PR6b: el mensaje del flow menciona el label v2 (`che:state:applying:execute`).
+	harness.AssertContains(t, r.Stderr, "che:state:applying:execute")
 }
 
 // TestExecute_Idempotency_UpdatesExistingPR: segundo run con PR abierto
@@ -239,10 +240,10 @@ func TestExecute_AgentFails_Rollback(t *testing.T) {
 	}
 	// Lock: DELETE che:plan + POST che:executing. Rollback: DELETE
 	// che:executing + POST che:plan.
-	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executing"); len(got) != 1 {
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:applying:execute"); len(got) != 1 {
 		t.Fatalf("expected 1 POST adding che:executing (lock), got %d", len(got))
 	}
-	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:plan"); len(got) != 1 {
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:explore"); len(got) != 1 {
 		t.Fatalf("expected 1 POST adding che:plan (rollback), got %d", len(got))
 	}
 }
@@ -275,10 +276,10 @@ func TestExecute_AgentFails_RollbackSkippedIfLockLost(t *testing.T) {
 	inv := env.Invocations()
 	// Lock: 1 POST adding che:executing. Rollback NO debe ocurrir → 0
 	// POSTs adding che:plan.
-	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executing"); len(got) != 1 {
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:applying:execute"); len(got) != 1 {
 		t.Fatalf("expected 1 POST adding che:executing (lock), got %d", len(got))
 	}
-	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:plan"); len(got) != 0 {
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:explore"); len(got) != 0 {
 		t.Fatalf("expected 0 POST adding che:plan (rollback skipped), got %d", len(got))
 	}
 	harness.AssertContains(t, r.Stderr, "rollback abortado")
@@ -346,7 +347,7 @@ func TestExecute_NoChanges_ExistingPR_Rollback(t *testing.T) {
 		t.Fatalf("expected 0 gh pr create, got %d", len(creates))
 	}
 	// Ninguna transición debe agregar che:executed (POST con ese label).
-	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executed"); len(got) != 0 {
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:execute"); len(got) != 0 {
 		t.Fatalf("rogue transition to che:executed: %v", got)
 	}
 }
@@ -520,10 +521,10 @@ func TestExecute_PreviousPRClosed_NoAutoReopen(t *testing.T) {
 	}
 	// Rollback aplicado: lock POST adds che:executing, rollback POST adds
 	// che:plan.
-	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executing"); len(got) != 1 {
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:applying:execute"); len(got) != 1 {
 		t.Fatalf("expected 1 POST adding che:executing (lock), got %d", len(got))
 	}
-	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:plan"); len(got) != 1 {
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:explore"); len(got) != 1 {
 		t.Fatalf("expected 1 POST adding che:plan (rollback), got %d", len(got))
 	}
 }
@@ -590,10 +591,10 @@ func TestExecute_PRCreateFails_PostPush_CleanupCorrect(t *testing.T) {
 	inv := env.Invocations()
 	// Rollback del label aplicado: lock POST agrega che:executing, rollback
 	// POST agrega che:plan.
-	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:executing"); len(got) != 1 {
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:applying:execute"); len(got) != 1 {
 		t.Fatalf("expected 1 POST adding che:executing (lock), got %d", len(got))
 	}
-	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:plan"); len(got) != 1 {
+	if got := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:explore"); len(got) != 1 {
 		t.Fatalf("expected 1 POST adding che:plan (rollback), got %d", len(got))
 	}
 

@@ -2,8 +2,6 @@ package cmd
 
 import (
 	"testing"
-
-	"github.com/chichex/che/internal/labels"
 )
 
 // TestMigrationPairs valida el contrato del helper `migrationPairs()`:
@@ -17,11 +15,11 @@ func TestMigrationPairs(t *testing.T) {
 	pairs := migrationPairs()
 
 	want := []pair{
-		{Old: "status:idea", New: labels.CheIdea},
-		{Old: "status:plan", New: labels.ChePlan},
-		{Old: "status:executing", New: labels.CheExecuting},
-		{Old: "status:executed", New: labels.CheExecuted},
-		{Old: "status:closed", New: labels.CheClosed},
+		{Old: "status:idea", New: "che:idea"},
+		{Old: "status:plan", New: "che:plan"},
+		{Old: "status:executing", New: "che:executing"},
+		{Old: "status:executed", New: "che:executed"},
+		{Old: "status:closed", New: "che:closed"},
 	}
 
 	if len(pairs) != len(want) {

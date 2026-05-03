@@ -279,7 +279,7 @@ func TestValidate_Plan_NoStatusPlan_Exit3(t *testing.T) {
 	if r.ExitCode != 3 {
 		t.Fatalf("expected exit 3, got %d\nstderr: %s", r.ExitCode, r.Stderr)
 	}
-	harness.AssertContains(t, r.Stderr, "che:plan")
+	harness.AssertContains(t, r.Stderr, "che:state:explore")
 	harness.AssertContains(t, r.Stderr, "che explore")
 	env.Invocations().AssertNotCalled(t, "claude")
 }
@@ -300,6 +300,32 @@ func TestValidate_Plan_NoConsolidatedPlan_Exit3(t *testing.T) {
 	}
 	harness.AssertContains(t, r.Stderr, "plan consolidado")
 	env.Invocations().AssertNotCalled(t, "claude")
+}
+
+// TestValidate_Plan_OldV1Label_Exit3: issue de un repo no migrado con labels
+// v1 (`che:plan` viejo). El gate v1-rejection debe rechazarlo con exit 3 y
+// mensaje accionable apuntando a `che migrate-labels-v2` ANTES de tocar el
+// state machine — sino dejaríamos el issue con v1+v2 mezclado.
+func TestValidate_Plan_OldV1Label_Exit3(t *testing.T) {
+	env := setupValidateEnv(t)
+	scriptValidatePrechecks(env)
+	scriptDetectTargetPlan(env, 88)
+
+	env.ExpectGh(`^issue view 88 --json number,title,body,labels,url,state$`).
+		RespondStdoutFromFixture("validate/gh_issue_view_old_label_che_plan.json", 0)
+
+	r := env.Run("validate", "--validators", "opus", "88")
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3 (gate v1 rechaza), got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "v1")
+	harness.AssertContains(t, r.Stderr, "migrate-labels-v2")
+	// Sin transiciones ni validador.
+	env.Invocations().AssertNotCalled(t, "claude")
+	posts := env.Invocations().FindCalls("gh", "api", "-X", "POST", "issues/88/labels")
+	if len(posts) > 0 {
+		t.Fatalf("no debería haber POST de labels (gate rechaza); calls=%v", posts)
+	}
 }
 
 // ---- helpers ----

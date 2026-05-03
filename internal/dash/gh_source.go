@@ -36,7 +36,32 @@ import (
 	"time"
 
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/pipelinelabels"
 )
+
+// v2StatusByLabel mapea cada label terminal/applying del modelo v2
+// (`che:state:*` y `che:state:applying:*`) al string canónico de Status que
+// el resto del paquete dash espera (idea, planning, plan, executing,
+// executed, validating, validated, closing, closed). Es la fuente de verdad
+// del parser en applyLabels — agregar un step nuevo al pipeline declarativo
+// implica agregar acá su entrada (terminal + applying si corresponde).
+//
+// Decisión: aunque v1 colapsaba "validate sobre plan" y "validate sobre PR"
+// en `che:validating`/`che:validated`, v2 solo tiene un step `validate_pr`.
+// Mapeamos `che:state:validate_pr` → `validated` y
+// `che:state:applying:validate_pr` → `validating` para preservar las
+// columnas históricas del kanban (loop.go/preflight.go usan esos strings).
+var v2StatusByLabel = map[string]string{
+	pipelinelabels.StateIdea:               "idea",
+	pipelinelabels.StateApplyingExplore:    "planning",
+	pipelinelabels.StateExplore:            "plan",
+	pipelinelabels.StateApplyingExecute:    "executing",
+	pipelinelabels.StateExecute:            "executed",
+	pipelinelabels.StateApplyingValidatePR: "validating",
+	pipelinelabels.StateValidatePR:         "validated",
+	pipelinelabels.StateApplyingClose:      "closing",
+	pipelinelabels.StateClose:              "closed",
+}
 
 // defaultClosedCap es el cap default de issues closed que el poller trae al
 // snapshot. Se elige 20 como compromiso: suficiente para mostrar continuidad
@@ -366,35 +391,72 @@ func (g *GhSource) fetchIssues(ctx context.Context) ([]ghIssue, error) {
 	return parseIssues(out)
 }
 
-// fetchClosedIssues corre `gh issue list --state closed --label che:closed`
-// con el cap del poller. Permite que la columna closed muestre los últimos
-// N issues completados sin traer todo el histórico del repo (que en un
-// proyecto activo puede ser miles).
+// fetchClosedIssues corre `gh issue list --state closed` filtrando por
+// label de cierre — v2 (`che:state:close`) o v1 (`che:closed` legacy) — con
+// el cap del poller. Permite que la columna closed muestre los últimos N
+// issues completados sin traer todo el histórico del repo (en un proyecto
+// activo puede ser miles).
 //
-// Si el repo no usa el label che:closed (proyecto recién migrado), gh
-// devuelve [] y este path es no-op.
+// Combina ambas familias en un solo slice deduplicado por número. Si el
+// repo nunca usó ninguno de los dos labels (recién migrado y nada cerrado
+// todavía) gh devuelve [] y este path es no-op.
+//
+// REMOVE IN PR6d: cuando todos los repos usen v2, el label v1 deja de
+// existir y queda solo la primera query.
 func (g *GhSource) fetchClosedIssues(ctx context.Context) ([]ghIssue, error) {
 	limit := g.ClosedCap
 	if limit <= 0 {
 		limit = defaultClosedCap
 	}
-	cmd := exec.CommandContext(ctx, "gh", "issue", "list",
-		"--state", "closed",
-		"--label", labels.CheClosed,
-		"--limit", fmt.Sprintf("%d", limit),
-		"--json", "number,title,labels,state,body,createdAt",
-	)
-	if g.repoDir != "" {
-		cmd.Dir = g.repoDir
-	}
-	out, err := cmd.Output()
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("gh issue list (closed): %s", strings.TrimSpace(string(ee.Stderr)))
+	fetch := func(label string) ([]ghIssue, error) {
+		cmd := exec.CommandContext(ctx, "gh", "issue", "list",
+			"--state", "closed",
+			"--label", label,
+			"--limit", fmt.Sprintf("%d", limit),
+			"--json", "number,title,labels,state,body,createdAt",
+		)
+		if g.repoDir != "" {
+			cmd.Dir = g.repoDir
 		}
-		return nil, fmt.Errorf("gh issue list (closed): %w", err)
+		out, err := cmd.Output()
+		if err != nil {
+			if ee, ok := err.(*exec.ExitError); ok {
+				return nil, fmt.Errorf("gh issue list (closed, %s): %s", label, strings.TrimSpace(string(ee.Stderr)))
+			}
+			return nil, fmt.Errorf("gh issue list (closed, %s): %w", label, err)
+		}
+		return parseIssues(out)
 	}
-	return parseIssues(out)
+	v2Issues, err := fetch(pipelinelabels.StateClose)
+	if err != nil {
+		return nil, err
+	}
+	// v1 legacy (`che:closed`) — REMOVE IN PR6d cuando ya no haya repos
+	// sin migrar. El string vive literal acá porque post-PR6c la constante
+	// del paquete labels ya no existe; este es el último consumidor (junto
+	// con migrate-labels-v2 y los guards rejectV1Labels).
+	v1Issues, err := fetch("che:closed")
+	if err != nil {
+		return nil, err
+	}
+	// Dedup por número (un issue migrado a medias podría tener ambos).
+	seen := make(map[int]struct{}, len(v2Issues)+len(v1Issues))
+	out := make([]ghIssue, 0, len(v2Issues)+len(v1Issues))
+	for _, i := range v2Issues {
+		if _, ok := seen[i.Number]; ok {
+			continue
+		}
+		seen[i.Number] = struct{}{}
+		out = append(out, i)
+	}
+	for _, i := range v1Issues {
+		if _, ok := seen[i.Number]; ok {
+			continue
+		}
+		seen[i.Number] = struct{}{}
+		out = append(out, i)
+	}
+	return out, nil
 }
 
 // fetchPRs corre `gh pr list` y parsea el JSON.
@@ -623,11 +685,18 @@ func laterOf(a, b time.Time) time.Time {
 // Status, PlanVerdict, PRVerdict, Locked. Es aditivo — se puede llamar dos
 // veces (issue + PR) y los labels más recientes ganan.
 //
-// Status se deriva del prefijo `che:` (post-PR1/PR2): che:idea → "idea",
-// che:planning → "planning", etc. El label `che:locked` es la única
-// excepción — es un marker, no un estado, y prende e.Locked en vez de
-// pisar Status. plan-validated:* / validated:* son los verdicts de los
-// validadores (no son estados).
+// Status soporta DOS modelos durante la transición v1→v2:
+//   - v2 (canónico post-PR6c): `che:state:<step>` (terminal) y
+//     `che:state:applying:<step>` (lock óptimista). Los strings de Status
+//     del kanban (idea/planning/plan/executing/executed/validating/
+//     validated/closing/closed) se preservan via v2StatusByLabel.
+//   - v1 (legacy): `che:idea` / `che:plan` / etc. Para que repos no migrados
+//     no se queden sin Status en el dash. Cuando todos los repos corran
+//     `che migrate-labels-v2` esta rama queda como dead code (REMOVE IN
+//     PR6d).
+//
+// `che:locked` prende e.Locked, no pisa Status. plan-validated:* / validated:*
+// son verdicts de los validadores (no son estados).
 func applyLabels(e *Entity, ls []ghLabel) {
 	for _, l := range ls {
 		name := l.Name
@@ -644,11 +713,23 @@ func applyLabels(e *Entity, ls []ghLabel) {
 			e.PlanVerdict = strings.TrimPrefix(name, "plan-validated:")
 		case strings.HasPrefix(name, "validated:"):
 			e.PRVerdict = strings.TrimPrefix(name, "validated:")
+		case strings.HasPrefix(name, pipelinelabels.PrefixState):
+			// v2: `che:state:<step>` o `che:state:applying:<step>`.
+			// Mapeamos via v2StatusByLabel; si el label no está en el
+			// mapa (por ej. step nuevo no registrado), preservamos
+			// best-effort el sufijo TrimPrefix.
+			if s, ok := v2StatusByLabel[name]; ok {
+				e.Status = s
+			} else if strings.HasPrefix(name, pipelinelabels.PrefixApplying) {
+				e.Status = strings.TrimPrefix(name, pipelinelabels.PrefixApplying)
+			} else {
+				e.Status = strings.TrimPrefix(name, pipelinelabels.PrefixState)
+			}
 		case strings.HasPrefix(name, "che:"):
-			// che:idea / che:planning / che:plan / che:executing /
+			// v1 legacy: che:idea / che:planning / che:plan / che:executing /
 			// che:executed / che:validating / che:validated / che:closing /
-			// che:closed → sufijo va a Status. che:locked se intercepta
-			// arriba (no llega acá).
+			// che:closed. che:locked y che:state:* se interceptan arriba.
+			// REMOVE IN PR6d cuando ya no haya repos sin migrar.
 			e.Status = strings.TrimPrefix(name, "che:")
 		}
 	}
