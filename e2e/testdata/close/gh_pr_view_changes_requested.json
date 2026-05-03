@@ -9,5 +9,5 @@
   "mergeStateStatus": "CLEAN",
   "author": {"login": "acme-bot"},
   "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
-  "labels": [{"name": "che:validated"}, {"name": "validated:changes-requested"}]
+  "labels": [{"name": "che:state:validate_pr"}, {"name": "validated:changes-requested"}]
 }

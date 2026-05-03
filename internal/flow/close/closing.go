@@ -32,7 +32,38 @@ import (
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
+	"github.com/chichex/che/internal/pipelinelabels"
 )
+
+// v1StateLabels son los 9 labels del modelo viejo. El gate los rechaza con
+// mensaje accionable apuntando a `che migrate-labels-v2`. REMOVE IN PR6d.
+var v1StateLabels = []string{
+	labels.CheIdea,
+	labels.ChePlanning,
+	labels.ChePlan,
+	labels.CheExecuting,
+	labels.CheExecuted,
+	labels.CheValidating,
+	labels.CheValidated,
+	labels.CheClosing,
+	labels.CheClosed,
+}
+
+// rejectV1Labels devuelve un error accionable si la lista contiene labels
+// del modelo viejo. Wirea ValidateNoMixedLabels para detectar mezcla v1+v2.
+func rejectV1Labels(kind string, number int, current []string) error {
+	if err := labels.ValidateNoMixedLabels(current); err != nil {
+		return fmt.Errorf("%s #%d: %w", kind, number, err)
+	}
+	for _, v1 := range v1StateLabels {
+		for _, l := range current {
+			if l == v1 {
+				return fmt.Errorf("%s #%d tiene labels v1 (%s); este flow opera sobre el modelo v2 (`che:state:*`). Corré `che migrate-labels-v2` antes de cerrar, o ajustá los labels a mano", kind, number, v1)
+			}
+		}
+	}
+	return nil
+}
 
 // ExitCode es el código de salida semántico para el caller.
 type ExitCode int
@@ -267,24 +298,24 @@ func BlockingVerdict(pr *PullRequest) string {
 // Compat shim: sigue leyendo del PR. Nuevos call-sites usan
 // closeFromStateRes que lee del issue cuando corresponde.
 func closeFromState(p *PullRequest) string {
-	if p.HasLabel(labels.CheValidated) {
-		return labels.CheValidated
+	if p.HasLabel(pipelinelabels.StateValidatePR) {
+		return pipelinelabels.StateValidatePR
 	}
-	if p.HasLabel(labels.CheExecuted) {
-		return labels.CheExecuted
+	if p.HasLabel(pipelinelabels.StateExecute) {
+		return pipelinelabels.StateExecute
 	}
 	return ""
 }
 
 // closeFromStateRes es la versión state-ref-aware: decide el from-state
 // leyendo los labels desde el Resolution (issue si hay linkeado, PR si no).
-// Misma preferencia: che:validated gana sobre che:executed.
+// Misma preferencia: che:state:validate_pr gana sobre che:state:execute.
 func closeFromStateRes(r stateref.Resolution) string {
-	if r.HasLabel(labels.CheValidated) {
-		return labels.CheValidated
+	if r.HasLabel(pipelinelabels.StateValidatePR) {
+		return pipelinelabels.StateValidatePR
 	}
-	if r.HasLabel(labels.CheExecuted) {
-		return labels.CheExecuted
+	if r.HasLabel(pipelinelabels.StateExecute) {
+		return pipelinelabels.StateExecute
 	}
 	return ""
 }
@@ -424,6 +455,13 @@ func Run(prRef string, opts Opts) ExitCode {
 		return ExitSemantic
 	}
 
+	// Rechazar v1 en el PR antes de stateref (corta antes del fetch del
+	// issue linkeado si los labels del PR ya están en estado mixto / v1).
+	if err := rejectV1Labels("PR", pr.Number, pr.PRLabelNames()); err != nil {
+		log.Error("gate v1 falló", output.F{PR: pr.Number, Cause: err})
+		return ExitSemantic
+	}
+
 	// Resolver dónde viven los labels che:* de máquina de estados. Los
 	// che:* para un PR creado por `che execute` viven en el issue linkeado
 	// (closingIssuesReferences); si el PR no tiene issue linkeado (PR
@@ -431,15 +469,24 @@ func Run(prRef string, opts Opts) ExitCode {
 	stateRes := pr.ResolveStateRef(prRef)
 	stateRef := stateRes.Ref
 
-	// Gate de máquina de estados: aceptamos che:executed o che:validated.
+	// Si stateref cayó al issue, repetimos el guard sobre los labels del
+	// issue — un repo a medio migrar puede tener el issue v1 y el PR v2.
+	if stateRes.ResolvedToIssue {
+		if err := rejectV1Labels("issue", stateRes.IssueNumber, stateRes.Labels); err != nil {
+			log.Error("gate v1 falló", output.F{Issue: stateRes.IssueNumber, Cause: err})
+			return ExitSemantic
+		}
+	}
+
+	// Gate de máquina de estados: aceptamos che:state:execute o che:state:validate_pr.
 	// `from` se captura para que el lock + el rollback usen el mismo
-	// origen (executed por path normal, validated post-validate).
+	// origen (execute por path normal, validate_pr post-validate).
 	prFrom := closeFromStateRes(stateRes)
 	if prFrom == "" {
 		if stateRes.ResolvedToIssue {
-			log.Error(fmt.Sprintf("issue #%d (linkeado al PR #%d) no está en che:executed ni che:validated — corré `che execute` o `che validate` antes", stateRes.IssueNumber, pr.Number))
+			log.Error(fmt.Sprintf("issue #%d (linkeado al PR #%d) no está en %s ni %s — corré `che execute` o `che validate` antes", stateRes.IssueNumber, pr.Number, pipelinelabels.StateExecute, pipelinelabels.StateValidatePR))
 		} else {
-			log.Error(fmt.Sprintf("PR #%d no está en che:executed ni che:validated — corré `che execute` o `che validate` antes", pr.Number))
+			log.Error(fmt.Sprintf("PR #%d no está en %s ni %s — corré `che execute` o `che validate` antes", pr.Number, pipelinelabels.StateExecute, pipelinelabels.StateValidatePR))
 		}
 		return ExitSemantic
 	}
@@ -455,16 +502,16 @@ func Run(prRef string, opts Opts) ExitCode {
 		}
 	}()
 
-	// Transición <prFrom> → che:closing. Rollback en defer LIFO si
+	// Transición <prFrom> → che:state:applying:close. Rollback en defer LIFO si
 	// stateClosed queda en false. Target: issue si hay linkeado con che:*,
 	// PR si no.
 	if stateRes.ResolvedToIssue {
-		log.Step("transicionando issue a che:closing", output.F{Issue: stateRes.IssueNumber})
+		log.Step("transicionando issue a "+pipelinelabels.StateApplyingClose, output.F{Issue: stateRes.IssueNumber})
 	} else {
-		log.Step("transicionando a che:closing", output.F{PR: pr.Number})
+		log.Step("transicionando a "+pipelinelabels.StateApplyingClose, output.F{PR: pr.Number})
 	}
-	if err := labels.Apply(stateRef, prFrom, labels.CheClosing); err != nil {
-		log.Error("no pude transicionar a che:closing", output.F{Cause: err})
+	if err := labels.Apply(stateRef, prFrom, pipelinelabels.StateApplyingClose); err != nil {
+		log.Error("no pude transicionar a "+pipelinelabels.StateApplyingClose, output.F{Cause: err})
 		return ExitRetry
 	}
 	var stateClosed bool
@@ -472,8 +519,8 @@ func Run(prRef string, opts Opts) ExitCode {
 		if stateClosed {
 			return
 		}
-		if err := labels.Apply(stateRef, labels.CheClosing, prFrom); err != nil {
-			log.Warn(fmt.Sprintf("rollback che:closing → %s fallo: %v — revisá labels a mano", prFrom, err))
+		if err := labels.Apply(stateRef, pipelinelabels.StateApplyingClose, prFrom); err != nil {
+			log.Warn(fmt.Sprintf("rollback %s → %s fallo: %v — revisá labels a mano", pipelinelabels.StateApplyingClose, prFrom, err))
 		}
 	}()
 
@@ -625,17 +672,17 @@ func Run(prRef string, opts Opts) ExitCode {
 
 	fmt.Fprintln(stdout, branchOutcomeMessage(pr.HeadBranch, keepBranch, preRemoteKnown, preRemoteMissing, remoteDeleteFailed))
 
-	// Cierre de la transición de máquina de estados: che:closing → che:closed.
-	// El target queda en estado terminal `che:closed`, consistente con el
+	// Cierre de la transición de máquina de estados: che:state:applying:close → che:state:close.
+	// El target queda en estado terminal `che:state:close`, consistente con el
 	// merge remoto. Best-effort: si falla, warneamos pero el merge ya
 	// ocurrió. Target: issue si hay linkeado con che:*, PR si no.
 	if stateRes.ResolvedToIssue {
-		log.Step("transicionando issue a che:closed", output.F{Issue: stateRes.IssueNumber})
+		log.Step("transicionando issue a "+pipelinelabels.StateClose, output.F{Issue: stateRes.IssueNumber})
 	} else {
-		log.Step("transicionando PR a che:closed", output.F{PR: pr.Number})
+		log.Step("transicionando PR a "+pipelinelabels.StateClose, output.F{PR: pr.Number})
 	}
-	if err := labels.Apply(stateRef, labels.CheClosing, labels.CheClosed); err != nil {
-		log.Warn(fmt.Sprintf("no pude transicionar a che:closed: %v — revisá labels a mano", err))
+	if err := labels.Apply(stateRef, pipelinelabels.StateApplyingClose, pipelinelabels.StateClose); err != nil {
+		log.Warn(fmt.Sprintf("no pude transicionar a %s: %v — revisá labels a mano", pipelinelabels.StateClose, err))
 	} else {
 		stateClosed = true
 	}
@@ -721,27 +768,27 @@ func closeAssociatedIssues(pr *PullRequest, stateRes stateref.Resolution, log *o
 				output.F{Issue: ref.Number, Cause: err})
 		} else {
 			closed = append(closed, ref.Number)
-			log.Success("issue cerrado", output.F{Issue: ref.Number, Labels: []string{labels.CheClosed}})
+			log.Success("issue cerrado", output.F{Issue: ref.Number, Labels: []string{pipelinelabels.StateClose}})
 		}
 		// Si el Run ya aplicó la transición sobre este issue, no re-corremos
-		// — quedó en che:closed; aplicar "che:executed → che:closing" acá
-		// fallaría porque el label origen ya no está.
+		// — quedó en che:state:close; aplicar "che:state:execute → che:state:applying:close"
+		// acá fallaría porque el label origen ya no está.
 		if stateRes.ResolvedToIssue && stateRes.IssueNumber == ref.Number {
 			continue
 		}
-		// Transición de labels best-effort. Probamos primero che:executed y
-		// si falla che:validated. Si el issue no tiene ninguno (ej.
+		// Transición de labels best-effort. Probamos primero che:state:execute y
+		// si falla che:state:validate_pr. Si el issue no tiene ninguno (ej.
 		// referenciado pero no manejado por che) los dos fallan y warneamos.
-		if err := labels.Apply(refStr, labels.CheExecuted, labels.CheClosing); err != nil {
-			if err2 := labels.Apply(refStr, labels.CheValidated, labels.CheClosing); err2 != nil {
-				log.Warn(fmt.Sprintf("warning: labels del issue #%d no transicionaron a che:closing (executed: %v · validated: %v)",
-					ref.Number, err, err2),
+		if err := labels.Apply(refStr, pipelinelabels.StateExecute, pipelinelabels.StateApplyingClose); err != nil {
+			if err2 := labels.Apply(refStr, pipelinelabels.StateValidatePR, pipelinelabels.StateApplyingClose); err2 != nil {
+				log.Warn(fmt.Sprintf("warning: labels del issue #%d no transicionaron a %s (execute: %v · validate_pr: %v)",
+					ref.Number, pipelinelabels.StateApplyingClose, err, err2),
 					output.F{Issue: ref.Number})
 				continue
 			}
 		}
-		if err := labels.Apply(refStr, labels.CheClosing, labels.CheClosed); err != nil {
-			log.Warn(fmt.Sprintf("warning: labels del issue #%d no transicionaron a che:closed", ref.Number),
+		if err := labels.Apply(refStr, pipelinelabels.StateApplyingClose, pipelinelabels.StateClose); err != nil {
+			log.Warn(fmt.Sprintf("warning: labels del issue #%d no transicionaron a %s", ref.Number, pipelinelabels.StateClose),
 				output.F{Issue: ref.Number, Cause: err})
 		}
 	}

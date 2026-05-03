@@ -686,7 +686,7 @@ func gateBasic(i *Issue) error {
 		labels.CheClosed,
 	} {
 		if i.HasLabel(v1) {
-			return fmt.Errorf("issue #%d tiene labels v1 (%s); este flow opera sobre el modelo v2 (`che:state:*`). Corré `migrate-labels-v2` (cuando exista) antes de explorar, o ajustá los labels a mano", i.Number, v1)
+			return fmt.Errorf("issue #%d tiene labels v1 (%s); este flow opera sobre el modelo v2 (`che:state:*`). Corré `che migrate-labels-v2` antes de explorar, o ajustá los labels a mano", i.Number, v1)
 		}
 	}
 	for _, beyond := range []string{

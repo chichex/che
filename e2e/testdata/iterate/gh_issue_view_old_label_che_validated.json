@@ -1,0 +1,12 @@
+{
+  "number": 88,
+  "title": "Issue de un repo no migrado: tiene che:validated (v1) en vez de che:state:validate_pr",
+  "body": "## Plan consolidado\n\n**Resumen:** algo.\n",
+  "url": "https://github.com/acme/demo/issues/88",
+  "state": "OPEN",
+  "labels": [
+    {"name": "ct:plan"},
+    {"name": "che:validated"},
+    {"name": "plan-validated:changes-requested"}
+  ]
+}

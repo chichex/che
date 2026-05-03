@@ -39,8 +39,41 @@ import (
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
+	"github.com/chichex/che/internal/pipelinelabels"
 	planpkg "github.com/chichex/che/internal/plan"
 )
+
+// v1StateLabels son los 9 labels del modelo viejo. El gate los rechaza con
+// mensaje accionable apuntando a `che migrate-labels-v2` antes de tocar
+// labels v2 (sino el repo queda en estado mixto). REMOVE IN PR6d.
+var v1StateLabels = []string{
+	labels.CheIdea,
+	labels.ChePlanning,
+	labels.ChePlan,
+	labels.CheExecuting,
+	labels.CheExecuted,
+	labels.CheValidating,
+	labels.CheValidated,
+	labels.CheClosing,
+	labels.CheClosed,
+}
+
+// rejectV1Labels devuelve un error accionable si la lista contiene algún
+// label v1. Wirea `ValidateNoMixedLabels` para detectar mezcla v1+v2 antes
+// de gritar "no está en che:state:validate_pr".
+func rejectV1Labels(kind string, number int, current []string) error {
+	if err := labels.ValidateNoMixedLabels(current); err != nil {
+		return fmt.Errorf("%s #%d: %w", kind, number, err)
+	}
+	for _, v1 := range v1StateLabels {
+		for _, l := range current {
+			if l == v1 {
+				return fmt.Errorf("%s #%d tiene labels v1 (%s); este flow opera sobre el modelo v2 (`che:state:*`). Corré `che migrate-labels-v2` antes de iterar, o ajustá los labels a mano", kind, number, v1)
+			}
+		}
+	}
+	return nil
+}
 
 // ExitCode es el código de salida semántico.
 type ExitCode int
@@ -95,7 +128,7 @@ func filterIterable(raw []validate.PullRequest) []validate.Candidate {
 		if !hasChangesRequested(p) {
 			continue
 		}
-		if !p.HasLabel(labels.CheValidated) {
+		if !p.HasLabel(pipelinelabels.StateValidatePR) {
 			continue
 		}
 		if p.HasLabel(labels.CheLocked) {
@@ -213,17 +246,31 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		log.Error(fmt.Sprintf("PR #%d no tiene head branch (¿fork?) — iterate no soporta ese caso", pr.Number))
 		return ExitSemantic
 	}
+	// Rechazar v1 en el PR antes de stateref (más rápido: no fetch del issue
+	// linkeado si ya falla acá). Si stateref cae al issue, repetimos abajo.
+	if err := rejectV1Labels("PR", pr.Number, pr.PRLabelNames()); err != nil {
+		log.Error("gate v1 falló", output.F{PR: pr.Number, Cause: err})
+		return ExitSemantic
+	}
+
 	// Resolver dónde viven los labels che:* de máquina de estados. Si el
 	// PR tiene issue linkeado con algún che:*, los gates leen del issue y
 	// las transiciones van al issue; si no, al PR mismo (compat).
 	stateRes := pr.ResolveStateRef(prRef)
 	stateRef := stateRes.Ref
 
-	if !stateRes.HasLabel(labels.CheValidated) {
+	if stateRes.ResolvedToIssue {
+		if err := rejectV1Labels("issue", stateRes.IssueNumber, stateRes.Labels); err != nil {
+			log.Error("gate v1 falló", output.F{Issue: stateRes.IssueNumber, Cause: err})
+			return ExitSemantic
+		}
+	}
+
+	if !stateRes.HasLabel(pipelinelabels.StateValidatePR) {
 		if stateRes.ResolvedToIssue {
-			log.Error(fmt.Sprintf("issue #%d (linkeado al PR #%d) no está en che:validated — corré `che validate %d` primero", stateRes.IssueNumber, pr.Number, pr.Number))
+			log.Error(fmt.Sprintf("issue #%d (linkeado al PR #%d) no está en %s — corré `che validate %d` primero", stateRes.IssueNumber, pr.Number, pipelinelabels.StateValidatePR, pr.Number))
 		} else {
-			log.Error(fmt.Sprintf("PR #%d no está en che:validated — corré `che validate %d` primero", pr.Number, pr.Number))
+			log.Error(fmt.Sprintf("PR #%d no está en %s — corré `che validate %d` primero", pr.Number, pipelinelabels.StateValidatePR, pr.Number))
 		}
 		return ExitSemantic
 	}
@@ -247,15 +294,15 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		}
 	}()
 
-	// Transición che:validated → che:executing. Rollback en defer LIFO.
+	// Transición che:state:validate_pr → che:state:applying:execute. Rollback en defer LIFO.
 	// Target: issue si hay linkeado con che:*, PR si no.
 	if stateRes.ResolvedToIssue {
-		log.Step("transicionando issue a che:executing", output.F{Issue: stateRes.IssueNumber})
+		log.Step("transicionando issue a "+pipelinelabels.StateApplyingExecute, output.F{Issue: stateRes.IssueNumber})
 	} else {
-		log.Step("transicionando a che:executing", output.F{PR: pr.Number})
+		log.Step("transicionando a "+pipelinelabels.StateApplyingExecute, output.F{PR: pr.Number})
 	}
-	if err := labels.Apply(stateRef, labels.CheValidated, labels.CheExecuting); err != nil {
-		log.Error("no pude transicionar a che:executing", output.F{Cause: err})
+	if err := labels.Apply(stateRef, pipelinelabels.StateValidatePR, pipelinelabels.StateApplyingExecute); err != nil {
+		log.Error("no pude transicionar a "+pipelinelabels.StateApplyingExecute, output.F{Cause: err})
 		return ExitRetry
 	}
 	var stateExecuted bool
@@ -263,8 +310,8 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		if stateExecuted {
 			return
 		}
-		if err := labels.Apply(stateRef, labels.CheExecuting, labels.CheValidated); err != nil {
-			log.Warn(fmt.Sprintf("rollback che:executing → che:validated fallo: %v — revisá labels a mano", err))
+		if err := labels.Apply(stateRef, pipelinelabels.StateApplyingExecute, pipelinelabels.StateValidatePR); err != nil {
+			log.Warn(fmt.Sprintf("rollback %s → %s fallo: %v — revisá labels a mano", pipelinelabels.StateApplyingExecute, pipelinelabels.StateValidatePR, err))
 		}
 	}()
 
@@ -345,15 +392,15 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		log.Warn("warning: no se pudo remover label — removelo a mano", output.F{Cause: err})
 	}
 
-	// Cierre de la transición: che:executing → che:executed. Target: el
+	// Cierre de la transición: che:state:applying:execute → che:state:execute. Target: el
 	// mismo ref que usamos para abrir la transición (issue si corresponde).
 	if stateRes.ResolvedToIssue {
-		log.Step("transicionando issue a che:executed", output.F{Issue: stateRes.IssueNumber})
+		log.Step("transicionando issue a "+pipelinelabels.StateExecute, output.F{Issue: stateRes.IssueNumber})
 	} else {
-		log.Step("transicionando a che:executed", output.F{PR: pr.Number})
+		log.Step("transicionando a "+pipelinelabels.StateExecute, output.F{PR: pr.Number})
 	}
-	if err := labels.Apply(stateRef, labels.CheExecuting, labels.CheExecuted); err != nil {
-		log.Warn(fmt.Sprintf("no pude transicionar a che:executed: %v — revisá labels a mano", err))
+	if err := labels.Apply(stateRef, pipelinelabels.StateApplyingExecute, pipelinelabels.StateExecute); err != nil {
+		log.Warn(fmt.Sprintf("no pude transicionar a %s: %v — revisá labels a mano", pipelinelabels.StateExecute, err))
 	} else {
 		stateExecuted = true
 	}
@@ -392,8 +439,14 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		log.Error(fmt.Sprintf("issue #%d is not OPEN (state=%s)", issue.Number, issue.State))
 		return ExitSemantic
 	}
-	if !issue.HasLabel(labels.CheValidated) {
-		log.Error(fmt.Sprintf("issue #%d no está en che:validated — corré `che validate %d` primero", issue.Number, issue.Number))
+	// Rechazar v1 antes de chequear v2 — error más útil que "no está en
+	// che:state:validate_pr" cuando el repo no migró todavía.
+	if err := rejectV1Labels("issue", issue.Number, issue.LabelNames()); err != nil {
+		log.Error("gate v1 falló", output.F{Issue: issue.Number, Cause: err})
+		return ExitSemantic
+	}
+	if !issue.HasLabel(pipelinelabels.StateValidatePR) {
+		log.Error(fmt.Sprintf("issue #%d no está en %s — corré `che validate %d` primero", issue.Number, pipelinelabels.StateValidatePR, issue.Number))
 		return ExitSemantic
 	}
 	if !issue.HasLabel(labels.PlanValidatedChangesRequested) {
@@ -401,7 +454,7 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		return ExitSemantic
 	}
 	// Execute ya corrió → iterar el plan no tiene efecto sobre el PR.
-	if issue.HasLabel(labels.CheExecuting) || issue.HasLabel(labels.CheExecuted) {
+	if issue.HasLabel(pipelinelabels.StateApplyingExecute) || issue.HasLabel(pipelinelabels.StateExecute) {
 		log.Error(fmt.Sprintf("issue #%d ya pasó por execute — iterar el plan no tiene efecto sobre el PR asociado. Iterar el PR directamente con `che iterate <pr>`.", issue.Number))
 		return ExitSemantic
 	}
@@ -421,10 +474,10 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		}
 	}()
 
-	// Transición che:validated → che:planning. Rollback en defer LIFO.
-	log.Step("transicionando a che:planning", output.F{Issue: issue.Number})
-	if err := labels.Apply(issueRef, labels.CheValidated, labels.ChePlanning); err != nil {
-		log.Error("no pude transicionar a che:planning", output.F{Cause: err})
+	// Transición che:state:validate_pr → che:state:applying:explore. Rollback en defer LIFO.
+	log.Step("transicionando a "+pipelinelabels.StateApplyingExplore, output.F{Issue: issue.Number})
+	if err := labels.Apply(issueRef, pipelinelabels.StateValidatePR, pipelinelabels.StateApplyingExplore); err != nil {
+		log.Error("no pude transicionar a "+pipelinelabels.StateApplyingExplore, output.F{Cause: err})
 		return ExitRetry
 	}
 	var statePlan bool
@@ -432,8 +485,8 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		if statePlan {
 			return
 		}
-		if err := labels.Apply(issueRef, labels.ChePlanning, labels.CheValidated); err != nil {
-			log.Warn(fmt.Sprintf("rollback che:planning → che:validated fallo: %v — revisá labels a mano", err))
+		if err := labels.Apply(issueRef, pipelinelabels.StateApplyingExplore, pipelinelabels.StateValidatePR); err != nil {
+			log.Warn(fmt.Sprintf("rollback %s → %s fallo: %v — revisá labels a mano", pipelinelabels.StateApplyingExplore, pipelinelabels.StateValidatePR, err))
 		}
 	}()
 
@@ -505,10 +558,10 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		log.Warn("warning: no se pudo remover label — removelo a mano", output.F{Cause: err})
 	}
 
-	// Cierre de la transición: che:planning → che:plan.
-	log.Step("transicionando a che:plan", output.F{Issue: issue.Number})
-	if err := labels.Apply(issueRef, labels.ChePlanning, labels.ChePlan); err != nil {
-		log.Warn(fmt.Sprintf("no pude transicionar a che:plan: %v — revisá labels a mano", err))
+	// Cierre de la transición: che:state:applying:explore → che:state:explore.
+	log.Step("transicionando a "+pipelinelabels.StateExplore, output.F{Issue: issue.Number})
+	if err := labels.Apply(issueRef, pipelinelabels.StateApplyingExplore, pipelinelabels.StateExplore); err != nil {
+		log.Warn(fmt.Sprintf("no pude transicionar a %s: %v — revisá labels a mano", pipelinelabels.StateExplore, err))
 	} else {
 		statePlan = true
 	}
@@ -772,7 +825,7 @@ func removeIssueLabel(issueRef, name string) error {
 // que filtrado por un label distinto.
 func ListIterablePlanCandidates() ([]validate.PlanCandidate, error) {
 	cmd := exec.Command("gh", "issue", "list",
-		"--label", labels.CheValidated,
+		"--label", pipelinelabels.StateValidatePR,
 		"--label", labels.PlanValidatedChangesRequested,
 		"--state", "open",
 		"--json", "number,title,url,labels",

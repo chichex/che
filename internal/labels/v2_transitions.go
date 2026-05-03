@@ -78,7 +78,7 @@ func ValidateNoMixedLabels(labels []string) error {
 	if len(v1Found) > 0 && len(v2Found) > 0 {
 		sort.Strings(v1Found)
 		sort.Strings(v2Found)
-		return fmt.Errorf("labels v1 (%s) y v2 (%s) presentes simultáneamente — corré `migrate-labels-v2` (cuando exista) o limpiá a mano",
+		return fmt.Errorf("labels v1 (%s) y v2 (%s) presentes simultáneamente — corré `che migrate-labels-v2` o limpiá a mano",
 			strings.Join(v1Found, ","), strings.Join(v2Found, ","))
 	}
 	return nil

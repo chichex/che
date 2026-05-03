@@ -10,6 +10,7 @@ import (
 	"github.com/chichex/che/internal/flow/stateref"
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/pipelinelabels"
 	planpkg "github.com/chichex/che/internal/plan"
 )
 
@@ -38,19 +39,19 @@ func TestFilterIterable(t *testing.T) {
 		{"empty", nil, nil},
 		{"sin labels excluido", []validate.PullRequest{mk(1), mk(2)}, nil},
 		{"changes-requested + validated incluido",
-			[]validate.PullRequest{mk(1, labels.ValidatedChangesRequested, labels.CheValidated)}, []int{1}},
-		{"changes-requested sin che:validated excluido",
+			[]validate.PullRequest{mk(1, labels.ValidatedChangesRequested, pipelinelabels.StateValidatePR)}, []int{1}},
+		{"changes-requested sin che:state:validate_pr excluido",
 			[]validate.PullRequest{mk(1, labels.ValidatedChangesRequested)}, nil},
 		{"approve excluido (no pidió cambios)",
-			[]validate.PullRequest{mk(1, labels.ValidatedApprove, labels.CheValidated)}, nil},
+			[]validate.PullRequest{mk(1, labels.ValidatedApprove, pipelinelabels.StateValidatePR)}, nil},
 		{"needs-human excluido (decisión humana, no técnica)",
-			[]validate.PullRequest{mk(1, labels.ValidatedNeedsHuman, labels.CheValidated)}, nil},
+			[]validate.PullRequest{mk(1, labels.ValidatedNeedsHuman, pipelinelabels.StateValidatePR)}, nil},
 		{"mix",
 			[]validate.PullRequest{
-				mk(1, labels.ValidatedApprove, labels.CheValidated),
-				mk(2, labels.ValidatedChangesRequested, labels.CheValidated),
-				mk(3, labels.ValidatedNeedsHuman, labels.CheValidated),
-				mk(4, labels.ValidatedChangesRequested, labels.CheValidated),
+				mk(1, labels.ValidatedApprove, pipelinelabels.StateValidatePR),
+				mk(2, labels.ValidatedChangesRequested, pipelinelabels.StateValidatePR),
+				mk(3, labels.ValidatedNeedsHuman, pipelinelabels.StateValidatePR),
+				mk(4, labels.ValidatedChangesRequested, pipelinelabels.StateValidatePR),
 				mk(5),
 			},
 			[]int{2, 4}},
@@ -468,8 +469,8 @@ func TestRunPRGate_StateFromIssue(t *testing.T) {
 		if n != 122 {
 			return nil, fmt.Errorf("unexpected n=%d", n)
 		}
-		// Escenario post-validate exitoso: issue en che:validated.
-		return []string{"ct:plan", "pricing-modes", labels.CheValidated}, nil
+		// Escenario post-validate exitoso: issue en che:state:validate_pr.
+		return []string{"ct:plan", "pricing-modes", pipelinelabels.StateValidatePR}, nil
 	})()
 
 	pr := validate.PullRequest{
@@ -486,16 +487,16 @@ func TestRunPRGate_StateFromIssue(t *testing.T) {
 
 	r := pr.ResolveStateRef("140")
 
-	// El gate de runPR lee che:validated desde stateRes.HasLabel(...). Si
-	// la resolución resolvió al issue con che:validated, el gate pasa.
+	// El gate de runPR lee che:state:validate_pr desde stateRes.HasLabel(...).
+	// Si la resolución resolvió al issue con ese label, el gate pasa.
 	if !r.ResolvedToIssue {
 		t.Fatalf("expected resolution to go to issue, got %+v", r)
 	}
 	if r.IssueNumber != 122 {
 		t.Fatalf("expected IssueNumber=122, got %d", r.IssueNumber)
 	}
-	if !r.HasLabel(labels.CheValidated) {
-		t.Fatalf("gate should see che:validated on the issue: %v", r.Labels)
+	if !r.HasLabel(pipelinelabels.StateValidatePR) {
+		t.Fatalf("gate should see %s on the issue: %v", pipelinelabels.StateValidatePR, r.Labels)
 	}
 	if r.Ref != "122" {
 		t.Fatalf("transitions should target issue ref '122', got %q", r.Ref)
@@ -516,11 +517,11 @@ func TestRunPRGate_StateFallbackToPR(t *testing.T) {
 		State:      "OPEN",
 		HeadBranch: "feat/x",
 	}
-	// PR ajeno: usuario aplicó che:validated a mano.
+	// PR ajeno: usuario aplicó che:state:validate_pr a mano.
 	pr.Labels = append(pr.Labels,
 		struct {
 			Name string `json:"name"`
-		}{Name: labels.CheValidated},
+		}{Name: pipelinelabels.StateValidatePR},
 		struct {
 			Name string `json:"name"`
 		}{Name: labels.ValidatedChangesRequested},
@@ -533,8 +534,8 @@ func TestRunPRGate_StateFallbackToPR(t *testing.T) {
 	if r.Ref != "140" {
 		t.Fatalf("expected Ref=140, got %q", r.Ref)
 	}
-	if !r.HasLabel(labels.CheValidated) {
-		t.Fatalf("gate should see che:validated on the PR: %v", r.Labels)
+	if !r.HasLabel(pipelinelabels.StateValidatePR) {
+		t.Fatalf("gate should see %s on the PR: %v", pipelinelabels.StateValidatePR, r.Labels)
 	}
 }
 
