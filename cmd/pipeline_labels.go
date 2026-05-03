@@ -14,14 +14,21 @@ import (
 )
 
 type pipelineLabelPair struct {
-	Old string
-	New string
+	Old      string
+	New      string
+	NewIssue string
+	NewPR    string
+}
+
+type pipelineLabelRef struct {
+	Number int
+	IsPR   bool
 }
 
 type pipelineLabelClient interface {
 	EnsureLabel(name string, skipExisting bool) error
 	DeleteRepoLabel(name string) error
-	SearchRefsWithLabel(name string) ([]int, error)
+	SearchRefsWithLabel(name string) ([]pipelineLabelRef, bool, error)
 	AddLabels(number int, names ...string) error
 	RemoveLabel(number int, name string) error
 	IssueLabels(number int) ([]string, error)
@@ -36,6 +43,7 @@ var (
 	pipelineMigrateLabelsPipeline string
 	pipelineMigrateLabelsMaps     []string
 	pipelineMigrateLabelsDryRun   bool
+	pipelineMigrateLabelsDelete   bool
 
 	pipelineResetPipeline string
 	pipelineResetFrom     string
@@ -78,7 +86,13 @@ pipelines reorganizados.
 
 El comando imprime un preview antes de aplicar. Con --dry-run sólo imprime el
 plan sin tocar GitHub. Los labels validated:* viejos se remueven porque el
-verdict pasa a vivir en el marker/audit log del pipeline.`,
+verdict pasa a vivir en el marker/audit log del pipeline.
+
+La migración no es atómica: si GitHub falla a mitad, pueden quedar refs con
+labels mixtos. Re-correr el comando es seguro porque add/remove son
+idempotentes, pero conviene revisar manualmente cualquier ref que conserve
+ambos modelos. Por default NO borra las definiciones legacy del repo; usá
+--delete-old si querés limpiar también los labels viejos del repositorio.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
 		root, err := repoRootForPipeline()
@@ -97,7 +111,7 @@ verdict pasa a vivir en el marker/audit log del pipeline.`,
 		if err != nil {
 			return err
 		}
-		return runPipelineMigrateLabels(cmd.OutOrStdout(), ghPipelineLabelClient{}, pairs, pipelineMigrateLabelsDryRun)
+		return runPipelineMigrateLabels(cmd.OutOrStdout(), ghPipelineLabelClient{}, pairs, pipelineMigrateLabelsDryRun, pipelineMigrateLabelsDelete)
 	},
 }
 
@@ -107,7 +121,10 @@ var pipelineResetCmd = &cobra.Command{
 	Long: `reset limpia de una entity los labels che:lock:* y
 che:state:applying:<step> que quedan pegados tras un crash. Si se pasa
 --from <step>, también deja la entity lista para reanudar desde ese step
-aplicando che:state:<step> y removiendo otros che:state:* terminales.`,
+aplicando che:state:<step> y removiendo otros che:state:* terminales.
+
+Este comando limpia el lock v2 che:lock:<ts>:<pid>-<host>. No remueve el
+mutex legacy che:locked; para eso sigue existiendo che unlock <ref>.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
@@ -139,6 +156,7 @@ func init() {
 	pipelineMigrateLabelsCmd.Flags().StringVar(&pipelineMigrateLabelsPipeline, "pipeline", "", "pipeline a resolver para validar --map y labels target")
 	pipelineMigrateLabelsCmd.Flags().StringArrayVar(&pipelineMigrateLabelsMaps, "map", nil, "mapeo old=new adicional o override; repetible")
 	pipelineMigrateLabelsCmd.Flags().BoolVar(&pipelineMigrateLabelsDryRun, "dry-run", false, "solo imprime preview, sin tocar GitHub")
+	pipelineMigrateLabelsCmd.Flags().BoolVar(&pipelineMigrateLabelsDelete, "delete-old", false, "borra también la definición legacy del label en el repo")
 	pipelineCmd.AddCommand(pipelineMigrateLabelsCmd)
 
 	pipelineResetCmd.Flags().StringVar(&pipelineResetPipeline, "pipeline", "", "pipeline a resolver para validar --from")
@@ -188,13 +206,16 @@ func defaultPipelineMigrationPairs() []pipelineLabelPair {
 		{Old: v1ChePlan, New: pipelinelabels.StateLabel("explore")},
 		{Old: v1CheExecuting, New: pipelinelabels.ApplyingLabel("execute")},
 		{Old: v1CheExecuted, New: pipelinelabels.StateLabel("execute")},
-		{Old: v1CheValidating, New: pipelinelabels.ApplyingLabel("validate_pr")},
-		{Old: v1CheValidated, New: pipelinelabels.StateLabel("validate_pr")},
+		{Old: v1CheValidating, NewIssue: pipelinelabels.ApplyingLabel("validate_issue"), NewPR: pipelinelabels.ApplyingLabel("validate_pr")},
+		{Old: v1CheValidated, NewIssue: pipelinelabels.StateLabel("validate_issue"), NewPR: pipelinelabels.StateLabel("validate_pr")},
 		{Old: v1CheClosing, New: pipelinelabels.ApplyingLabel("close")},
 		{Old: v1CheClosed, New: pipelinelabels.StateLabel("close")},
 		{Old: labels.ValidatedApprove},
 		{Old: labels.ValidatedChangesRequested},
 		{Old: labels.ValidatedNeedsHuman},
+		{Old: labels.PlanValidatedApprove},
+		{Old: labels.PlanValidatedChangesRequested},
+		{Old: labels.PlanValidatedNeedsHuman},
 	}
 }
 
@@ -208,48 +229,86 @@ func upsertPipelineLabelPair(pairs []pipelineLabelPair, pair pipelineLabelPair) 
 	return append(pairs, pair)
 }
 
-func runPipelineMigrateLabels(out io.Writer, client pipelineLabelClient, pairs []pipelineLabelPair, dryRun bool) error {
+func runPipelineMigrateLabels(out io.Writer, client pipelineLabelClient, pairs []pipelineLabelPair, dryRun, deleteOld bool) error {
 	fmt.Fprintln(out, "preview:")
 	for _, pair := range pairs {
-		if pair.New == "" {
+		if len(pairTargets(pair)) == 0 {
 			fmt.Fprintf(out, "  remove %s\n", pair.Old)
+		} else if pair.NewIssue != "" || pair.NewPR != "" {
+			fmt.Fprintf(out, "  %s -> issue:%s pr:%s\n", pair.Old, pair.NewIssue, pair.NewPR)
 		} else {
 			fmt.Fprintf(out, "  %s -> %s\n", pair.Old, pair.New)
 		}
+	}
+	if deleteOld {
+		fmt.Fprintln(out, "  legacy repo labels will be deleted after entity migration")
+	} else {
+		fmt.Fprintln(out, "  legacy repo label definitions will be preserved")
 	}
 	if dryRun {
 		return nil
 	}
 	for _, pair := range pairs {
-		if pair.New != "" {
-			if err := client.EnsureLabel(pair.New, true); err != nil {
+		for _, target := range pairTargets(pair) {
+			if err := client.EnsureLabel(target, true); err != nil {
 				return err
 			}
 		}
-		refs, err := client.SearchRefsWithLabel(pair.Old)
+		refs, truncated, err := client.SearchRefsWithLabel(pair.Old)
 		if err != nil {
 			return fmt.Errorf("searching refs with %s: %w", pair.Old, err)
 		}
-		for _, number := range refs {
-			if pair.New != "" {
-				if err := client.AddLabels(number, pair.New); err != nil {
-					return fmt.Errorf("adding %s to #%d: %w", pair.New, number, err)
+		if truncated {
+			fmt.Fprintf(out, "warn: search for %s reached GitHub limit; re-run after this batch\n", pair.Old)
+		}
+		for _, ref := range refs {
+			target := pairTargetForRef(pair, ref)
+			if target != "" {
+				if err := client.AddLabels(ref.Number, target); err != nil {
+					return fmt.Errorf("adding %s to #%d: %w", target, ref.Number, err)
 				}
 			}
-			if err := client.RemoveLabel(number, pair.Old); err != nil {
-				return fmt.Errorf("removing %s from #%d: %w", pair.Old, number, err)
+			if err := client.RemoveLabel(ref.Number, pair.Old); err != nil {
+				return fmt.Errorf("removing %s from #%d: %w", pair.Old, ref.Number, err)
 			}
 		}
-		if err := client.DeleteRepoLabel(pair.Old); err != nil {
-			return err
+		if deleteOld {
+			if err := client.DeleteRepoLabel(pair.Old); err != nil {
+				return err
+			}
 		}
 		fmt.Fprintf(out, "ok: %s", pair.Old)
 		if pair.New != "" {
 			fmt.Fprintf(out, " -> %s", pair.New)
+		} else if pair.NewIssue != "" || pair.NewPR != "" {
+			fmt.Fprintf(out, " -> issue:%s pr:%s", pair.NewIssue, pair.NewPR)
 		}
 		fmt.Fprintln(out)
 	}
 	return nil
+}
+
+func pairTargets(pair pipelineLabelPair) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, target := range []string{pair.New, pair.NewIssue, pair.NewPR} {
+		if target == "" || seen[target] {
+			continue
+		}
+		seen[target] = true
+		out = append(out, target)
+	}
+	return out
+}
+
+func pairTargetForRef(pair pipelineLabelPair, ref pipelineLabelRef) string {
+	if pair.New != "" {
+		return pair.New
+	}
+	if ref.IsPR {
+		return pair.NewPR
+	}
+	return pair.NewIssue
 }
 
 func runPipelineReset(out io.Writer, client pipelineLabelClient, p pipeline.Pipeline, number int, from string) error {
@@ -266,7 +325,7 @@ func runPipelineReset(out io.Writer, client pipelineLabelClient, p pipeline.Pipe
 		if err != nil {
 			continue
 		}
-		if parsed.Kind == pipelinelabels.KindLock || parsed.Kind == pipelinelabels.KindApplying || (from != "" && parsed.Kind == pipelinelabels.KindState) {
+		if parsed.Kind == pipelinelabels.KindLock || parsed.Kind == pipelinelabels.KindApplying || (from != "" && parsed.Kind == pipelinelabels.KindState && parsed.Step != from) {
 			if err := client.RemoveLabel(number, name); err != nil {
 				return err
 			}
@@ -325,27 +384,28 @@ func (ghPipelineLabelClient) DeleteRepoLabel(name string) error {
 	return fmt.Errorf("deleting repo label %s: %s", name, strings.TrimSpace(combined))
 }
 
-func (ghPipelineLabelClient) SearchRefsWithLabel(name string) ([]int, error) {
+func (ghPipelineLabelClient) SearchRefsWithLabel(name string) ([]pipelineLabelRef, bool, error) {
 	nwo, err := currentRepoNameWithOwner()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	cmd := exec.Command("gh", "search", "issues", "repo:"+nwo, fmt.Sprintf("label:%q", name), "--json", "number", "--limit", "100")
+	cmd := exec.Command("gh", "search", "issues", "repo:"+nwo, fmt.Sprintf("label:%q", name), "--json", "number,isPullRequest", "--limit", "1000")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("gh search issues: %s", strings.TrimSpace(string(out)))
+		return nil, false, fmt.Errorf("gh search issues: %s", strings.TrimSpace(string(out)))
 	}
 	var raw []struct {
-		Number int `json:"number"`
+		Number        int  `json:"number"`
+		IsPullRequest bool `json:"isPullRequest"`
 	}
 	if err := json.Unmarshal(out, &raw); err != nil {
-		return nil, fmt.Errorf("parse gh search: %w", err)
+		return nil, false, fmt.Errorf("parse gh search: %w", err)
 	}
-	refs := make([]int, 0, len(raw))
+	refs := make([]pipelineLabelRef, 0, len(raw))
 	for _, r := range raw {
-		refs = append(refs, r.Number)
+		refs = append(refs, pipelineLabelRef{Number: r.Number, IsPR: r.IsPullRequest})
 	}
-	return refs, nil
+	return refs, len(raw) >= 1000, nil
 }
 
 func (ghPipelineLabelClient) AddLabels(number int, names ...string) error {

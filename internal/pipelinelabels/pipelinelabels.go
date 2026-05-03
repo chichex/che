@@ -143,7 +143,7 @@ func ApplyingLabel(step string) string {
 // terminal y luego el applying. Estable para que callers puedan compararlo
 // bit-perfect en tests/golden.
 //
-// Uso típico: `che pipeline ensure-labels` para precrear todos los labels
+// Uso típico: `che pipeline init-labels` para precrear todos los labels
 // del repo de una sola, o drift detection comparando contra los labels
 // realmente declarados en el repo.
 func Expected(p pipeline.Pipeline) []string {

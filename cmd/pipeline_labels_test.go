@@ -18,7 +18,7 @@ type fakePipelineLabelClient struct {
 	added   map[int][]string
 	removed map[int][]string
 	labels  map[int][]string
-	search  map[string][]int
+	search  map[string][]pipelineLabelRef
 }
 
 func (f *fakePipelineLabelClient) EnsureLabel(name string, skipExisting bool) error {
@@ -31,8 +31,8 @@ func (f *fakePipelineLabelClient) DeleteRepoLabel(name string) error {
 	return nil
 }
 
-func (f *fakePipelineLabelClient) SearchRefsWithLabel(name string) ([]int, error) {
-	return append([]int(nil), f.search[name]...), nil
+func (f *fakePipelineLabelClient) SearchRefsWithLabel(name string) ([]pipelineLabelRef, bool, error) {
+	return append([]pipelineLabelRef(nil), f.search[name]...), false, nil
 }
 
 func (f *fakePipelineLabelClient) AddLabels(number int, names ...string) error {
@@ -89,13 +89,16 @@ func TestDefaultPipelineMigrationPairs(t *testing.T) {
 		{Old: v1ChePlan, New: pipelinelabels.StateLabel("explore")},
 		{Old: v1CheExecuting, New: pipelinelabels.ApplyingLabel("execute")},
 		{Old: v1CheExecuted, New: pipelinelabels.StateLabel("execute")},
-		{Old: v1CheValidating, New: pipelinelabels.ApplyingLabel("validate_pr")},
-		{Old: v1CheValidated, New: pipelinelabels.StateLabel("validate_pr")},
+		{Old: v1CheValidating, NewIssue: pipelinelabels.ApplyingLabel("validate_issue"), NewPR: pipelinelabels.ApplyingLabel("validate_pr")},
+		{Old: v1CheValidated, NewIssue: pipelinelabels.StateLabel("validate_issue"), NewPR: pipelinelabels.StateLabel("validate_pr")},
 		{Old: v1CheClosing, New: pipelinelabels.ApplyingLabel("close")},
 		{Old: v1CheClosed, New: pipelinelabels.StateLabel("close")},
 		{Old: labels.ValidatedApprove},
 		{Old: labels.ValidatedChangesRequested},
 		{Old: labels.ValidatedNeedsHuman},
+		{Old: labels.PlanValidatedApprove},
+		{Old: labels.PlanValidatedChangesRequested},
+		{Old: labels.PlanValidatedNeedsHuman},
 	}
 	if !reflect.DeepEqual(pairs, want) {
 		t.Fatalf("pairs = %#v, want %#v", pairs, want)
@@ -118,11 +121,11 @@ func TestMigrationPairsForPipeline_MapOverrideAndValidation(t *testing.T) {
 	}
 }
 
-func TestRunPipelineMigrateLabels_AppliesRefsAndDeletesOld(t *testing.T) {
+func TestRunPipelineMigrateLabels_AppliesRefsAndPreservesOldByDefault(t *testing.T) {
 	fake := &fakePipelineLabelClient{
-		search: map[string][]int{
-			v1ChePlan:               {12},
-			labels.ValidatedApprove: {12, 13},
+		search: map[string][]pipelineLabelRef{
+			v1ChePlan:               {{Number: 12}},
+			labels.ValidatedApprove: {{Number: 12}, {Number: 13}},
 		},
 	}
 	pairs := []pipelineLabelPair{
@@ -130,7 +133,7 @@ func TestRunPipelineMigrateLabels_AppliesRefsAndDeletesOld(t *testing.T) {
 		{Old: labels.ValidatedApprove},
 	}
 	var out bytes.Buffer
-	if err := runPipelineMigrateLabels(&out, fake, pairs, false); err != nil {
+	if err := runPipelineMigrateLabels(&out, fake, pairs, false, false); err != nil {
 		t.Fatalf("runPipelineMigrateLabels: %v", err)
 	}
 	if !reflect.DeepEqual(fake.ensured, []string{pipelinelabels.StateLabel("explore")}) {
@@ -143,11 +146,45 @@ func TestRunPipelineMigrateLabels_AppliesRefsAndDeletesOld(t *testing.T) {
 	if !reflect.DeepEqual(fake.removed[12], wantRemoved12) {
 		t.Fatalf("removed[12] = %#v, want %#v", fake.removed[12], wantRemoved12)
 	}
-	if !reflect.DeepEqual(fake.deleted, []string{v1ChePlan, labels.ValidatedApprove}) {
+	if len(fake.deleted) != 0 {
 		t.Fatalf("deleted = %#v", fake.deleted)
 	}
 	if !strings.Contains(out.String(), "preview:") || !strings.Contains(out.String(), "ok: che:plan") {
 		t.Fatalf("unexpected output: %q", out.String())
+	}
+}
+
+func TestRunPipelineMigrateLabels_DeleteOldOptIn(t *testing.T) {
+	fake := &fakePipelineLabelClient{search: map[string][]pipelineLabelRef{v1ChePlan: {{Number: 12}}}}
+	var out bytes.Buffer
+	if err := runPipelineMigrateLabels(&out, fake, []pipelineLabelPair{{Old: v1ChePlan, New: pipelinelabels.StateLabel("explore")}}, false, true); err != nil {
+		t.Fatalf("runPipelineMigrateLabels: %v", err)
+	}
+	if !reflect.DeepEqual(fake.deleted, []string{v1ChePlan}) {
+		t.Fatalf("deleted = %#v", fake.deleted)
+	}
+}
+
+func TestRunPipelineMigrateLabels_ValidateMappingUsesRefKind(t *testing.T) {
+	fake := &fakePipelineLabelClient{
+		search: map[string][]pipelineLabelRef{
+			v1CheValidated: {{Number: 10}, {Number: 11, IsPR: true}},
+		},
+	}
+	var out bytes.Buffer
+	pair := pipelineLabelPair{
+		Old:      v1CheValidated,
+		NewIssue: pipelinelabels.StateLabel("validate_issue"),
+		NewPR:    pipelinelabels.StateLabel("validate_pr"),
+	}
+	if err := runPipelineMigrateLabels(&out, fake, []pipelineLabelPair{pair}, false, false); err != nil {
+		t.Fatalf("runPipelineMigrateLabels: %v", err)
+	}
+	if !reflect.DeepEqual(fake.added[10], []string{pipelinelabels.StateLabel("validate_issue")}) {
+		t.Fatalf("issue added = %#v", fake.added[10])
+	}
+	if !reflect.DeepEqual(fake.added[11], []string{pipelinelabels.StateLabel("validate_pr")}) {
+		t.Fatalf("pr added = %#v", fake.added[11])
 	}
 }
 
@@ -158,6 +195,7 @@ func TestRunPipelineReset_RemovesLockApplyingAndSetsFrom(t *testing.T) {
 	fake := &fakePipelineLabelClient{labels: map[int][]string{7: {
 		pipelinelabels.LockLabelAt(time.Unix(1, 0), 42, "host"),
 		pipelinelabels.ApplyingLabel("explore"),
+		pipelinelabels.StateLabel("explore"),
 		pipelinelabels.StateLabel("idea"),
 		"unrelated",
 	}}}
@@ -165,8 +203,13 @@ func TestRunPipelineReset_RemovesLockApplyingAndSetsFrom(t *testing.T) {
 	if err := runPipelineReset(&out, fake, p, 7, "explore"); err != nil {
 		t.Fatalf("runPipelineReset: %v", err)
 	}
-	if len(fake.removed[7]) != 3 {
-		t.Fatalf("removed = %#v, want lock/applying/state", fake.removed[7])
+	wantRemoved := []string{
+		pipelinelabels.LockLabelAt(time.Unix(1, 0), 42, "host"),
+		pipelinelabels.ApplyingLabel("explore"),
+		pipelinelabels.StateLabel("idea"),
+	}
+	if !reflect.DeepEqual(fake.removed[7], wantRemoved) {
+		t.Fatalf("removed = %#v, want %#v", fake.removed[7], wantRemoved)
 	}
 	if !reflect.DeepEqual(fake.added[7], []string{pipelinelabels.StateLabel("explore")}) {
 		t.Fatalf("added = %#v", fake.added[7])
