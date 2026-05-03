@@ -327,11 +327,39 @@ func Apply(ref, from, to string) error {
 
 // Ensure garantiza que un label exista en el repo antes de aplicarlo. Usa
 // `gh label create --force` que es idempotente.
+//
+// Por defecto NO aplica color/description: el label se crea con el color
+// default (gris) la primera vez y subsiguientes runs no lo tocan. Para
+// aplicar estilo, usar EnsureWithStyle.
 func Ensure(name string) error {
 	cmd := exec.Command("gh", "label", "create", name, "--force")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ensuring label %s: %s", name, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// EnsureWithStyle garantiza que el label exista con el color y descripción
+// dados. Pasar `color=""` o `description=""` salta el flag respectivo
+// (compatible con repos existentes — no pisa el estilo configurado a
+// mano salvo que pasemos un valor explícito). El color es un hex de 6
+// chars sin `#`, ej. "fbca04".
+//
+// Idempotente: `gh label create --force` actualiza color/description
+// en cada llamada.
+func EnsureWithStyle(name, color, description string) error {
+	args := []string{"label", "create", name, "--force"}
+	if color != "" {
+		args = append(args, "--color", color)
+	}
+	if description != "" {
+		args = append(args, "--description", description)
+	}
+	cmd := exec.Command("gh", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ensuring label %s (color=%s): %s", name, color, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

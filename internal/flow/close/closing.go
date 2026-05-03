@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/chichex/che/internal/flow/execute"
+	"github.com/chichex/che/internal/flow/runguard"
 	"github.com/chichex/che/internal/flow/stateref"
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
@@ -490,6 +491,17 @@ func Run(prRef string, opts Opts) ExitCode {
 		}
 	}()
 
+	// Lock con heartbeat + TTL (PRD §6.d) — opt-in.
+	heartbeat, lockResult := runguard.AcquireLock(stateRef, "close", log)
+	defer runguard.ReleaseLock(heartbeat, log)
+	if lockResult == runguard.AcquireContended {
+		return ExitSemantic
+	}
+	auditTarget := pr.Number
+	if stateRes.ResolvedToIssue {
+		auditTarget = stateRes.IssueNumber
+	}
+
 	// Transición <prFrom> → che:state:applying:close. Rollback en defer LIFO si
 	// stateClosed queda en false. Target: issue si hay linkeado con che:*,
 	// PR si no.
@@ -502,6 +514,7 @@ func Run(prRef string, opts Opts) ExitCode {
 		log.Error("no pude transicionar a "+pipelinelabels.StateApplyingClose, output.F{Cause: err})
 		return ExitRetry
 	}
+	runguard.AuditAppend(auditTarget, "close", prFrom, pipelinelabels.StateApplyingClose, "", log)
 	var stateClosed bool
 	defer func() {
 		if stateClosed {
@@ -509,7 +522,9 @@ func Run(prRef string, opts Opts) ExitCode {
 		}
 		if err := labels.Apply(stateRef, pipelinelabels.StateApplyingClose, prFrom); err != nil {
 			log.Warn(fmt.Sprintf("rollback %s → %s fallo: %v — revisá labels a mano", pipelinelabels.StateApplyingClose, prFrom, err))
+			return
 		}
+		runguard.AuditAppend(auditTarget, "close", pipelinelabels.StateApplyingClose, prFrom, "rollback", log)
 	}()
 
 	if blocking := BlockingVerdict(pr); blocking != "" {
@@ -673,6 +688,7 @@ func Run(prRef string, opts Opts) ExitCode {
 		log.Warn(fmt.Sprintf("no pude transicionar a %s: %v — revisá labels a mano", pipelinelabels.StateClose, err))
 	} else {
 		stateClosed = true
+		runguard.AuditAppend(auditTarget, "close", pipelinelabels.StateApplyingClose, pipelinelabels.StateClose, "", log)
 	}
 
 	// Cerrar issues asociados. Después del merge, los que tenían "closes #N"

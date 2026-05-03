@@ -20,6 +20,7 @@ import (
 	"github.com/chichex/che/internal/agent"
 	"github.com/chichex/che/internal/comments"
 	"github.com/chichex/che/internal/flow/idea"
+	"github.com/chichex/che/internal/flow/runguard"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
 	"github.com/chichex/che/internal/pipelinelabels"
@@ -355,6 +356,16 @@ func Run(issueRef string, opts Opts) ExitCode {
 		}
 	}()
 
+	// Lock con heartbeat + TTL (PRD §6.d) — opt-in vía CHE_LOCK_HEARTBEAT.
+	// Convive con `labels.Lock` arriba: el binario `che:locked` queda como
+	// mutex simple para flows v1 y este lock agrega identidad + staleness.
+	heartbeat, lockResult := runguard.AcquireLock(issueRef, "explore", log)
+	defer runguard.ReleaseLock(heartbeat, log)
+	if lockResult == runguard.AcquireContended {
+		// Lock vivo de otro proceso — abortamos sin tocar nada.
+		return ExitSemantic
+	}
+
 	// Transición idea → applying:explore (lock de máquina de estados). El
 	// rollback (applying:explore → idea) lo hace el defer si succeeded queda
 	// en false.
@@ -363,6 +374,7 @@ func Run(issueRef string, opts Opts) ExitCode {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
+	runguard.AuditAppend(issue.Number, "explore", pipelinelabels.StateIdea, pipelinelabels.StateApplyingExplore, "", log)
 	var succeeded bool
 	defer func() {
 		if succeeded {
@@ -371,7 +383,9 @@ func Run(issueRef string, opts Opts) ExitCode {
 		if err := labels.Apply(issueRef, pipelinelabels.StateApplyingExplore, pipelinelabels.StateIdea); err != nil {
 			fmt.Fprintf(stderr, "warning: rollback %s → %s fallo: %v — revisá labels a mano\n",
 				pipelinelabels.StateApplyingExplore, pipelinelabels.StateIdea, err)
+			return
 		}
+		runguard.AuditAppend(issue.Number, "explore", pipelinelabels.StateApplyingExplore, pipelinelabels.StateIdea, "rollback", log)
 	}()
 
 	a := opts.Agent
@@ -416,6 +430,7 @@ func Run(issueRef string, opts Opts) ExitCode {
 		fmt.Fprintf(stderr, "warning: comentario posteado (%s) pero label no cambió; corré de nuevo o editá a mano\n", commentURL)
 		return ExitRetry
 	}
+	runguard.AuditAppend(issue.Number, "explore", pipelinelabels.StateApplyingExplore, pipelinelabels.StateExplore, "", log)
 	succeeded = true
 
 	fmt.Fprintf(stdout, "Explored %s\n", issue.URL)
