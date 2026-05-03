@@ -16,6 +16,7 @@ import (
 
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
+	"github.com/chichex/che/internal/pipelinelabels"
 )
 
 // ErrInvalidResponse indica que la respuesta del LLM parseó pero violó el
@@ -154,7 +155,7 @@ func Run(text string, opts Opts) ExitCode {
 			Labels: []string{
 				"type:" + item.Type,
 				"size:" + strings.ToLower(item.Size),
-				labels.CheIdea,
+				pipelinelabels.StateIdea,
 				labels.CtPlan,
 			},
 		})
@@ -331,7 +332,7 @@ func ensureLabels(items []Item, log *output.Logger) error {
 		for _, l := range []string{
 			"type:" + it.Type,
 			"size:" + strings.ToLower(it.Size),
-			labels.CheIdea,
+			pipelinelabels.StateIdea,
 			labels.CtPlan,
 		} {
 			if !seen[l] {
@@ -368,7 +369,7 @@ func createIssue(item Item) (string, error) {
 		"--body-file", bodyFile,
 		"--label", "type:" + item.Type,
 		"--label", "size:" + strings.ToLower(item.Size),
-		"--label", labels.CheIdea,
+		"--label", pipelinelabels.StateIdea,
 		"--label", labels.CtPlan,
 	}
 	cmd := exec.Command("gh", args...)

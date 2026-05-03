@@ -1,0 +1,13 @@
+{
+  "number": 88,
+  "title": "Issue de un repo no migrado: tiene che:idea (v1) en vez de che:state:idea",
+  "body": "## Idea\nUn repo que arrancó con la máquina vieja y todavía no corrió `migrate-labels-v2`.\n",
+  "url": "https://github.com/acme/demo/issues/88",
+  "state": "OPEN",
+  "labels": [
+    {"name": "ct:plan"},
+    {"name": "che:idea"},
+    {"name": "type:feature"},
+    {"name": "size:m"}
+  ]
+}

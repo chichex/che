@@ -6,8 +6,8 @@
   "state": "OPEN",
   "labels": [
     {"name": "ct:plan"},
-    {"name": "che:validated"},
-    {"name": "che:executing"},
+    {"name": "che:state:validate_pr"},
+    {"name": "che:state:applying:execute"},
     {"name": "plan-validated:changes-requested"}
   ]
 }

@@ -31,6 +31,7 @@ import (
 	"github.com/chichex/che/internal/agent"
 	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/output"
+	"github.com/chichex/che/internal/pipelinelabels"
 	planpkg "github.com/chichex/che/internal/plan"
 )
 
@@ -335,12 +336,12 @@ func Run(issueRef string, opts Opts) ExitCode {
 		}
 	}()
 
-	// Transition <from> → che:executing. Desde acá se lockea el issue
+	// Transition <from> → applying:execute. Desde acá se lockea el issue
 	// (también vía che:* — redundante con che:locked pero preservado porque
 	// el listado de candidatos y el gate ya dependen de la máquina de
 	// estados).
-	progress("transicionando issue a che:executing…")
-	if err := labels.Apply(issueRef, from, labels.CheExecuting); err != nil {
+	progress("transicionando issue a " + pipelinelabels.StateApplyingExecute + "…")
+	if err := labels.Apply(issueRef, from, pipelinelabels.StateApplyingExecute); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
@@ -370,6 +371,14 @@ func Run(issueRef string, opts Opts) ExitCode {
 	// progreso: 2) git worktree remove --force, 3) git branch -D. Los
 	// errores de esos pasos se propagan para loguearlos — best-effort pero
 	// NO silencioso.
+	//
+	// TODO(coverage): las 3 ramas de label handling (executedApplied,
+	// prCreated, default rollback) hoy solo se ejercitan via los tests e2e
+	// que cubren los happy paths. Para tests unitarios directos hay que
+	// extraer cleanupLocal a una función a nivel paquete con dependencias
+	// inyectables (labels.Apply / fetchIssue / wt.Cleanup como interfaces o
+	// callbacks). El refactor toca muchas signatures y se quedó fuera del
+	// scope de PR6b; queda para un PR de coverage post-PR6c.
 	cleanupLocal := func(cause string) {
 		if cleanupDone {
 			return
@@ -381,9 +390,11 @@ func Run(issueRef string, opts Opts) ExitCode {
 		if cause != "" {
 			switch {
 			case executedApplied:
-				fmt.Fprintf(stderr, "%s — limpiando localmente (worktree, branch; label queda en che:executed)…\n", cause)
+				fmt.Fprintf(stderr, "%s — limpiando localmente (worktree, branch; label queda en %s)…\n",
+					cause, pipelinelabels.StateExecute)
 			case prCreated:
-				fmt.Fprintf(stderr, "%s — limpiando localmente (label → che:executed por PR vivo, worktree, branch)…\n", cause)
+				fmt.Fprintf(stderr, "%s — limpiando localmente (label → %s por PR vivo, worktree, branch)…\n",
+					cause, pipelinelabels.StateExecute)
 			default:
 				fmt.Fprintf(stderr, "%s — limpiando localmente (label → %s, worktree, branch)…\n", cause, from)
 			}
@@ -394,11 +405,12 @@ func Run(issueRef string, opts Opts) ExitCode {
 			rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer rollbackCancel()
 			if prCreated {
-				// PR ya creado: dejar el issue en executed para preservar
+				// PR ya creado: dejar el issue en execute para preservar
 				// consistencia con el estado remoto. Best-effort; si falla,
 				// warneamos.
-				if err := labels.Apply(issueRef, labels.CheExecuting, labels.CheExecuted); err != nil {
-					fmt.Fprintf(stderr, "warning: no se pudo transicionar a che:executed tras señal post-PR: %v — revisá labels a mano\n", err)
+				if err := labels.Apply(issueRef, pipelinelabels.StateApplyingExecute, pipelinelabels.StateExecute); err != nil {
+					fmt.Fprintf(stderr, "warning: no se pudo transicionar a %s tras señal post-PR: %v — revisá labels a mano\n",
+						pipelinelabels.StateExecute, err)
 				}
 			} else {
 				// Sin PR todavía: rollback al `from`, pero solo si seguimos
@@ -407,10 +419,11 @@ func Run(issueRef string, opts Opts) ExitCode {
 				current, fetchErr := fetchIssue(rollbackCtx, issueRef)
 				if fetchErr != nil {
 					fmt.Fprintf(stderr, "warning: rollback no aplicado: no se pudo re-fetch el issue (%v) — revisá labels a mano\n", fetchErr)
-				} else if !current.HasLabel(labels.CheExecuting) {
-					fmt.Fprintln(stderr, "rollback abortado: el issue ya no está en che:executing (owner=otro)")
+				} else if !current.HasLabel(pipelinelabels.StateApplyingExecute) {
+					fmt.Fprintf(stderr, "rollback abortado: el issue ya no está en %s (owner=otro)\n",
+						pipelinelabels.StateApplyingExecute)
 				} else {
-					if err := labels.Apply(issueRef, labels.CheExecuting, from); err != nil {
+					if err := labels.Apply(issueRef, pipelinelabels.StateApplyingExecute, from); err != nil {
 						fmt.Fprintf(stderr, "warning: rollback failed: %v — revisá labels del issue a mano\n", err)
 					}
 				}
@@ -539,14 +552,14 @@ func Run(issueRef string, opts Opts) ExitCode {
 		prCreated = true
 	}
 
-	// Transición a che:executed. Sin validadores automáticos; el label
+	// Transición a execute (terminal). Sin validadores automáticos; el label
 	// refleja "ejecución terminada". Orden importante: una señal entre
 	// `prCreated=true` y `executedApplied=true` dejaría al cleanup en modo
-	// "PR vivo + label en executing", que forzaría un label fix-up en el
-	// defer. Transicionar ya mismo encoge la ventana a mínimo y deja al
+	// "PR vivo + label en applying:execute", que forzaría un label fix-up en
+	// el defer. Transicionar ya mismo encoge la ventana a mínimo y deja al
 	// issue en el estado consistente con el PR remoto.
-	progress("transicionando issue a che:executed…")
-	if err := labels.Apply(issueRef, labels.CheExecuting, labels.CheExecuted); err != nil {
+	progress("transicionando issue a " + pipelinelabels.StateExecute + "…")
+	if err := labels.Apply(issueRef, pipelinelabels.StateApplyingExecute, pipelinelabels.StateExecute); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
@@ -576,7 +589,7 @@ func Run(issueRef string, opts Opts) ExitCode {
 func ListCandidates() ([]Candidate, error) {
 	cmd := exec.Command("gh", "issue", "list",
 		"--label", labels.CtPlan,
-		"--label", labels.ChePlan,
+		"--label", pipelinelabels.StateExplore,
 		"--state", "open",
 		"--json", "number,title,labels",
 		"--limit", "50")
@@ -726,18 +739,18 @@ func gate(i *Issue) error {
 	if !i.HasLabel(labels.CtPlan) {
 		return fmt.Errorf("issue #%d is missing label ct:plan (not created by `che idea`?)", i.Number)
 	}
-	if i.HasLabel(labels.CheExecuting) {
-		return fmt.Errorf("issue #%d ya está en che:executing — otro run en curso o quedó colgado; quitá el label a mano si es lo segundo", i.Number)
+	if i.HasLabel(pipelinelabels.StateApplyingExecute) {
+		return fmt.Errorf("issue #%d ya está en %s — otro run en curso o quedó colgado; quitá el label a mano si es lo segundo", i.Number, pipelinelabels.StateApplyingExecute)
 	}
-	// "Más avanzado" post che:validated: estados donde execute no tiene
+	// "Más avanzado" post validate_pr: estados donde execute no tiene
 	// sentido porque ya hay PR abierto / mergeado / issue cerrado. NO
-	// incluimos CheValidated: ese es un punto de entrada válido al flow
+	// incluimos StateValidatePR: ese es un punto de entrada válido al flow
 	// post-validate plan (issue con plan-validated:approve).
 	for _, beyond := range []string{
-		labels.CheExecuted,
-		labels.CheValidating,
-		labels.CheClosing,
-		labels.CheClosed,
+		pipelinelabels.StateExecute,
+		pipelinelabels.StateApplyingValidatePR,
+		pipelinelabels.StateApplyingClose,
+		pipelinelabels.StateClose,
 	} {
 		if i.HasLabel(beyond) {
 			return fmt.Errorf("issue #%d ya avanzó en el pipeline (%s presente) — execute no aplica", i.Number, beyond)
@@ -752,8 +765,9 @@ func gate(i *Issue) error {
 	if i.HasLabel(labels.PlanValidatedNeedsHuman) {
 		return fmt.Errorf("issue #%d tiene plan-validated:needs-human — resolvé a mano antes de ejecutar", i.Number)
 	}
-	if !i.HasLabel(labels.CheIdea) && !i.HasLabel(labels.ChePlan) && !i.HasLabel(labels.CheValidated) {
-		return fmt.Errorf("issue #%d no está en che:idea, che:plan ni che:validated — corré `che explore %d` o `che validate %d` según el flow", i.Number, i.Number, i.Number)
+	if !i.HasLabel(pipelinelabels.StateIdea) && !i.HasLabel(pipelinelabels.StateExplore) && !i.HasLabel(pipelinelabels.StateValidatePR) {
+		return fmt.Errorf("issue #%d no está en %s, %s ni %s — corré `che explore %d` o `che validate %d` según el flow",
+			i.Number, pipelinelabels.StateIdea, pipelinelabels.StateExplore, pipelinelabels.StateValidatePR, i.Number, i.Number)
 	}
 	return nil
 }
@@ -777,7 +791,7 @@ func seedAdoptLabels(ref string, issue *Issue) error {
 	}
 	toAdd := []string{labels.CtPlan}
 	if !hasCheState {
-		toAdd = append(toAdd, labels.CheIdea)
+		toAdd = append(toAdd, pipelinelabels.StateIdea)
 	}
 	for _, l := range toAdd {
 		if err := labels.Ensure(l); err != nil {
@@ -798,21 +812,22 @@ func seedAdoptLabels(ref string, issue *Issue) error {
 }
 
 // fromState devuelve el estado de origen del issue al momento del gate
-// (che:idea, che:plan o che:validated). Prioridad en caso de ambigüedad
-// (issues con más de un label che:* — no debería pasar post-transición,
-// pero defensa): validated > plan > idea. El más avanzado gana para que
-// el rollback restaure el estado más útil y la transición de lock parta
-// de una clave válida en validTransitions. Los 3 tienen entry en la
-// máquina: che:idea → executing, che:plan → executing, che:validated →
-// executing; y los 3 rollbacks inversos.
+// (idea, explore o validate_pr — modelo v2). Prioridad en caso de
+// ambigüedad (issues con más de un label che:state:* — no debería pasar
+// post-transición, pero defensa): validate_pr > explore > idea. El más
+// avanzado gana para que el rollback restaure el estado más útil y la
+// transición de lock parta de una clave válida en validTransitions. Los 3
+// tienen entry en la máquina: idea → applying:execute, explore →
+// applying:execute, validate_pr → applying:execute; y los 3 rollbacks
+// inversos.
 func fromState(i *Issue) string {
-	if i.HasLabel(labels.CheValidated) {
-		return labels.CheValidated
+	if i.HasLabel(pipelinelabels.StateValidatePR) {
+		return pipelinelabels.StateValidatePR
 	}
-	if i.HasLabel(labels.ChePlan) {
-		return labels.ChePlan
+	if i.HasLabel(pipelinelabels.StateExplore) {
+		return pipelinelabels.StateExplore
 	}
-	return labels.CheIdea
+	return pipelinelabels.StateIdea
 }
 
 // ---- prompt builder ----

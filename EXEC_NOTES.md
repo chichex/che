@@ -1,70 +1,133 @@
-# PR5c — Engine multi-agente + aggregator + cancelación parcial
+# PR6c — Terminar migración a labels v2: notas de ejecución
 
-## Estado del PR
+## Scope cubierto
 
-Cubre todo lo que el scope de #57 pide:
+Migración completa de los flows restantes (validate / iterate / close +
+stateref + dash) a los strings v2 (`che:state:*`), guards v1-rejection
+wirecados en los 3 flows + `ValidateNoMixedLabels` enganchado, subcomando
+`migrate-labels-v2` listo para repos vivos. Tests + fixtures e2e migrados;
+`go test ./...` 100% verde, `go vet` clean, regresión `grep` solo deja los
+hits intencionales (guards + stateref legacy lookup + dash closed filter).
 
-- **`Aggregator` interface** con 3 implementations: `majorityAgg`, `unanimousAgg`, `firstBlockerAgg` (`internal/engine/aggregator.go`).
-- **`AggregatorKind`** mirror de `internal/pipeline.Aggregator` (los presets `majority`/`unanimous`/`first_blocker`). El motor no importa `internal/pipeline` para mantener self-contained.
-- **`runStep`** (`internal/engine/runstep.go`) invoca a todos los agentes en paralelo via goroutines, alimenta resultados al aggregator y cancela el resto apenas el aggregator decide. Hace `context.WithCancel` sobre el ctx del motor — propaga al child process via la cadena `Invoker.Invoke → internal/agent.Run`.
-- **Cancelación parcial reportada como `Cancelled`, no como error** (PRD §3.d "loguear como cancelled by aggregator"). Los `AgentResult.Cancelled=true` no votan.
-- **Default aggregator = `majority`** (PRD §3.d "Default: majority").
-- **Step extendido** con `Aggregator AggregatorKind` opcional. `StepRun` extendido con `AgentResults []AgentResult` + `AggregatorReason string` para audit log.
-- **Backwards compat single-agent**: si `len(Step.Agents) == 1`, `StepRun` mantiene el shape histórico (Agent + Resolved "explicit"/"default-next"/"technical-error"). Cuando `>1`, queda `Resolved="aggregator"`.
-- **Errores técnicos en multi-agente**: si el aggregator decide `[stop]` con al menos 1 agente que erroreó, el motor mapea a `StopReasonTechnicalError` (no `StopReasonAgentMarker`), preservando el contrato del PR5b.
+## Decisiones de diseño
 
-## Tests
+### 1. Helper `rejectV1Labels` por-flow, no centralizado
 
-**Aggregator (aislado)** — `internal/engine/aggregator_test.go`:
-- majority: stop short-circuit, 2/3 next, 2 next + 1 stop = stop, empate goto/stop = stop, empate next/goto sin stop = stop (Finalize), goto mismo destino gana 2/3, default kind, error técnico = stop.
-- unanimous: todos next, divergencia early cancel, goto mismo destino, goto destinos distintos = stop.
-- first_blocker: primer stop, primer goto, todos next.
-- helpers: kind desconocido = nil, MarkerNone == MarkerNext en keyOf.
+Cada uno de los 3 flows (validate, iterate, close) define su propio
+`v1StateLabels` slice + helper `rejectV1Labels` con mensaje accionable
+contextualizado al flow ("antes de validar", "antes de iterar", "antes
+de cerrar"). Evaluamos centralizar en `internal/labels` pero cada
+mensaje incluye el verbo del flow — extraer pierde la pista textual.
+Patrón consistente con `gateBasic` de explore (PR6b). El helper wirea
+`labels.ValidateNoMixedLabels` adentro: cualquier mezcla v1+v2 fall por
+ahí antes que el loop sobre v1StateLabels, así no pisamos labels mezclados
+con un v2 nuevo.
 
-**runStep (paralelismo + cancelación)** — `internal/engine/runstep_test.go`:
-- single agente equivalente (backwards compat).
-- 3 agentes en paralelo (verifica `maxConcurrent >= 2` con atomicos).
-- first_blocker cancela resto via blockingInvoker (agentes B y C bloqueados, A devuelve [stop], B y C terminan con `Cancelled=true`).
-- majority stop short-circuit (B y C nunca completan, sólo A).
-- unanimous divergencia early cancel.
-- aggregator default = majority.
-- agente repetido = N instancias (3 calls al mismo nombre).
-- todos error técnico → stop con TechnicalError propagado.
-- ctx ya cancelado → stop inmediato sin invocar.
+### 2. `stateref.stateLabelSet` mantiene AMBAS familias
 
-**Integración con `RunPipeline`**:
-- `TestRunPipeline_StepMultiAgenteIntegracion`: pipeline con un step de 3 agentes, marker resuelto por aggregator, AgentResults llenos.
-- `TestRunPipeline_StepMultiAgenteErrorTecnicoMapeaATechReason`: confirma `StopReasonTechnicalError` cuando el aggregator stoppea por error.
+`internal/flow/stateref/stateref.go:stateLabelSet` reconoce tanto los 9
+labels v1 como los 9 v2 durante PR6c. Esto es necesario para que un PR v2
+con `closingIssuesReferences` apuntando a un issue legacy v1 (típico de
+repos a medio migrar) siga resolviendo al issue. Los gates de los flows
+migrados rechazan los v1 con mensaje accionable, así que reconocer el
+label v1 en stateref no afloja la validación — solo evita falsos negativos
+en la resolución (caer al PR cuando el issue ESTÁ trackeado, solo que en
+v1).
 
-Toda la suite del repo (`go test ./...`) verde. `go test -race ./internal/engine/...` también verde (race en `internal/startup` es pre-existente, no tocada por este PR).
+REMOVE IN PR6d: cuando ya no haya repos sin migrar, el set se reduce a
+solo v2.
 
-## Decisiones / desviaciones
+### 3. Dash `applyLabels`: prefix-aware con `v2StatusByLabel` map
 
-### 1. Aggregator interface vs función pura
+El parser ramifica por:
+1. `che:state:applying:*` o `che:state:*` (v2) → mapeo via
+   `v2StatusByLabel` a uno de los 9 strings canónicos del kanban
+   (idea/planning/plan/.../closed). El orden de chequeo es
+   `PrefixState` (que cubre ambos casos) primero; el TrimPrefix correcto
+   se elige por presencia de `PrefixApplying`.
+2. `che:*` (v1 legacy) → fallback que preserva el comportamiento
+   pre-PR6c (TrimPrefix → idea/planning/etc).
+3. `che:locked` se intercepta arriba con prioridad (es marker).
 
-El PRD habla del aggregator como "política" pero no fija el shape. Elegí interface con `Feed` + `Finalize` (channel-style streaming) en vez de función `(N markers) → marker` porque:
+El mapping es necesario porque los strings de columna del kanban del dash
+(`idea`, `planning`, etc) no se cambian en PR6c — preflight.go, loop.go,
+model.go esperan esos strings literales y ramifican por ellos. El
+modelo v2 los preserva via mapping en vez de cascadear el cambio a 8
+archivos del dash que están bien.
 
-- Permite cancelación temprana natural: `Feed` devuelve `Decided=true` cuando el aggregator ya tiene info suficiente, sin necesidad de esperar a los N agentes.
-- `Finalize` cubre el caso "todos terminaron sin short-circuit" (ej. unanimous con 3 agentes que coinciden en `[next]`: el aggregator no decide hasta el último).
+Decisión sobre `validate_pr` v2 → `validating`/`validated` v1:
+preservamos las columnas legacy del kanban porque el modelo v1 colapsaba
+plan-validate y PR-validate en ese mismo bucket también — semánticamente
+no perdemos información.
 
-### 2. `AgentResult` preserva `MarkerNone`
+### 4. Dash `fetchClosedIssues` consulta AMBAS familias
 
-`runStep` NO normaliza `MarkerNone → MarkerNext` antes de poner el resultado en `AgentResult.Marker`. La normalización vive en el aggregator (`effectiveMarker` helper). Esto preserva el contrato single-agent del motor — los tests heredados del PR5b distinguen `Resolved="default-next"` (no había marker) de `Resolved="explicit"` (agente emitió `[next]`).
+Antes filtraba por `che:closed` (v1) único. Ahora hace dos `gh issue
+list --state closed --label X`, una por v1 y otra por v2, y deduplica
+por número. Así repos a medio migrar (algunos issues cerrados con v1,
+otros con v2) muestran el set completo en la columna `closed`.
 
-### 3. Race fix en `fakeInvoker` (test fixture)
+REMOVE IN PR6d: dejar solo la query v2 cuando el v1 deje de existir.
 
-El `fakeInvoker` heredado del PR5b no era thread-safe (map de calls sin lock). Como ahora el motor invoca múltiples agentes en goroutines paralelas, agregué un `sync.Mutex` al fixture. No es un cambio de producción — solo del test helper.
+### 5. `migrate-labels-v2` aplica por-issue, no a nivel repo
 
-### 4. `AggregatorKind` mirror de `internal/pipeline.Aggregator`
+A diferencia de `migrate-labels` (renombra labels via `gh label edit`),
+v2 hace remove + add por cada issue. Razón: los strings v1 → v2 son
+totalmente distintos (`che:plan` vs `che:state:explore`), así que un
+rename a nivel repo no funciona — son dos labels distintos. Además
+preservamos los labels v1 en el repo (pueden referenciarse desde
+issues cerrados o ramas viejas) hasta el cleanup de PR6d.
 
-PR2 (`internal/pipeline`) define `Aggregator` como enum string. El motor define `AggregatorKind` con los mismos valores en lugar de importar el paquete, manteniendo self-contained la dependencia. Cuando el wireup CLI (PR4/PR5d) consuma `pipeline.Step`, hará la conversión `pipeline.Aggregator → engine.AggregatorKind` (literal el mismo string).
+Implementación: ensure label v2 en el repo (idempotente) → DELETE v1
+(tolerante a 404, idempotente) → POST v2 (idempotente en GitHub). Si
+todo falla, paramos para no dejar labels parciales.
 
-### 5. Cancelación de agentes "in-flight"
+### 6. Caveat de `che:validating` documentado pero no resuelto
 
-Si un agente termina DESPUÉS de que el aggregator decidió (race entre `cancel()` y la finalización del Invoke), su resultado llega a `resultsCh` pero `runStep` lo agrega a `Results` sin alimentarlo al aggregator. Si tenía error de ctx, lo marca `Cancelled=true`; si tenía error técnico no-ctx, queda `Err` (raro: no debería pasar si el invoker respeta ctx). Esto preserva la garantía "todas las goroutines terminan antes del return" sin leakear y sin alterar la decisión.
+v1 colapsaba validate-de-plan y validate-de-PR en `che:validating`. v2
+solo tiene `applying:validate_pr`. El subcomando mapea
+`che:validating` → `che:state:applying:validate_pr` y emite un warning
+en stdout para que el operador sepa que puede ser semánticamente
+impreciso si el run en curso era plan-validate. En la práctica
+`validating` es transitorio (solo aparece durante un run) así que
+encontrarlo en migración bulk es raro. La alternativa "saltarlo y
+dejarlo manual" pierde info; la alternativa "no migrarlo" deja el repo
+con `che:validating` huérfano que ningún flow v2 entiende. El warn +
+mapping aproximado es el menos malo.
 
-## Pendientes (intencionalmente fuera de scope)
+## Lo que no se hizo (pendiente para PRs siguientes)
 
-- **Wiring real con `internal/agent.Run`** — el motor sigue dependiendo de la `Invoker` interface. La implementación concreta que dispatcha a claude (vía `internal/agent.Run` con `KillGrace`) viene cuando se cablee el comando `che pipeline run` (PR4 / PR5d). El `runStep` ya está listo para esa Invoker — el `KillGrace` que pide el PRD §3.d (SIGTERM + 5s grace + SIGKILL) ya está implementado en `internal/agent.Run` desde antes del PRD #50, y el ctx propagado le indica cuándo matar.
-- **Entry agent + flag `--from`** — PR5d.
-- **Adaptación de `engine.Step` → `pipeline.Step`** — follow-up cuando el wireup CLI lo necesite. Hoy son tipos paralelos compatibles en shape.
+- Borrar las constantes v1 viejas en `internal/labels/labels.go` y las
+  21 keys viejas en `validTransitions`. Eso es **PR6d**, después de
+  mergear este. Borrar también el shim `internal/labels/v2_transitions.go`
+  entero, las 4 listas `v1StateLabels` por flow, las ramas legacy de
+  `applyLabels` en dash y el segundo query de `fetchClosedIssues`. La
+  guía de cuáles archivos tienen `REMOVE IN PR6d:` está embebida en los
+  comentarios de los archivos respectivos.
+- Update del test `TestNoHardcodedLabelsOutsideThisPackage` para que
+  prohíba los strings v1 nuevos (post-cleanup). Hoy permite ambos
+  durante la transición.
+
+## Tests verdes
+
+```
+internal/flow/validate    ok (incluye TestPullRequest_PRLabelNames migrado)
+internal/flow/iterate     ok (incluye TestRunPRGate_StateFromIssue migrado)
+internal/flow/close       ok (incluye TestCloseFromStateRes migrado)
+internal/flow/stateref    ok
+internal/dash             ok (los tests existentes pasan; no se agregan nuevos
+                              porque applyLabels seguía funcionando con v1
+                              y ahora también con v2)
+cmd                       ok (TestMigrateV2_*, 8 casos cubriendo los 9
+                              labels, idempotencia, dry-run, mixed,
+                              short-circuit-resilient, output)
+e2e                       ok (incluye 3 nuevos tests v1-rejection: validate,
+                              iterate, close — paralelo al de explore)
+```
+
+`go build ./...` clean, `go vet ./...` clean, `go test ./...` 100% verde.
+
+`grep -rn 'labels\\.\\(CheIdea\\|...\\)' internal/flow internal/dash` solo
+muestra los hits intencionales (guards + stateref legacy lookup + dash
+closed filter); todos comentados con `REMOVE IN PR6d` para señalizar el
+cleanup.

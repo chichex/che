@@ -135,9 +135,9 @@ func assertCleanupApplied(t *testing.T, env *harness.Env, stderr string) {
 
 	// 3) Rollback de label ejecutado: debe haber un POST REST agregando
 	//    che:plan (transición executing→plan).
-	posts := env.Invocations().FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:plan")
+	posts := env.Invocations().FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:explore")
 	if len(posts) == 0 {
-		t.Fatalf("expected rollback POST adding che:plan; calls=%v",
+		t.Fatalf("expected rollback POST adding che:state:explore; calls=%v",
 			env.Invocations().For("gh"))
 	}
 

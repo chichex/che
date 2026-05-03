@@ -41,6 +41,29 @@ func TestClose_InvalidPRRef_Exit3(t *testing.T) {
 	env.Invocations().AssertNotCalled(t, "claude")
 }
 
+// TestClose_OldV1Label_Exit3: PR de un repo no migrado con `che:executed`
+// (v1) en vez de `che:state:execute` (v2). El gate v1-rejection rechaza con
+// exit 3 + mensaje accionable apuntando a `che migrate-labels-v2` antes
+// de aplicar lock o transiciones.
+func TestClose_OldV1Label_Exit3(t *testing.T) {
+	env := setupCloseEnv(t)
+	scriptClosePrechecks(env)
+
+	env.ExpectGh(`^pr view 7`).RespondStdoutFromFixture("close/gh_pr_view_old_label_che_executed.json", 0)
+
+	r := env.Run("close", "7")
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3 (gate v1 rechaza), got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "v1")
+	harness.AssertContains(t, r.Stderr, "migrate-labels-v2")
+	env.Invocations().AssertNotCalled(t, "claude")
+	// Sin merge.
+	if merges := env.Invocations().FindCalls("gh", "pr merge"); len(merges) != 0 {
+		t.Fatalf("no debería haber merge (gate rechaza); calls=%v", merges)
+	}
+}
+
 // TestClose_ClosedPR_Exit3: PR con state=MERGED → exit 3, no invoca opus.
 func TestClose_ClosedPR_Exit3(t *testing.T) {
 	env := setupCloseEnv(t)
@@ -131,7 +154,7 @@ func TestClose_GoldenPath_DraftToReadyAndMerge(t *testing.T) {
 
 	inv := env.Invocations()
 	// Needles compuestos: "pr merge" y "issue close" evitan que
-	// "mergeable" y "che:closed" (substrings en otras calls) metan
+	// "mergeable" y "che:state:close" (substrings en otras calls) metan
 	// falsos positivos.
 	if reads := inv.FindCalls("gh", "pr ready 7"); len(reads) != 1 {
 		t.Fatalf("expected 1 gh pr ready call, got %d", len(reads))
@@ -151,19 +174,19 @@ func TestClose_GoldenPath_DraftToReadyAndMerge(t *testing.T) {
 	if closes := inv.FindCalls("gh", "issue close 42"); len(closes) != 1 {
 		t.Fatalf("expected 1 gh issue close call, got %d", len(closes))
 	}
-	// labels.Apply hace 2 transiciones sobre el issue (executed→closing→
-	// closed). Con REST cada una se descompone en 1 DELETE + 1 POST.
-	if dels := inv.FindCalls("gh", "api", "-X", "DELETE", "issues/42/labels/che:executed"); len(dels) != 1 {
-		t.Fatalf("expected 1 DELETE che:executed, got %d", len(dels))
+	// labels.Apply hace 2 transiciones sobre el issue (execute→applying:close→
+	// close). Con REST cada una se descompone en 1 DELETE + 1 POST.
+	if dels := inv.FindCalls("gh", "api", "-X", "DELETE", "issues/42/labels/che:state:execute"); len(dels) != 1 {
+		t.Fatalf("expected 1 DELETE che:state:execute, got %d", len(dels))
 	}
-	if posts := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:closing"); len(posts) != 1 {
-		t.Fatalf("expected 1 POST adding che:closing, got %d", len(posts))
+	if posts := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:applying:close"); len(posts) != 1 {
+		t.Fatalf("expected 1 POST adding che:state:applying:close, got %d", len(posts))
 	}
-	if dels := inv.FindCalls("gh", "api", "-X", "DELETE", "issues/42/labels/che:closing"); len(dels) != 1 {
-		t.Fatalf("expected 1 DELETE che:closing, got %d", len(dels))
+	if dels := inv.FindCalls("gh", "api", "-X", "DELETE", "issues/42/labels/che:state:applying:close"); len(dels) != 1 {
+		t.Fatalf("expected 1 DELETE che:state:applying:close, got %d", len(dels))
 	}
-	if posts := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:closed"); len(posts) != 1 {
-		t.Fatalf("expected 1 POST adding che:closed, got %d", len(posts))
+	if posts := inv.FindCalls("gh", "api", "-X", "POST", "issues/42/labels", "labels[]=che:state:close"); len(posts) != 1 {
+		t.Fatalf("expected 1 POST adding che:state:close, got %d", len(posts))
 	}
 	env.Invocations().AssertNotCalled(t, "claude")
 }
@@ -187,7 +210,7 @@ func TestClose_NotDraft_SkipsReady(t *testing.T) {
   "mergeStateStatus": "CLEAN",
   "author": {"login": "acme-bot"},
   "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
-  "labels": [{"name": "che:executed"}]
+  "labels": [{"name": "che:state:execute"}]
 }`, 0)
 
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
@@ -221,7 +244,7 @@ func TestClose_KeepBranch_PreservesBranchAndWorktree(t *testing.T) {
   "mergeStateStatus": "CLEAN",
   "author": {"login": "acme-bot"},
   "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
-  "labels": [{"name": "che:executed"}]
+  "labels": [{"name": "che:state:execute"}]
 }`, 0)
 
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
@@ -268,7 +291,7 @@ func TestClose_Default_CleansCheManagedWorktree(t *testing.T) {
   "mergeStateStatus": "CLEAN",
   "author": {"login": "acme-bot"},
   "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
-  "labels": [{"name": "che:executed"}]
+  "labels": [{"name": "che:state:execute"}]
 }`, 0)
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
 	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
@@ -313,7 +336,7 @@ func TestClose_KeepBranch_PreservesCheManagedWorktree(t *testing.T) {
   "mergeStateStatus": "CLEAN",
   "author": {"login": "acme-bot"},
   "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
-  "labels": [{"name": "che:executed"}]
+  "labels": [{"name": "che:state:execute"}]
 }`, 0)
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
 	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
@@ -356,7 +379,7 @@ func TestClose_Default_DoesNotTouchMainWorktree(t *testing.T) {
   "mergeStateStatus": "CLEAN",
   "author": {"login": "acme-bot"},
   "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
-  "labels": [{"name": "che:executed"}]
+  "labels": [{"name": "che:state:execute"}]
 }`, 0)
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
 	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
@@ -402,7 +425,7 @@ func TestClose_Default_DoesNotTouchExternalWorktree(t *testing.T) {
   "mergeStateStatus": "CLEAN",
   "author": {"login": "acme-bot"},
   "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
-  "labels": [{"name": "che:executed"}]
+  "labels": [{"name": "che:state:execute"}]
 }`, 0)
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
 	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
@@ -445,7 +468,7 @@ func TestClose_RemoteDeleteFails_WarnsButExitsOK(t *testing.T) {
   "mergeStateStatus": "CLEAN",
   "author": {"login": "acme-bot"},
   "closingIssuesReferences": [{"number": 42, "state": "OPEN"}],
-  "labels": [{"name": "che:executed"}]
+  "labels": [{"name": "che:state:execute"}]
 }`, 0)
 	env.ExpectGh(`^pr checks 7`).RespondStdoutFromFixture("close/gh_pr_checks_pass.json", 0)
 	env.ExpectGh(`^pr merge 7 --merge$`).RespondStdout("Merged\n", 0)
