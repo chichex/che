@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/pipelinelabels"
 	planpkg "github.com/chichex/che/internal/plan"
 )
 
@@ -429,12 +430,12 @@ func TestPullRequest_PRLabelNames(t *testing.T) {
 	pr := &PullRequest{}
 	pr.Labels = append(pr.Labels, struct {
 		Name string `json:"name"`
-	}{Name: labels.CheExecuted})
+	}{Name: pipelinelabels.StateExecute})
 	pr.Labels = append(pr.Labels, struct {
 		Name string `json:"name"`
 	}{Name: labels.ValidatedApprove})
 	got := pr.PRLabelNames()
-	if len(got) != 2 || got[0] != labels.CheExecuted || got[1] != labels.ValidatedApprove {
+	if len(got) != 2 || got[0] != pipelinelabels.StateExecute || got[1] != labels.ValidatedApprove {
 		t.Fatalf("got %v", got)
 	}
 }
@@ -732,7 +733,7 @@ func TestFilterPlanCandidates(t *testing.T) {
 		},
 		{
 			"otros labels no interfieren",
-			[]Issue{mk(1, labels.ChePlan, "ct:plan")},
+			[]Issue{mk(1, pipelinelabels.StateExplore, "ct:plan")},
 			[]int{1},
 		},
 	}
