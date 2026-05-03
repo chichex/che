@@ -84,15 +84,15 @@ func TestPipelineInitLabels_ExpectedLabels(t *testing.T) {
 func TestDefaultPipelineMigrationPairs(t *testing.T) {
 	pairs := defaultPipelineMigrationPairs()
 	want := []pipelineLabelPair{
-		{Old: labels.CheIdea, New: pipelinelabels.StateLabel("idea")},
-		{Old: labels.ChePlanning, New: pipelinelabels.ApplyingLabel("explore")},
-		{Old: labels.ChePlan, New: pipelinelabels.StateLabel("explore")},
-		{Old: labels.CheExecuting, New: pipelinelabels.ApplyingLabel("execute")},
-		{Old: labels.CheExecuted, New: pipelinelabels.StateLabel("execute")},
-		{Old: labels.CheValidating, New: pipelinelabels.ApplyingLabel("validate_pr")},
-		{Old: labels.CheValidated, New: pipelinelabels.StateLabel("validate_pr")},
-		{Old: labels.CheClosing, New: pipelinelabels.ApplyingLabel("close")},
-		{Old: labels.CheClosed, New: pipelinelabels.StateLabel("close")},
+		{Old: v1CheIdea, New: pipelinelabels.StateLabel("idea")},
+		{Old: v1ChePlanning, New: pipelinelabels.ApplyingLabel("explore")},
+		{Old: v1ChePlan, New: pipelinelabels.StateLabel("explore")},
+		{Old: v1CheExecuting, New: pipelinelabels.ApplyingLabel("execute")},
+		{Old: v1CheExecuted, New: pipelinelabels.StateLabel("execute")},
+		{Old: v1CheValidating, New: pipelinelabels.ApplyingLabel("validate_pr")},
+		{Old: v1CheValidated, New: pipelinelabels.StateLabel("validate_pr")},
+		{Old: v1CheClosing, New: pipelinelabels.ApplyingLabel("close")},
+		{Old: v1CheClosed, New: pipelinelabels.StateLabel("close")},
 		{Old: labels.ValidatedApprove},
 		{Old: labels.ValidatedChangesRequested},
 		{Old: labels.ValidatedNeedsHuman},
@@ -106,14 +106,14 @@ func TestMigrationPairsForPipeline_MapOverrideAndValidation(t *testing.T) {
 	p := pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{
 		{Name: "triage", Agents: []string{"claude-opus"}},
 	}}
-	pairs, err := migrationPairsForPipeline(p, []string{"che:idea=che:state:triage"})
+	pairs, err := migrationPairsForPipeline(p, []string{v1CheIdea + "=che:state:triage"})
 	if err != nil {
 		t.Fatalf("migrationPairsForPipeline: %v", err)
 	}
-	if pairs[0] != (pipelineLabelPair{Old: labels.CheIdea, New: pipelinelabels.StateLabel("triage")}) {
+	if pairs[0] != (pipelineLabelPair{Old: v1CheIdea, New: pipelinelabels.StateLabel("triage")}) {
 		t.Fatalf("override did not replace first pair: %#v", pairs[0])
 	}
-	if _, err := migrationPairsForPipeline(p, []string{"che:idea=che:state:missing"}); err == nil {
+	if _, err := migrationPairsForPipeline(p, []string{v1CheIdea + "=che:state:missing"}); err == nil {
 		t.Fatalf("expected error for unknown step")
 	}
 }
@@ -121,12 +121,12 @@ func TestMigrationPairsForPipeline_MapOverrideAndValidation(t *testing.T) {
 func TestRunPipelineMigrateLabels_AppliesRefsAndDeletesOld(t *testing.T) {
 	fake := &fakePipelineLabelClient{
 		search: map[string][]int{
-			labels.ChePlan:          {12},
+			v1ChePlan:               {12},
 			labels.ValidatedApprove: {12, 13},
 		},
 	}
 	pairs := []pipelineLabelPair{
-		{Old: labels.ChePlan, New: pipelinelabels.StateLabel("explore")},
+		{Old: v1ChePlan, New: pipelinelabels.StateLabel("explore")},
 		{Old: labels.ValidatedApprove},
 	}
 	var out bytes.Buffer
@@ -139,11 +139,11 @@ func TestRunPipelineMigrateLabels_AppliesRefsAndDeletesOld(t *testing.T) {
 	if !reflect.DeepEqual(fake.added[12], []string{pipelinelabels.StateLabel("explore")}) {
 		t.Fatalf("added[12] = %#v", fake.added[12])
 	}
-	wantRemoved12 := []string{labels.ChePlan, labels.ValidatedApprove}
+	wantRemoved12 := []string{v1ChePlan, labels.ValidatedApprove}
 	if !reflect.DeepEqual(fake.removed[12], wantRemoved12) {
 		t.Fatalf("removed[12] = %#v, want %#v", fake.removed[12], wantRemoved12)
 	}
-	if !reflect.DeepEqual(fake.deleted, []string{labels.ChePlan, labels.ValidatedApprove}) {
+	if !reflect.DeepEqual(fake.deleted, []string{v1ChePlan, labels.ValidatedApprove}) {
 		t.Fatalf("deleted = %#v", fake.deleted)
 	}
 	if !strings.Contains(out.String(), "preview:") || !strings.Contains(out.String(), "ok: che:plan") {
