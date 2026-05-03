@@ -1,17 +1,16 @@
 package labels
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/chichex/che/internal/pipelinelabels"
 )
 
-// TestTransitionFor_V2 verifica que las 21 transiciones del modelo v2
-// (registradas por v2_transitions.go) sean equivalentes al espejo de las
-// viejas — mismo Add/Remove pero con strings v2. Esto garantiza la
-// coexistencia: un flow ya migrado puede llamar `Apply(ref, v2From, v2To)`
-// y obtener exactamente los labels v2 esperados.
-func TestTransitionFor_V2(t *testing.T) {
+// TestTransitionFor_Valid verifica las 21 transiciones v2 registradas en
+// `validTransitions`. Cubre los 5 flows (explore / execute / iterate plan /
+// iterate PR / validate / close) con éxito y rollback.
+func TestTransitionFor_Valid(t *testing.T) {
 	cases := []struct {
 		from, to string
 		wantAdd  []string
@@ -166,25 +165,45 @@ func TestTransitionFor_V2(t *testing.T) {
 	}
 }
 
-// TestTransitionFor_V2_Coexistence garantiza que las viejas y las v2 no
-// se pisan: ambas siguen funcionando después de que init() registra v2.
-func TestTransitionFor_V2_Coexistence(t *testing.T) {
-	// Vieja (debe seguir funcionando).
-	if _, err := TransitionFor(CheIdea, ChePlanning); err != nil {
-		t.Errorf("vieja CheIdea → ChePlanning rota tras init v2: %v", err)
+func TestTransitionFor_Invalid(t *testing.T) {
+	cases := []struct {
+		from, to string
+	}{
+		{"", pipelinelabels.StateApplyingExecute},                    // from vacío
+		{pipelinelabels.StateExplore, ""},                            // to vacío
+		{pipelinelabels.StateExplore, "che:state:ready-to-close"},    // estado no soportado
+		{pipelinelabels.StateIdea, pipelinelabels.StateValidatePR},   // no se puede saltar pasos
+		{pipelinelabels.StateClose, pipelinelabels.StateIdea},        // close es terminal — no hay transición de salida
+		{pipelinelabels.StateClose, pipelinelabels.StateExplore},     // close es terminal — no hay transición de salida
+		{pipelinelabels.StateValidatePR, pipelinelabels.StateClose},  // hay que pasar por applying:close primero
+		{pipelinelabels.StateApplyingExecute, pipelinelabels.StateApplyingClose}, // no se puede cerrar un execute en curso
 	}
-	// V2 (registrada por init).
-	if _, err := TransitionFor(pipelinelabels.StateIdea, pipelinelabels.StateApplyingExplore); err != nil {
-		t.Errorf("v2 StateIdea → StateApplyingExplore no registrada: %v", err)
+	for _, c := range cases {
+		t.Run(c.from+"→"+c.to, func(t *testing.T) {
+			if _, err := TransitionFor(c.from, c.to); err == nil {
+				t.Fatalf("expected error for %q → %q", c.from, c.to)
+			}
+		})
+	}
+}
+
+func TestTransitionFor_ErrorMessage(t *testing.T) {
+	_, err := TransitionFor("foo", "bar")
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "foo") || !strings.Contains(err.Error(), "bar") {
+		t.Errorf("error should mention both states: %v", err)
 	}
 }
 
 // TestValidateNoMixedLabels cubre la invariante de exclusividad v1↔v2:
 // ningún issue debería tener labels viejos (`che:idea`/...) y v2
-// (`che:state:*`) simultáneamente.
+// (`che:state:*`) simultáneamente. El helper detecta repos a medio migrar
+// para que los guards `rejectV1Labels` de los flows puedan apuntar al
+// operador a `che migrate-labels-v2`.
 //
-// La helper aún no está enganchada en flows/gates — ese cableado vive
-// en PR6c. Acá fijamos solo el contrato del helper.
+// REMOVE IN PR6d junto con `ValidateNoMixedLabels`.
 func TestValidateNoMixedLabels(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -203,7 +222,7 @@ func TestValidateNoMixedLabels(t *testing.T) {
 		},
 		{
 			name:    "v1 only",
-			labels:  []string{"ct:plan", CheIdea, "type:feature"},
+			labels:  []string{"ct:plan", "che:idea", "type:feature"},
 			wantErr: false,
 		},
 		{
@@ -217,10 +236,10 @@ func TestValidateNoMixedLabels(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "mezcla — bug típico que el shim deja pasar",
+			name: "mezcla — bug típico que un repo a medio migrar exhibe",
 			labels: []string{
 				"ct:plan",
-				CheIdea,
+				"che:idea",
 				pipelinelabels.StateApplyingExplore,
 			},
 			wantErr: true,
@@ -228,7 +247,7 @@ func TestValidateNoMixedLabels(t *testing.T) {
 		{
 			name: "mezcla — v1 y v2 ambos terminales",
 			labels: []string{
-				ChePlan,
+				"che:plan",
 				pipelinelabels.StateExplore,
 			},
 			wantErr: true,
@@ -245,4 +264,43 @@ func TestValidateNoMixedLabels(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestV1LegacyStates fija el contrato del helper exportado: devuelve los 9
+// labels viejos para que los guards `rejectV1Labels` de los flows puedan
+// detectar repos a medio migrar.
+func TestV1LegacyStates(t *testing.T) {
+	got := V1LegacyStates()
+	want := []string{
+		"che:idea",
+		"che:planning",
+		"che:plan",
+		"che:executing",
+		"che:executed",
+		"che:validating",
+		"che:validated",
+		"che:closing",
+		"che:closed",
+	}
+	if !equal(got, want) {
+		t.Fatalf("V1LegacyStates() = %v, want %v", got, want)
+	}
+	// Devolver una copia: mutar el resultado no afecta llamadas siguientes.
+	got[0] = "MUTATED"
+	again := V1LegacyStates()
+	if again[0] != "che:idea" {
+		t.Errorf("V1LegacyStates() debe devolver copia: got %v", again)
+	}
+}
+
+func equal(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

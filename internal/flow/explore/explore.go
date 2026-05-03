@@ -673,18 +673,8 @@ func gateBasic(i *Issue) error {
 	}
 	// Detectar labels v1 (modelo viejo) antes de avanzar — si el repo
 	// no corrió migrate-labels-v2, mezclar v1+v2 deja al issue en estado
-	// inconsistente.
-	for _, v1 := range []string{
-		labels.CheIdea,
-		labels.ChePlanning,
-		labels.ChePlan,
-		labels.CheExecuting,
-		labels.CheExecuted,
-		labels.CheValidating,
-		labels.CheValidated,
-		labels.CheClosing,
-		labels.CheClosed,
-	} {
+	// inconsistente. REMOVE IN PR6d.
+	for _, v1 := range labels.V1LegacyStates() {
 		if i.HasLabel(v1) {
 			return fmt.Errorf("issue #%d tiene labels v1 (%s); este flow opera sobre el modelo v2 (`che:state:*`). Corré `che migrate-labels-v2` antes de explorar, o ajustá los labels a mano", i.Number, v1)
 		}

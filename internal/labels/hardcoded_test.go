@@ -10,33 +10,30 @@ import (
 )
 
 // TestNoHardcodedLabelsOutsideThisPackage camina el árbol del módulo y falla
-// si aparecen strings literales de labels (`"ct:plan"`, `"che:plan"`, …)
-// en código de producción fuera de `internal/labels`. La única fuente de
-// verdad son las constantes de este paquete — si mañana renombramos
-// `che:plan`, hay que cambiarlo acá y nada más.
+// si aparecen strings literales de labels (`"ct:plan"`, `"che:state:idea"`, …)
+// en código de producción fuera de `internal/labels` y
+// `internal/pipelinelabels`. La única fuente de verdad son las constantes
+// de esos paquetes — si mañana renombramos `che:state:idea`, hay que
+// cambiarlo ahí y nada más.
 //
 // Scope del check:
 //   - solo archivos `.go`,
 //   - excluye `_test.go` (fixtures pueden usar strings literales),
-//   - excluye `internal/labels` (este paquete es la fuente de verdad),
-//   - excluye `cmd/migrate_labels*.go` — ese subcomando hace migración
-//     in-place de los `status:*` viejos a `che:*` nuevos, así que los
-//     literales `"status:idea"` etc. son su input, no uso runtime.
+//   - excluye `internal/labels` y `internal/pipelinelabels` (paquetes
+//     fuente de verdad),
+//   - excluye `cmd/migrate_labels*.go` — esos subcomandos hacen migración
+//     in-place del modelo viejo (`status:*` → `che:*` y `che:*` → `che:state:*`),
+//     así que los literales del modelo viejo son su input, no uso runtime.
+//
+// Post-PR6c: el modelo v1 (`che:idea`/`che:plan`/...) ya no es runtime
+// (sólo lo detectan los guards de los flows como input legacy), por lo
+// que los literales v1 quedaron permitidos fuera del paquete labels —
+// REMOVE IN PR6d junto con los guards.
 func TestNoHardcodedLabelsOutsideThisPackage(t *testing.T) {
 	root := moduleRoot(t)
 
 	forbidden := []string{
 		`"` + CtPlan + `"`,
-		// Máquina (prefix `che:*`).
-		`"` + CheIdea + `"`,
-		`"` + ChePlanning + `"`,
-		`"` + ChePlan + `"`,
-		`"` + CheExecuting + `"`,
-		`"` + CheExecuted + `"`,
-		`"` + CheValidating + `"`,
-		`"` + CheValidated + `"`,
-		`"` + CheClosing + `"`,
-		`"` + CheClosed + `"`,
 	}
 
 	// Modelo v2 — los 9 estados nuevos (`che:state:*` / `che:state:applying:*`)

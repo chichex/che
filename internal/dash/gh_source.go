@@ -431,7 +431,11 @@ func (g *GhSource) fetchClosedIssues(ctx context.Context) ([]ghIssue, error) {
 	if err != nil {
 		return nil, err
 	}
-	v1Issues, err := fetch(labels.CheClosed)
+	// v1 legacy (`che:closed`) — REMOVE IN PR6d cuando ya no haya repos
+	// sin migrar. El string vive literal acá porque post-PR6c la constante
+	// del paquete labels ya no existe; este es el último consumidor (junto
+	// con migrate-labels-v2 y los guards rejectV1Labels).
+	v1Issues, err := fetch("che:closed")
 	if err != nil {
 		return nil, err
 	}

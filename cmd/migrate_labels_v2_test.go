@@ -6,7 +6,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/chichex/che/internal/labels"
 	"github.com/chichex/che/internal/pipelinelabels"
 )
 
@@ -17,15 +16,15 @@ func TestV2MigrationPairs(t *testing.T) {
 	pairs := v2MigrationPairs()
 
 	want := []v2Pair{
-		{V1: labels.CheIdea, V2: pipelinelabels.StateIdea},
-		{V1: labels.ChePlanning, V2: pipelinelabels.StateApplyingExplore},
-		{V1: labels.ChePlan, V2: pipelinelabels.StateExplore},
-		{V1: labels.CheExecuting, V2: pipelinelabels.StateApplyingExecute},
-		{V1: labels.CheExecuted, V2: pipelinelabels.StateExecute},
-		{V1: labels.CheValidating, V2: pipelinelabels.StateApplyingValidatePR},
-		{V1: labels.CheValidated, V2: pipelinelabels.StateValidatePR},
-		{V1: labels.CheClosing, V2: pipelinelabels.StateApplyingClose},
-		{V1: labels.CheClosed, V2: pipelinelabels.StateClose},
+		{V1: v1CheIdea, V2: pipelinelabels.StateIdea},
+		{V1: v1ChePlanning, V2: pipelinelabels.StateApplyingExplore},
+		{V1: v1ChePlan, V2: pipelinelabels.StateExplore},
+		{V1: v1CheExecuting, V2: pipelinelabels.StateApplyingExecute},
+		{V1: v1CheExecuted, V2: pipelinelabels.StateExecute},
+		{V1: v1CheValidating, V2: pipelinelabels.StateApplyingValidatePR},
+		{V1: v1CheValidated, V2: pipelinelabels.StateValidatePR},
+		{V1: v1CheClosing, V2: pipelinelabels.StateApplyingClose},
+		{V1: v1CheClosed, V2: pipelinelabels.StateClose},
 	}
 	if len(pairs) != len(want) {
 		t.Fatalf("len: got %d, want %d", len(pairs), len(want))
@@ -101,15 +100,15 @@ func mkIssue(num int, title string, lbls ...string) migrateIssue {
 // v1 → genera los 9 mappings esperados, idempotente segundo run.
 func TestMigrateV2_NineLabels_OneToOne(t *testing.T) {
 	issues := []migrateIssue{
-		mkIssue(1, "idea", labels.CheIdea),
-		mkIssue(2, "planning", labels.ChePlanning),
-		mkIssue(3, "plan", labels.ChePlan),
-		mkIssue(4, "executing", labels.CheExecuting),
-		mkIssue(5, "executed", labels.CheExecuted),
-		mkIssue(6, "validating", labels.CheValidating),
-		mkIssue(7, "validated", labels.CheValidated),
-		mkIssue(8, "closing", labels.CheClosing),
-		mkIssue(9, "closed", labels.CheClosed),
+		mkIssue(1, "idea", v1CheIdea),
+		mkIssue(2, "planning", v1ChePlanning),
+		mkIssue(3, "plan", v1ChePlan),
+		mkIssue(4, "executing", v1CheExecuting),
+		mkIssue(5, "executed", v1CheExecuted),
+		mkIssue(6, "validating", v1CheValidating),
+		mkIssue(7, "validated", v1CheValidated),
+		mkIssue(8, "closing", v1CheClosing),
+		mkIssue(9, "closed", v1CheClosed),
 	}
 	rec := withFakes(t, issues)
 	var buf bytes.Buffer
@@ -121,15 +120,15 @@ func TestMigrateV2_NineLabels_OneToOne(t *testing.T) {
 	}
 	// Mapping correcto por número de issue.
 	want := map[int][2]string{
-		1: {labels.CheIdea, pipelinelabels.StateIdea},
-		2: {labels.ChePlanning, pipelinelabels.StateApplyingExplore},
-		3: {labels.ChePlan, pipelinelabels.StateExplore},
-		4: {labels.CheExecuting, pipelinelabels.StateApplyingExecute},
-		5: {labels.CheExecuted, pipelinelabels.StateExecute},
-		6: {labels.CheValidating, pipelinelabels.StateApplyingValidatePR},
-		7: {labels.CheValidated, pipelinelabels.StateValidatePR},
-		8: {labels.CheClosing, pipelinelabels.StateApplyingClose},
-		9: {labels.CheClosed, pipelinelabels.StateClose},
+		1: {v1CheIdea, pipelinelabels.StateIdea},
+		2: {v1ChePlanning, pipelinelabels.StateApplyingExplore},
+		3: {v1ChePlan, pipelinelabels.StateExplore},
+		4: {v1CheExecuting, pipelinelabels.StateApplyingExecute},
+		5: {v1CheExecuted, pipelinelabels.StateExecute},
+		6: {v1CheValidating, pipelinelabels.StateApplyingValidatePR},
+		7: {v1CheValidated, pipelinelabels.StateValidatePR},
+		8: {v1CheClosing, pipelinelabels.StateApplyingClose},
+		9: {v1CheClosed, pipelinelabels.StateClose},
 	}
 	for _, c := range rec.calls {
 		exp, ok := want[c.IssueNumber]
@@ -174,7 +173,7 @@ func TestMigrateV2_AlreadyV2_Idempotent(t *testing.T) {
 // skipeado con warning, no se aplica nada.
 func TestMigrateV2_Mixed_SkipsAndWarns(t *testing.T) {
 	issues := []migrateIssue{
-		mkIssue(42, "mixto", "ct:plan", labels.ChePlan, pipelinelabels.StateExplore),
+		mkIssue(42, "mixto", "ct:plan", v1ChePlan, pipelinelabels.StateExplore),
 	}
 	rec := withFakes(t, issues)
 	var buf bytes.Buffer
@@ -219,8 +218,8 @@ func TestMigrateV2_NoCheLabels_Skip(t *testing.T) {
 // modifica nada, solo lista qué haría.
 func TestMigrateV2_DryRun_NoApply(t *testing.T) {
 	issues := []migrateIssue{
-		mkIssue(1, "idea legacy", labels.CheIdea),
-		mkIssue(2, "plan legacy", labels.ChePlan),
+		mkIssue(1, "idea legacy", v1CheIdea),
+		mkIssue(2, "plan legacy", v1ChePlan),
 	}
 	rec := withFakes(t, issues)
 	var buf bytes.Buffer
@@ -234,10 +233,10 @@ func TestMigrateV2_DryRun_NoApply(t *testing.T) {
 	if !strings.Contains(out, "[dry-run]") {
 		t.Errorf("expected '[dry-run]' marker, got:\n%s", out)
 	}
-	if !strings.Contains(out, labels.CheIdea+" → "+pipelinelabels.StateIdea) {
+	if !strings.Contains(out, v1CheIdea+" → "+pipelinelabels.StateIdea) {
 		t.Errorf("expected idea mapping in dry-run, got:\n%s", out)
 	}
-	if !strings.Contains(out, labels.ChePlan+" → "+pipelinelabels.StateExplore) {
+	if !strings.Contains(out, v1ChePlan+" → "+pipelinelabels.StateExplore) {
 		t.Errorf("expected plan mapping in dry-run, got:\n%s", out)
 	}
 }
@@ -246,9 +245,9 @@ func TestMigrateV2_DryRun_NoApply(t *testing.T) {
 // scan no debe abortar el procesamiento del resto.
 func TestMigrateV2_Mixed_DoesNotShortCircuit(t *testing.T) {
 	issues := []migrateIssue{
-		mkIssue(1, "ok", labels.CheIdea),
-		mkIssue(2, "mixto", labels.ChePlan, pipelinelabels.StateExplore),
-		mkIssue(3, "ok2", labels.CheExecuted),
+		mkIssue(1, "ok", v1CheIdea),
+		mkIssue(2, "mixto", v1ChePlan, pipelinelabels.StateExplore),
+		mkIssue(3, "ok2", v1CheExecuted),
 	}
 	rec := withFakes(t, issues)
 	var buf bytes.Buffer
@@ -267,7 +266,7 @@ func TestMigrateV2_Mixed_DoesNotShortCircuit(t *testing.T) {
 // nombra cada issue tocado con su número y título, y cada mapping aplicado.
 func TestMigrateV2_OutputIncludesIssueTitleAndMappings(t *testing.T) {
 	issues := []migrateIssue{
-		mkIssue(7, "Mi issue cool", labels.CheExecuted),
+		mkIssue(7, "Mi issue cool", v1CheExecuted),
 	}
 	withFakes(t, issues)
 	var buf bytes.Buffer
@@ -281,7 +280,7 @@ func TestMigrateV2_OutputIncludesIssueTitleAndMappings(t *testing.T) {
 	if !strings.Contains(out, "Mi issue cool") {
 		t.Errorf("expected issue title in output, got:\n%s", out)
 	}
-	if !strings.Contains(out, labels.CheExecuted+" → "+pipelinelabels.StateExecute) {
+	if !strings.Contains(out, v1CheExecuted+" → "+pipelinelabels.StateExecute) {
 		t.Errorf("expected mapping in output, got:\n%s", out)
 	}
 }

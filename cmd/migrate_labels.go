@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/chichex/che/internal/labels"
 	"github.com/spf13/cobra"
 )
 
@@ -19,25 +18,26 @@ type pair struct {
 }
 
 // migrationPairs devuelve los 5 renombres canónicos para mover un repo
-// desde la máquina vieja (`status:*`, 5 estados) a la nueva (`che:*`, 9
-// estados). El orden es el del embudo idea → plan → executing → executed
-// → closed, pensado para que el output del subcomando se lea como una
-// progresión natural en stdout.
+// desde la máquina más vieja (`status:*`, 5 estados) a la siguiente
+// (`che:*`, 9 estados). El orden es el del embudo idea → plan → executing →
+// executed → closed, pensado para que el output del subcomando se lea como
+// una progresión natural en stdout.
 //
-// Los strings `status:*` viven literales acá (no como constantes del
-// paquete labels) porque son input de migración, no uso runtime: el
-// resto del código usa exclusivamente las constantes `labels.Che*`.
+// Tanto los strings `status:*` como los `che:*` viven literales acá porque
+// son input de migración, no uso runtime: el modelo `che:*` también es
+// legacy post-PR6c (la máquina de estados runtime es `che:state:*` v2).
+// La migración del modelo `che:*` al `che:state:*` la hace el subcomando
+// dedicado `che migrate-labels-v2`.
 //
 // No incluye los 4 estados nuevos (`che:planning`, `che:validating`,
-// `che:validated`, `che:closing`): no existen en repos viejos, los crea
-// `labels.Ensure` lazy cuando un flow los aplica por primera vez.
+// `che:validated`, `che:closing`): no existen en repos viejos.
 func migrationPairs() []pair {
 	return []pair{
-		{Old: "status:idea", New: labels.CheIdea},
-		{Old: "status:plan", New: labels.ChePlan},
-		{Old: "status:executing", New: labels.CheExecuting},
-		{Old: "status:executed", New: labels.CheExecuted},
-		{Old: "status:closed", New: labels.CheClosed},
+		{Old: "status:idea", New: "che:idea"},
+		{Old: "status:plan", New: "che:plan"},
+		{Old: "status:executing", New: "che:executing"},
+		{Old: "status:executed", New: "che:executed"},
+		{Old: "status:closed", New: "che:closed"},
 	}
 }
 
