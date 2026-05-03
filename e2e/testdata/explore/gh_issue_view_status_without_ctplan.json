@@ -1,12 +1,12 @@
 {
   "number": 55,
-  "title": "Issue con che:plan preexistente sin ct:plan",
-  "body": "Alguien editó labels a mano y dejó che:plan sin ct:plan.\n",
+  "title": "Issue con che:state:explore preexistente sin ct:plan",
+  "body": "Alguien editó labels a mano y dejó che:state:explore sin ct:plan.\n",
   "url": "https://github.com/acme/demo/issues/55",
   "state": "OPEN",
   "labels": [
     {"name": "type:feature"},
     {"name": "size:m"},
-    {"name": "che:plan"}
+    {"name": "che:state:explore"}
   ]
 }

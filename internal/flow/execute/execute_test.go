@@ -27,35 +27,35 @@ func TestGate(t *testing.T) {
 		{
 			name: "ok plan",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:plan"},
+				{Name: "ct:plan"}, {Name: "che:state:explore"},
 			}},
 			wantErr: "",
 		},
 		{
 			name: "ok idea (skip explore)",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:idea"},
+				{Name: "ct:plan"}, {Name: "che:state:idea"},
 			}},
 			wantErr: "",
 		},
 		{
 			name: "ok with plan-validated:approve",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:plan"}, {Name: "plan-validated:approve"},
+				{Name: "ct:plan"}, {Name: "che:state:explore"}, {Name: "plan-validated:approve"},
 			}},
 			wantErr: "",
 		},
 		{
 			name: "ok validated + plan-validated:approve (post-validate path)",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:validated"}, {Name: "plan-validated:approve"},
+				{Name: "ct:plan"}, {Name: "che:state:validate_pr"}, {Name: "plan-validated:approve"},
 			}},
 			wantErr: "",
 		},
 		{
 			name: "ok validated sin plan-validated:* explícito (defensa)",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:validated"},
+				{Name: "ct:plan"}, {Name: "che:state:validate_pr"},
 			}},
 			wantErr: "",
 		},
@@ -66,48 +66,48 @@ func TestGate(t *testing.T) {
 		},
 		{
 			name:    "missing ct:plan",
-			issue:   Issue{Number: 1, State: "OPEN", Labels: []Label{{Name: "che:plan"}}},
+			issue:   Issue{Number: 1, State: "OPEN", Labels: []Label{{Name: "che:state:explore"}}},
 			wantErr: "ct:plan",
 		},
 		{
 			name: "executing lock",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:executing"},
+				{Name: "ct:plan"}, {Name: "che:state:applying:execute"},
 			}},
-			wantErr: "executing",
+			wantErr: "che:state:applying:execute",
 		},
 		{
 			name: "already executed",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:executed"},
+				{Name: "ct:plan"}, {Name: "che:state:execute"},
 			}},
-			wantErr: "che:executed",
+			wantErr: "che:state:execute",
 		},
 		{
 			name: "already validating (otro flow en curso)",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:validating"},
+				{Name: "ct:plan"}, {Name: "che:state:applying:validate_pr"},
 			}},
-			wantErr: "che:validating",
+			wantErr: "che:state:applying:validate_pr",
 		},
 		{
 			name: "already closing",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:closing"},
+				{Name: "ct:plan"}, {Name: "che:state:applying:close"},
 			}},
-			wantErr: "che:closing",
+			wantErr: "che:state:applying:close",
 		},
 		{
 			name: "already closed",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:closed"},
+				{Name: "ct:plan"}, {Name: "che:state:close"},
 			}},
-			wantErr: "che:closed",
+			wantErr: "che:state:close",
 		},
 		{
 			name: "plan-validated:changes-requested blocks",
 			issue: Issue{Number: 42, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:plan"},
+				{Name: "ct:plan"}, {Name: "che:state:explore"},
 				{Name: "plan-validated:changes-requested"},
 			}},
 			wantErr: "plan-validated:changes-requested",
@@ -115,7 +115,7 @@ func TestGate(t *testing.T) {
 		{
 			name: "plan-validated:changes-requested blocks incluso en validated",
 			issue: Issue{Number: 42, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:validated"},
+				{Name: "ct:plan"}, {Name: "che:state:validate_pr"},
 				{Name: "plan-validated:changes-requested"},
 			}},
 			wantErr: "plan-validated:changes-requested",
@@ -123,7 +123,7 @@ func TestGate(t *testing.T) {
 		{
 			name: "plan-validated:needs-human blocks",
 			issue: Issue{Number: 42, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:plan"},
+				{Name: "ct:plan"}, {Name: "che:state:explore"},
 				{Name: "plan-validated:needs-human"},
 			}},
 			wantErr: "plan-validated:needs-human",
@@ -133,7 +133,7 @@ func TestGate(t *testing.T) {
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
 				{Name: "ct:plan"},
 			}},
-			wantErr: "no está en che:idea, che:plan ni che:validated",
+			wantErr: "no está en che:state:idea, che:state:explore ni che:state:validate_pr",
 		},
 	}
 	for _, c := range cases {
@@ -160,7 +160,7 @@ func TestGate(t *testing.T) {
 // rechazado — evita tener que consultar el manual.
 func TestGate_ChangesRequestedErrorMentionsIterate(t *testing.T) {
 	issue := Issue{Number: 42, State: "OPEN", Labels: []Label{
-		{Name: "ct:plan"}, {Name: "che:plan"},
+		{Name: "ct:plan"}, {Name: "che:state:explore"},
 		{Name: "plan-validated:changes-requested"},
 	}}
 	err := gate(&issue)
@@ -185,38 +185,38 @@ func TestFromState(t *testing.T) {
 	}{
 		{
 			name:   "solo idea",
-			issue:  Issue{Labels: []Label{{Name: "che:idea"}}},
-			wantFr: "che:idea",
+			issue:  Issue{Labels: []Label{{Name: "che:state:idea"}}},
+			wantFr: "che:state:idea",
 		},
 		{
 			name:   "solo plan",
-			issue:  Issue{Labels: []Label{{Name: "che:plan"}}},
-			wantFr: "che:plan",
+			issue:  Issue{Labels: []Label{{Name: "che:state:explore"}}},
+			wantFr: "che:state:explore",
 		},
 		{
 			name:   "solo validated",
-			issue:  Issue{Labels: []Label{{Name: "che:validated"}}},
-			wantFr: "che:validated",
+			issue:  Issue{Labels: []Label{{Name: "che:state:validate_pr"}}},
+			wantFr: "che:state:validate_pr",
 		},
 		{
 			name:   "validated gana sobre plan",
-			issue:  Issue{Labels: []Label{{Name: "che:plan"}, {Name: "che:validated"}}},
-			wantFr: "che:validated",
+			issue:  Issue{Labels: []Label{{Name: "che:state:explore"}, {Name: "che:state:validate_pr"}}},
+			wantFr: "che:state:validate_pr",
 		},
 		{
 			name:   "validated gana sobre idea",
-			issue:  Issue{Labels: []Label{{Name: "che:idea"}, {Name: "che:validated"}}},
-			wantFr: "che:validated",
+			issue:  Issue{Labels: []Label{{Name: "che:state:idea"}, {Name: "che:state:validate_pr"}}},
+			wantFr: "che:state:validate_pr",
 		},
 		{
 			name:   "plan gana sobre idea",
-			issue:  Issue{Labels: []Label{{Name: "che:idea"}, {Name: "che:plan"}}},
-			wantFr: "che:plan",
+			issue:  Issue{Labels: []Label{{Name: "che:state:idea"}, {Name: "che:state:explore"}}},
+			wantFr: "che:state:explore",
 		},
 		{
 			name:   "default idea si no hay ninguno (defensa, no debería pasar post-gate)",
 			issue:  Issue{Labels: []Label{}},
-			wantFr: "che:idea",
+			wantFr: "che:state:idea",
 		},
 	}
 	for _, c := range cases {

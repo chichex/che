@@ -55,7 +55,7 @@ func TestIdea_GoldenPath_Single(t *testing.T) {
 		WhenArgsMatch(`-p`).
 		CaptureStdin().
 		RespondStdoutFromFixture("idea/sonnet_single.json", 0)
-	env.ExpectGh(`^issue create .*che:idea`).
+	env.ExpectGh(`^issue create .*che:state:idea`).
 		Consumable().
 		RespondStdout("https://github.com/acme/demo/issues/47\n", 0)
 
@@ -70,7 +70,7 @@ func TestIdea_GoldenPath_Single(t *testing.T) {
 	creates[0].AssertArgsContain(t,
 		"--label", "type:feature",
 		"--label", "size:m",
-		"--label", "che:idea",
+		"--label", "che:state:idea",
 		"--label", "ct:plan")
 }
 
