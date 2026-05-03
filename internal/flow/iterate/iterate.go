@@ -36,8 +36,10 @@ import (
 
 	"github.com/chichex/che/internal/agent"
 	"github.com/chichex/che/internal/flow/execute"
+	"github.com/chichex/che/internal/flow/runguard"
 	"github.com/chichex/che/internal/flow/validate"
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/lock"
 	"github.com/chichex/che/internal/output"
 	"github.com/chichex/che/internal/pipelinelabels"
 	planpkg "github.com/chichex/che/internal/plan"
@@ -281,6 +283,20 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		}
 	}()
 
+	// Lock con heartbeat + TTL (PRD §6.d) — opt-in. El target del lock es
+	// el mismo `stateRef` que las transiciones (issue raíz si está
+	// linkeado, PR si no) para no aplicar el lock en un lugar y las
+	// transiciones en otro.
+	heartbeat := runguard.AcquireLock(stateRef, "iterate-pr", log)
+	defer runguard.ReleaseLock(heartbeat, log)
+	if heartbeat == nil && lock.HeartbeatEnabled() {
+		return ExitSemantic
+	}
+	auditTarget := pr.Number
+	if stateRes.ResolvedToIssue {
+		auditTarget = stateRes.IssueNumber
+	}
+
 	// Transición che:state:validate_pr → che:state:applying:execute. Rollback en defer LIFO.
 	// Target: issue si hay linkeado con che:*, PR si no.
 	if stateRes.ResolvedToIssue {
@@ -292,6 +308,7 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		log.Error("no pude transicionar a "+pipelinelabels.StateApplyingExecute, output.F{Cause: err})
 		return ExitRetry
 	}
+	runguard.AuditAppend(auditTarget, "iterate-pr", pipelinelabels.StateValidatePR, pipelinelabels.StateApplyingExecute, "", log)
 	var stateExecuted bool
 	defer func() {
 		if stateExecuted {
@@ -299,7 +316,9 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		}
 		if err := labels.Apply(stateRef, pipelinelabels.StateApplyingExecute, pipelinelabels.StateValidatePR); err != nil {
 			log.Warn(fmt.Sprintf("rollback %s → %s fallo: %v — revisá labels a mano", pipelinelabels.StateApplyingExecute, pipelinelabels.StateValidatePR, err))
+			return
 		}
+		runguard.AuditAppend(auditTarget, "iterate-pr", pipelinelabels.StateApplyingExecute, pipelinelabels.StateValidatePR, "rollback", log)
 	}()
 
 	log.Step("leyendo comments previos para buscar findings")
@@ -390,6 +409,7 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 		log.Warn(fmt.Sprintf("no pude transicionar a %s: %v — revisá labels a mano", pipelinelabels.StateExecute, err))
 	} else {
 		stateExecuted = true
+		runguard.AuditAppend(auditTarget, "iterate-pr", pipelinelabels.StateApplyingExecute, pipelinelabels.StateExecute, "", log)
 	}
 
 	log.Success("iterated PR", output.F{PR: pr.Number, URL: pr.URL, Detail: fmt.Sprintf("%d nuevos commits", len(newCommits))})
@@ -461,12 +481,20 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		}
 	}()
 
+	// Lock con heartbeat + TTL (PRD §6.d) — opt-in.
+	heartbeat := runguard.AcquireLock(issueRef, "iterate-plan", log)
+	defer runguard.ReleaseLock(heartbeat, log)
+	if heartbeat == nil && lock.HeartbeatEnabled() {
+		return ExitSemantic
+	}
+
 	// Transición che:state:validate_pr → che:state:applying:explore. Rollback en defer LIFO.
 	log.Step("transicionando a "+pipelinelabels.StateApplyingExplore, output.F{Issue: issue.Number})
 	if err := labels.Apply(issueRef, pipelinelabels.StateValidatePR, pipelinelabels.StateApplyingExplore); err != nil {
 		log.Error("no pude transicionar a "+pipelinelabels.StateApplyingExplore, output.F{Cause: err})
 		return ExitRetry
 	}
+	runguard.AuditAppend(issue.Number, "iterate-plan", pipelinelabels.StateValidatePR, pipelinelabels.StateApplyingExplore, "", log)
 	var statePlan bool
 	defer func() {
 		if statePlan {
@@ -474,7 +502,9 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		}
 		if err := labels.Apply(issueRef, pipelinelabels.StateApplyingExplore, pipelinelabels.StateValidatePR); err != nil {
 			log.Warn(fmt.Sprintf("rollback %s → %s fallo: %v — revisá labels a mano", pipelinelabels.StateApplyingExplore, pipelinelabels.StateValidatePR, err))
+			return
 		}
+		runguard.AuditAppend(issue.Number, "iterate-plan", pipelinelabels.StateApplyingExplore, pipelinelabels.StateValidatePR, "rollback", log)
 	}()
 
 	currentPlan, parseErr := planpkg.Parse(issue.Body)
@@ -551,6 +581,7 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		log.Warn(fmt.Sprintf("no pude transicionar a %s: %v — revisá labels a mano", pipelinelabels.StateExplore, err))
 	} else {
 		statePlan = true
+		runguard.AuditAppend(issue.Number, "iterate-plan", pipelinelabels.StateApplyingExplore, pipelinelabels.StateExplore, "", log)
 	}
 
 	log.Success("iterated plan", output.F{Issue: issue.Number, URL: issue.URL})

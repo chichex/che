@@ -29,7 +29,9 @@ import (
 	"time"
 
 	"github.com/chichex/che/internal/agent"
+	"github.com/chichex/che/internal/flow/runguard"
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/lock"
 	"github.com/chichex/che/internal/output"
 	"github.com/chichex/che/internal/pipelinelabels"
 	planpkg "github.com/chichex/che/internal/plan"
@@ -336,6 +338,13 @@ func Run(issueRef string, opts Opts) ExitCode {
 		}
 	}()
 
+	// Lock con heartbeat + TTL (PRD §6.d) — opt-in vía CHE_LOCK_HEARTBEAT.
+	heartbeat := runguard.AcquireLock(issueRef, "execute", log)
+	defer runguard.ReleaseLock(heartbeat, log)
+	if heartbeat == nil && lock.HeartbeatEnabled() {
+		return ExitSemantic
+	}
+
 	// Transition <from> → applying:execute. Desde acá se lockea el issue
 	// (también vía che:* — redundante con che:locked pero preservado porque
 	// el listado de candidatos y el gate ya dependen de la máquina de
@@ -345,6 +354,7 @@ func Run(issueRef string, opts Opts) ExitCode {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return ExitRetry
 	}
+	runguard.AuditAppend(issue.Number, "execute", from, pipelinelabels.StateApplyingExecute, "", log)
 
 	var (
 		succeeded       bool
@@ -564,6 +574,7 @@ func Run(issueRef string, opts Opts) ExitCode {
 		return ExitRetry
 	}
 	executedApplied = true
+	runguard.AuditAppend(issue.Number, "execute", pipelinelabels.StateApplyingExecute, pipelinelabels.StateExecute, "", log)
 
 	progress("posteando comment en el issue con link al PR…")
 	if err := commentIssue(ctx, issueRef, renderIssueComment(prURL)); err != nil {

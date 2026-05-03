@@ -27,8 +27,10 @@ import (
 	"time"
 
 	"github.com/chichex/che/internal/agent"
+	"github.com/chichex/che/internal/flow/runguard"
 	"github.com/chichex/che/internal/flow/stateref"
 	"github.com/chichex/che/internal/labels"
+	"github.com/chichex/che/internal/lock"
 	"github.com/chichex/che/internal/output"
 	"github.com/chichex/che/internal/pipelinelabels"
 	planpkg "github.com/chichex/che/internal/plan"
@@ -456,6 +458,19 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 	stateRes := pr.ResolveStateRef(prRef)
 	stateRef := stateRes.Ref
 
+	// Lock con heartbeat + TTL (PRD §6.d) — opt-in. Aplicado al stateRef
+	// (issue raíz si linkeado, PR si no) — alineado con donde van las
+	// transiciones.
+	heartbeat := runguard.AcquireLock(stateRef, "validate-pr", log)
+	defer runguard.ReleaseLock(heartbeat, log)
+	if heartbeat == nil && lock.HeartbeatEnabled() {
+		return ExitSemantic
+	}
+	auditTarget := pr.Number
+	if stateRes.ResolvedToIssue {
+		auditTarget = stateRes.IssueNumber
+	}
+
 	// Si la resolución cayó al issue, repetimos el guard v1 sobre los
 	// labels del issue — `che migrate-labels-v2` puede haber dejado
 	// algún issue mezclado/sin migrar. Si fall back al PR ya validamos
@@ -483,13 +498,16 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 			log.Error("no pude transicionar a "+pipelinelabels.StateApplyingValidatePR, output.F{Cause: err})
 			return ExitRetry
 		}
+		runguard.AuditAppend(auditTarget, "validate-pr", pipelinelabels.StateExecute, pipelinelabels.StateApplyingValidatePR, "", log)
 		defer func() {
 			if stateValidated {
 				return
 			}
 			if err := labels.Apply(stateRef, pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateExecute); err != nil {
 				log.Warn(fmt.Sprintf("rollback %s → %s fallo: %v — revisá labels a mano", pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateExecute, err))
+				return
 			}
+			runguard.AuditAppend(auditTarget, "validate-pr", pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateExecute, "rollback", log)
 		}()
 	}
 
@@ -567,6 +585,7 @@ func runPR(prRef string, opts Opts, stdout io.Writer, log *output.Logger) ExitCo
 			log.Warn(fmt.Sprintf("no pude transicionar a %s: %v — revisá labels a mano", pipelinelabels.StateValidatePR, err))
 		} else {
 			stateValidated = true
+			runguard.AuditAppend(auditTarget, "validate-pr", pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateValidatePR, "", log)
 		}
 	case verdict != "" && !stateRes.ResolvedToIssue:
 		// Adopt mode: validate es la puerta de entrada al state machine
@@ -643,6 +662,13 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		}
 	}()
 
+	// Lock con heartbeat + TTL (PRD §6.d) — opt-in.
+	heartbeat := runguard.AcquireLock(issueRef, "validate-plan", log)
+	defer runguard.ReleaseLock(heartbeat, log)
+	if heartbeat == nil && lock.HeartbeatEnabled() {
+		return ExitSemantic
+	}
+
 	// Transición: che:state:explore → che:state:applying:validate_pr. El defer revierte
 	// si succeded queda en false al final (rollback a che:state:explore). LIFO: el
 	// unlock corre después del rollback, garantizando que el lock cubre toda la ventana.
@@ -651,6 +677,7 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		log.Error("no pude transicionar a "+pipelinelabels.StateApplyingValidatePR, output.F{Cause: err})
 		return ExitRetry
 	}
+	runguard.AuditAppend(issue.Number, "validate-plan", pipelinelabels.StateExplore, pipelinelabels.StateApplyingValidatePR, "", log)
 	var stateValidated bool
 	defer func() {
 		if stateValidated {
@@ -658,7 +685,9 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		}
 		if err := labels.Apply(issueRef, pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateExplore); err != nil {
 			log.Warn(fmt.Sprintf("rollback %s → %s fallo: %v — revisá labels a mano", pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateExplore, err))
+			return
 		}
+		runguard.AuditAppend(issue.Number, "validate-plan", pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateExplore, "rollback", log)
 	}()
 
 	// Parseamos el plan consolidado del body. Dos modos de fallo semantic:
@@ -730,6 +759,7 @@ func runPlan(issueRef string, opts Opts, stdout io.Writer, log *output.Logger) E
 		log.Warn(fmt.Sprintf("no pude transicionar a %s: %v — revisá labels a mano", pipelinelabels.StateValidatePR, err))
 	} else {
 		stateValidated = true
+		runguard.AuditAppend(issue.Number, "validate-plan", pipelinelabels.StateApplyingValidatePR, pipelinelabels.StateValidatePR, "", log)
 	}
 
 	fmt.Fprintln(stdout, renderReport(results))
