@@ -261,6 +261,54 @@ func TestExplore_IssueMissingCtPlan_WithPreexistingStatus_PreservesStatus(t *tes
 	}
 }
 
+// TestExplore_OldV1Label_Exit3_NoMixedState: issue de un repo no migrado a
+// labels v2 (tiene `che:idea` viejo en vez de `che:state:idea`). El gate
+// debe rechazarlo con un mensaje accionable que mencione la migración —
+// si lo dejara pasar, el `Apply(StateIdea, StateApplyingExplore)` siguiente
+// haría un remove no-op del label v2 inexistente y agregaría
+// `che:state:applying:explore`, dejando el issue con `che:idea` (v1) +
+// `che:state:applying:explore` (v2) simultáneos: estado mixto que no es
+// válido en ninguna de las dos máquinas.
+//
+// Asserts: exit 3, sin POST/DELETE de labels (no hay transición), sin
+// llamadas al agente. El stderr menciona "v1" y/o "migrate" para que el
+// operador sepa qué hacer.
+func TestExplore_OldV1Label_Exit3_NoMixedState(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+	scriptExplorePrechecks(env)
+	env.ExpectGh(`^issue view 88`).RespondStdoutFromFixture("explore/gh_issue_view_old_label_che_idea.json", 0)
+
+	r := env.Run("explore", "88")
+	if r.ExitCode != 3 {
+		t.Fatalf("expected exit 3 (gate rechaza labels v1), got %d\nstderr: %s", r.ExitCode, r.Stderr)
+	}
+	harness.AssertContains(t, r.Stderr, "v1")
+
+	inv := env.Invocations()
+	// Ningún agente invocado: el gate corta antes.
+	inv.AssertNotCalled(t, "claude")
+	inv.AssertNotCalled(t, "codex")
+	inv.AssertNotCalled(t, "gemini")
+	// Ninguna transición de máquina de estados (POST/DELETE labels al
+	// issue 88) — no queremos dejar el issue con labels mixtos v1+v2.
+	posts := inv.FindCalls("gh", "api", "-X", "POST", "issues/88/labels")
+	if len(posts) > 0 {
+		t.Fatalf("no debería haber POST de labels (gate rechaza); calls=%v", posts)
+	}
+	deletes := findLabelDeletes(inv, 88)
+	if len(deletes) > 0 {
+		t.Fatalf("no debería haber DELETE de labels (gate rechaza); calls=%v", deletes)
+	}
+	// Sin comment ni body edit.
+	if comments := inv.FindCalls("gh", "issue", "comment", "--body-file"); len(comments) > 0 {
+		t.Fatalf("no debería haber comment (gate rechaza); calls=%v", comments)
+	}
+	if edits := inv.FindCalls("gh", "issue", "edit", "88", "--body-file"); len(edits) > 0 {
+		t.Fatalf("no debería haber body edit (gate rechaza); calls=%v", edits)
+	}
+}
+
 // TestExplore_IssueClosed_Exit3: issue is CLOSED → exit 3.
 func TestExplore_IssueClosed_Exit3(t *testing.T) {
 	t.Parallel()

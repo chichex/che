@@ -371,6 +371,14 @@ func Run(issueRef string, opts Opts) ExitCode {
 	// progreso: 2) git worktree remove --force, 3) git branch -D. Los
 	// errores de esos pasos se propagan para loguearlos — best-effort pero
 	// NO silencioso.
+	//
+	// TODO(coverage): las 3 ramas de label handling (executedApplied,
+	// prCreated, default rollback) hoy solo se ejercitan via los tests e2e
+	// que cubren los happy paths. Para tests unitarios directos hay que
+	// extraer cleanupLocal a una función a nivel paquete con dependencias
+	// inyectables (labels.Apply / fetchIssue / wt.Cleanup como interfaces o
+	// callbacks). El refactor toca muchas signatures y se quedó fuera del
+	// scope de PR6b; queda para un PR de coverage post-PR6c.
 	cleanupLocal := func(cause string) {
 		if cleanupDone {
 			return

@@ -178,3 +178,71 @@ func TestTransitionFor_V2_Coexistence(t *testing.T) {
 		t.Errorf("v2 StateIdea → StateApplyingExplore no registrada: %v", err)
 	}
 }
+
+// TestValidateNoMixedLabels cubre la invariante de exclusividad v1↔v2:
+// ningún issue debería tener labels viejos (`che:idea`/...) y v2
+// (`che:state:*`) simultáneamente.
+//
+// La helper aún no está enganchada en flows/gates — ese cableado vive
+// en PR6c. Acá fijamos solo el contrato del helper.
+func TestValidateNoMixedLabels(t *testing.T) {
+	cases := []struct {
+		name    string
+		labels  []string
+		wantErr bool
+	}{
+		{
+			name:    "vacío",
+			labels:  nil,
+			wantErr: false,
+		},
+		{
+			name:    "solo labels orthogonales",
+			labels:  []string{"ct:plan", "type:feature", CheLocked, "size:m"},
+			wantErr: false,
+		},
+		{
+			name:    "v1 only",
+			labels:  []string{"ct:plan", CheIdea, "type:feature"},
+			wantErr: false,
+		},
+		{
+			name:    "v2 only",
+			labels:  []string{"ct:plan", pipelinelabels.StateIdea, "type:feature"},
+			wantErr: false,
+		},
+		{
+			name:    "v2 only — applying",
+			labels:  []string{pipelinelabels.StateApplyingExplore},
+			wantErr: false,
+		},
+		{
+			name: "mezcla — bug típico que el shim deja pasar",
+			labels: []string{
+				"ct:plan",
+				CheIdea,
+				pipelinelabels.StateApplyingExplore,
+			},
+			wantErr: true,
+		},
+		{
+			name: "mezcla — v1 y v2 ambos terminales",
+			labels: []string{
+				ChePlan,
+				pipelinelabels.StateExplore,
+			},
+			wantErr: true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := ValidateNoMixedLabels(c.labels)
+			if c.wantErr && err == nil {
+				t.Fatalf("expected error, got nil")
+			}
+			if !c.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}

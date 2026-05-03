@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/chichex/che/internal/pipelinelabels"
 )
 
 // TestNoHardcodedLabelsOutsideThisPackage camina el árbol del módulo y falla
@@ -37,18 +39,35 @@ func TestNoHardcodedLabelsOutsideThisPackage(t *testing.T) {
 		`"` + CheClosed + `"`,
 	}
 
+	// Modelo v2 — los 9 estados nuevos (`che:state:*` / `che:state:applying:*`)
+	// solo deben aparecer literales en `internal/pipelinelabels` (su fuente
+	// de verdad). El resto del codebase debe usar `pipelinelabels.State*`.
+	forbiddenV2 := []string{
+		`"` + pipelinelabels.StateIdea + `"`,
+		`"` + pipelinelabels.StateApplyingExplore + `"`,
+		`"` + pipelinelabels.StateExplore + `"`,
+		`"` + pipelinelabels.StateApplyingExecute + `"`,
+		`"` + pipelinelabels.StateExecute + `"`,
+		`"` + pipelinelabels.StateApplyingValidatePR + `"`,
+		`"` + pipelinelabels.StateValidatePR + `"`,
+		`"` + pipelinelabels.StateApplyingClose + `"`,
+		`"` + pipelinelabels.StateClose + `"`,
+	}
+
 	var violations []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			// Saltamos dot-dirs (.git, .worktrees, .github) y este paquete.
+			// Saltamos dot-dirs (.git, .worktrees, .github) y los dos paquetes
+			// que son fuente de verdad de labels.
 			name := d.Name()
 			if strings.HasPrefix(name, ".") {
 				return filepath.SkipDir
 			}
-			if name == "labels" && filepath.Base(filepath.Dir(path)) == "internal" {
+			parent := filepath.Base(filepath.Dir(path))
+			if parent == "internal" && (name == "labels" || name == "pipelinelabels") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -72,6 +91,11 @@ func TestNoHardcodedLabelsOutsideThisPackage(t *testing.T) {
 				violations = append(violations, rel+": contiene "+lit)
 			}
 		}
+		for _, lit := range forbiddenV2 {
+			if strings.Contains(content, lit) {
+				violations = append(violations, rel+": contiene "+lit+" (usá pipelinelabels.State*)")
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -79,7 +103,7 @@ func TestNoHardcodedLabelsOutsideThisPackage(t *testing.T) {
 	}
 
 	if len(violations) > 0 {
-		t.Fatalf("labels hardcoded fuera de internal/labels — usá las constantes del paquete:\n  %s",
+		t.Fatalf("labels hardcoded fuera de internal/labels|internal/pipelinelabels — usá las constantes del paquete:\n  %s",
 			strings.Join(violations, "\n  "))
 	}
 }

@@ -657,12 +657,37 @@ func reclassifyIssue(ref string, issue *Issue, log *output.Logger) error {
 // gateBasic valida las precondiciones: open + ct:plan + NO está más allá
 // de che:idea (planning/plan/executing/executed/validating/validated/
 // closing/closed → el issue ya avanzó en el pipeline, explore no aplica).
+//
+// También rechaza issues con labels del modelo viejo (`che:idea`,
+// `che:plan`, …): el flow migrado a v2 escribe `che:state:*` y no sabe
+// hacer migración in-place del label viejo, así que dejarlo correr
+// produciría un estado mixto (v1 + v2 simultáneos) ilegal en ambas
+// máquinas. La migración de repos vivos vive en `migrate-labels-v2`
+// (subcomando dedicado, fuera del scope de PR6b).
 func gateBasic(i *Issue) error {
 	if i.State != "OPEN" {
 		return fmt.Errorf("issue #%d is closed", i.Number)
 	}
 	if !i.HasLabel(labels.CtPlan) {
 		return fmt.Errorf("issue #%d is missing label ct:plan (not created by `che idea`?)", i.Number)
+	}
+	// Detectar labels v1 (modelo viejo) antes de avanzar — si el repo
+	// no corrió migrate-labels-v2, mezclar v1+v2 deja al issue en estado
+	// inconsistente.
+	for _, v1 := range []string{
+		labels.CheIdea,
+		labels.ChePlanning,
+		labels.ChePlan,
+		labels.CheExecuting,
+		labels.CheExecuted,
+		labels.CheValidating,
+		labels.CheValidated,
+		labels.CheClosing,
+		labels.CheClosed,
+	} {
+		if i.HasLabel(v1) {
+			return fmt.Errorf("issue #%d tiene labels v1 (%s); este flow opera sobre el modelo v2 (`che:state:*`). Corré `migrate-labels-v2` (cuando exista) antes de explorar, o ajustá los labels a mano", i.Number, v1)
+		}
 	}
 	for _, beyond := range []string{
 		pipelinelabels.StateApplyingExplore,

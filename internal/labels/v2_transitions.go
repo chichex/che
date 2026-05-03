@@ -1,3 +1,7 @@
+// REMOVE IN PR6c — este archivo entero (shim de coexistencia v1↔v2)
+// se elimina cuando todos los flows estén migrados al modelo v2 y se
+// borren las constantes viejas + 21 keys viejas en validTransitions.
+//
 // v2_transitions.go: shim de coexistencia entre el modelo viejo (9
 // estados `che:idea`…`che:closed`) y el modelo v2 derivado del pipeline
 // declarativo (`internal/pipelinelabels`).
@@ -24,7 +28,61 @@
 // fuera de este paquete (subcomando dedicado, fuera del scope de PR6b).
 package labels
 
-import "github.com/chichex/che/internal/pipelinelabels"
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/chichex/che/internal/pipelinelabels"
+)
+
+// ValidateNoMixedLabels reporta error si el set `labels` contiene
+// simultáneamente labels del modelo viejo (`che:idea`/`che:plan`/...) y del
+// modelo v2 (`che:state:*`/`che:state:applying:*`). Durante PR6b/PR6c los
+// flows migrados solo deberían operar sobre issues con labels v2; mezclar
+// con v1 es síntoma de un repo que no corrió `migrate-labels-v2` (futuro
+// feature) o de un flow no migrado pisando el estado.
+//
+// Ignora labels que no son `che:*` o que sí son `che:*` pero no pertenecen
+// a ninguna de las dos máquinas (p.ej. `che:locked`, `ct:plan`, `type:*`).
+//
+// Returns nil si todos los labels che:state:* son v2-only o todos los
+// che:* son v1-only (o si no hay ninguno de los dos). El error lista los
+// labels que mezclan, ordenados, para que el mensaje sea estable.
+//
+// REMOVE IN PR6c — junto con el shim, este helper desaparece: post-PR6c
+// el modelo viejo ya no existe y la mezcla es imposible.
+func ValidateNoMixedLabels(labels []string) error {
+	v1Set := map[string]bool{
+		CheIdea:       true,
+		ChePlanning:   true,
+		ChePlan:       true,
+		CheExecuting:  true,
+		CheExecuted:   true,
+		CheValidating: true,
+		CheValidated:  true,
+		CheClosing:    true,
+		CheClosed:     true,
+	}
+	var v1Found, v2Found []string
+	for _, l := range labels {
+		if v1Set[l] {
+			v1Found = append(v1Found, l)
+			continue
+		}
+		// Cualquier prefix `che:state:` o `che:state:applying:` es v2.
+		if strings.HasPrefix(l, pipelinelabels.PrefixState) {
+			v2Found = append(v2Found, l)
+		}
+	}
+	if len(v1Found) > 0 && len(v2Found) > 0 {
+		sort.Strings(v1Found)
+		sort.Strings(v2Found)
+		return fmt.Errorf("labels v1 (%s) y v2 (%s) presentes simultáneamente — corré `migrate-labels-v2` (cuando exista) o limpiá a mano",
+			strings.Join(v1Found, ","), strings.Join(v2Found, ","))
+	}
+	return nil
+}
 
 // init registra las 21 transiciones v2 en el mismo mapa que las viejas.
 // Usamos init() en lugar de un literal de mapa para que la lectura del

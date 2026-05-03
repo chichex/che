@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chichex/che/internal/pipelinelabels"
 	"github.com/chichex/che/internal/plan"
 )
 
@@ -177,7 +178,8 @@ func TestGateBasic(t *testing.T) {
 		{
 			name: "ok",
 			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
-				{Name: "ct:plan"}, {Name: "che:idea"},
+				// Post-PR6b: el path feliz arranca con label v2.
+				{Name: "ct:plan"}, {Name: pipelinelabels.StateIdea},
 			}},
 			wantErr: "",
 		},
@@ -188,7 +190,7 @@ func TestGateBasic(t *testing.T) {
 		},
 		{
 			name:    "missing ct:plan",
-			issue:   Issue{Number: 1, State: "OPEN", Labels: []Label{{Name: "che:idea"}}},
+			issue:   Issue{Number: 1, State: "OPEN", Labels: []Label{{Name: pipelinelabels.StateIdea}}},
 			wantErr: "ct:plan",
 		},
 		{
@@ -199,6 +201,24 @@ func TestGateBasic(t *testing.T) {
 				{Name: "ct:plan"}, {Name: "che:state:explore"},
 			}},
 			wantErr: "ya avanzó en el pipeline",
+		},
+		{
+			name: "rechaza labels v1 viejos (che:idea) con ct:plan",
+			// Repo no migrado a v2: el issue trae solo `che:idea` (modelo
+			// viejo). Si el gate aceptara este caso, el Apply siguiente
+			// dejaría labels v1+v2 mezclados — por eso rechazamos con
+			// mensaje claro pidiendo `migrate-labels-v2`.
+			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
+				{Name: "ct:plan"}, {Name: "che:idea"},
+			}},
+			wantErr: "labels v1",
+		},
+		{
+			name: "rechaza labels v1 viejos (che:plan)",
+			issue: Issue{Number: 1, State: "OPEN", Labels: []Label{
+				{Name: "ct:plan"}, {Name: "che:plan"},
+			}},
+			wantErr: "labels v1",
 		},
 	}
 	for _, c := range cases {
