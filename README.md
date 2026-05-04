@@ -57,6 +57,36 @@ La TUI y los subcomandos comparten el mismo motor; los subcomandos siguen existi
 | `che doctor` | — | Chequea entorno (gh auth, CLIs de agentes en PATH, etc.). |
 | `che upgrade` | — | Actualiza che a la última versión publicada. |
 
+## Pipelines Configurables
+
+`che` puede correr pipelines declarativos por repo. Cada pipeline vive en `.che/pipelines/<name>.json` y `.che/pipelines.config.json` define el default activo.
+
+Quickstart:
+
+```sh
+# A. Usar el built-in sin configurar nada
+che pipeline simulate
+
+# B. Materializar y editar un pipeline local
+che pipeline new default
+che pipeline use default
+che dash
+
+# C. Crear uno desde wizard y correrlo desde un step puntual
+che pipeline create fast
+che run --pipeline fast --from execute --input "fix issue #123"
+```
+
+Ejemplos canónicos para copiar o adaptar: [`schemas/examples/default.json`](./schemas/examples/default.json), [`fast.json`](./schemas/examples/fast.json), [`thorough.json`](./schemas/examples/thorough.json), [`with-entry.json`](./schemas/examples/with-entry.json), [`pr-only.json`](./schemas/examples/pr-only.json). El schema para autocomplete está en [`schemas/pipeline.json`](./schemas/pipeline.json).
+
+Reglas operativas:
+
+- Resolución: `--pipeline` gana sobre `.che/pipelines.config.json`; sin ambos, corre el built-in.
+- `entry` es opcional; puede emitir `[goto: step]`, `[next]` o `[stop]` antes del primer step.
+- `--from <step>` bypassa el entry y reanuda desde ese step.
+- Los saltos viven en markers de agentes (`[goto: execute]`), no en el JSON.
+- `aggregator` sólo resuelve conflictos cuando hay varios agentes: `majority`, `unanimous` o `first_blocker`.
+
 ## Pre-conditions globales
 
 - Estar parado en un repo con remote de GitHub.

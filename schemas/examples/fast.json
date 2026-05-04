@@ -1,0 +1,21 @@
+{
+  "$schema": "../pipeline.json",
+  "version": 1,
+  "steps": [
+    {
+      "name": "explore",
+      "agents": ["claude-opus"],
+      "_comment": "Plan corto para cambios de bajo riesgo."
+    },
+    {
+      "name": "execute",
+      "agents": ["claude-opus"],
+      "_comment": "Implementa sin reviewers paralelos."
+    },
+    {
+      "name": "validate_pr",
+      "agents": ["claude-opus"],
+      "_comment": "Sanity check final con un solo agente."
+    }
+  ]
+}

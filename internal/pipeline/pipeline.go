@@ -22,6 +22,11 @@ const CurrentVersion = 1
 // archivo `.che/pipelines/<name>.json`. El nombre del pipeline no vive en
 // la struct: lo provee el filename.
 type Pipeline struct {
+	// Schema es opcional y existe sólo para tooling de editores. El loader lo
+	// ignora en runtime, pero debe aceptarlo porque schemas/pipeline.json lo
+	// documenta como forma recomendada para autocomplete.
+	Schema string `json:"$schema,omitempty"`
+
 	// Version siempre debe ser CurrentVersion en v1. El loader rechaza
 	// otras versiones; mantener la verificación explícita en cada llamada
 	// permite mensajes de error puntuales.
