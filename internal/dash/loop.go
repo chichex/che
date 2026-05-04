@@ -67,6 +67,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/chichex/che/internal/pipelinelabels"
 )
 
 // LoopCap es el número máximo de dispatches automáticos + manuales que el
@@ -583,7 +585,45 @@ func decodeDynamicRunFlow(flow string) (dynamicRunFlow, bool) {
 	}
 }
 
-func nextPipelineDispatch(e Entity, steps []string, rounds int) (flow string, targetRef int, reason string) {
+func dynamicRulesForStateStep(e Entity) []LoopRule {
+	switch e.StateStep {
+	case pipelinelabels.StepIdea:
+		if e.Kind == KindIssue {
+			return []LoopRule{RuleExploreIdea}
+		}
+	case pipelinelabels.StepExplore:
+		if e.Kind == KindIssue {
+			return []LoopRule{RuleValidatePlan, RuleExecuteRaw}
+		}
+	case pipelinelabels.StepExecute:
+		if e.PRNumber > 0 {
+			return []LoopRule{RuleValidatePR}
+		}
+	case pipelinelabels.StepValidatePR:
+		if e.Kind == KindFused || e.Kind == KindPR {
+			return []LoopRule{RuleIteratePR}
+		}
+		if e.Kind == KindIssue {
+			return []LoopRule{RuleIteratePlan, RuleExecutePlan}
+		}
+	}
+	return nil
+}
+
+func dynamicRuleEnabled(e Entity, rules map[LoopRule]bool) (bool, string) {
+	dynamicRules := dynamicRulesForStateStep(e)
+	if len(dynamicRules) == 0 {
+		return false, "no-dynamic-rule-for-step"
+	}
+	for _, rule := range dynamicRules {
+		if rules[rule] {
+			return true, "rule:" + string(rule)
+		}
+	}
+	return false, "dynamic-rule-disabled"
+}
+
+func nextPipelineDispatch(e Entity, steps []string, rules map[LoopRule]bool, rounds int) (flow string, targetRef int, reason string) {
 	if e.StateStep == "" {
 		return "", 0, "no-pipeline-state"
 	}
@@ -605,6 +645,9 @@ func nextPipelineDispatch(e Entity, steps []string, rounds int) (flow string, ta
 		}
 		if i+1 >= len(steps) {
 			return "", 0, "pipeline-complete"
+		}
+		if ok, reason := dynamicRuleEnabled(e, rules); !ok {
+			return "", 0, reason
 		}
 		// Dynamic verdict handling lives in the pipeline agents/markers: the dash
 		// only resumes from the current StateStep and lets `che run --auto` decide
@@ -749,7 +792,7 @@ func (s *Server) runTick() int {
 		var reason string
 		usedPipeline := usesPipeline(e, steps)
 		if usedPipeline {
-			flow, targetRef, reason = nextPipelineDispatch(e, steps, rounds)
+			flow, targetRef, reason = nextPipelineDispatch(e, steps, rules, rounds)
 		} else {
 			flow, targetRef, reason = nextDispatch(e, rules, rounds)
 		}
@@ -763,6 +806,10 @@ func (s *Server) runTick() int {
 			case "pipeline-complete":
 				if !s.loop.markGateNotified(key, "pipeline", reason+":"+e.StateStep) {
 					fmt.Fprintf(os.Stderr, "dash auto-loop: pipeline complete for %s at step %s — stop\n", entityRef(e), e.StateStep)
+				}
+			case "no-dynamic-rule-for-step", "dynamic-rule-disabled":
+				if !s.loop.markGateNotified(key, "pipeline", reason+":"+e.StateStep) {
+					fmt.Fprintf(os.Stderr, "dash auto-loop: dynamic skip for %s — %s (step=%s)\n", entityRef(e), reason, e.StateStep)
 				}
 			}
 		}
