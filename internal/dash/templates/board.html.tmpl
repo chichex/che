@@ -72,10 +72,11 @@
               <div class="card-title">{{if .PRTitle}}{{.PRTitle}}{{else}}{{.IssueTitle}}{{end}}</div>
               <div class="card-chips">
                 {{if eq .Status "adopt"}}<span class="chip chip-orange" title="PR con close-keyword a un issue sin labels che:* — adoptable desde acá">adopt</span>{{end}}
+                {{if .StateStep}}<span class="chip chip-cyan">{{if .StateApplying}}applying:{{end}}{{.StateStep}}</span>{{end}}
                 {{if .PRVerdict}}<span class="chip {{verdictChipClass .PRVerdict}}">validated:{{.PRVerdict}}</span>{{end}}
                 {{if checksLabel . }}<span class="chip {{checksChipClass .}}">{{checksLabel .}}</span>{{end}}
                 {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
-                {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+                {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{displayFlow .RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
                 {{if .CapReached}}<span class="chip chip-cap" title="auto-loop detenido: alcanzó el cap de {{.RunMax}} rondas. Re-corré che manualmente para seguir.">⛔ cap {{.RunMax}}/{{.RunMax}}</span>{{end}}
               </div>
             {{else if eq .Kind 2}}
@@ -87,8 +88,9 @@
               <div class="card-title">{{.PRTitle}}</div>
               <div class="card-chips">
                 <span class="chip chip-orange" title="PR sin close-keyword — adoptable desde acá (validate / close)">adopt</span>
+                {{if .StateStep}}<span class="chip chip-cyan">{{if .StateApplying}}applying:{{end}}{{.StateStep}}</span>{{end}}
                 {{if checksLabel . }}<span class="chip {{checksChipClass .}}">{{checksLabel .}}</span>{{end}}
-                {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+                {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{displayFlow .RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
               </div>
             {{else}}
               {{/* Issue-only: ref del issue (clickable) + título del issue */}}
@@ -98,11 +100,12 @@
               <div class="card-title">{{.IssueTitle}}</div>
               <div class="card-chips">
                 <span class="chip chip-cyan">ct:plan</span>
+                {{if .StateStep}}<span class="chip chip-cyan">{{if .StateApplying}}applying:{{end}}{{.StateStep}}</span>{{end}}
                 {{if .Type}}<span class="chip {{typeChipClass .Type}}">type:{{.Type}}</span>{{end}}
                 {{if .Size}}<span class="chip">size:{{.Size}}</span>{{end}}
                 {{if .PlanVerdict}}<span class="chip {{verdictChipClass .PlanVerdict}}">plan-validated:{{.PlanVerdict}}</span>{{end}}
                 {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
-                {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+                {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{displayFlow .RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
                 {{if .CapReached}}<span class="chip chip-cap" title="auto-loop detenido: alcanzó el cap de {{.RunMax}} rondas. Re-corré che manualmente para seguir.">⛔ cap {{.RunMax}}/{{.RunMax}}</span>{{end}}
               </div>
             {{end}}
@@ -124,11 +127,11 @@
      auto-loop salen como OOB swaps — HTMX los aplica aunque el target
      principal sea outerHTML. El flag adopt se propaga al hx-get para que
      el toggle del header no se pierda entre polls. --col-count ajusta el
-     grid-template (9 columnas default, 10 con adopt). */}}
+     grid-template al pipeline activo. */}}
 {{template "status-chip" .}}
 {{template "auto-loop-toggle" .Loop}}
 <div id="dash-board" class="dash-board"
-     style="--col-count: {{if .Adopt}}10{{else}}9{{end}};"
+     style="--col-count: {{.ColCount}};"
      hx-get="/board{{if .Adopt}}?adopt=1{{end}}"
      hx-trigger="every {{.NextPollSec}}s"
      hx-swap="outerHTML">

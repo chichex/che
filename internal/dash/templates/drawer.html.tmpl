@@ -13,6 +13,34 @@
 {{/* $key es la clave canónica del routing: IssueNumber para KindIssue/Fused,
      PRNumber para KindPR (adopt sin issue linkeado). Se usa en hx-post,
      data-entity y SSE stream. Ver Entity.EntityKey. */}}
+{{define "pipeline-step-actions"}}
+  {{if .PipelineSteps}}
+    {{$key := .IssueNumber}}{{if eq .Kind 2}}{{$key = .PRNumber}}{{end}}
+    <div class="drawer-meta pipeline-meta">
+      <dt>pipeline</dt><dd>steps del pipeline activo; el step actual queda habilitado para reanudar con <code>che run --auto --from</code></dd>
+      {{range .PipelineSteps}}
+        <dt>{{if .Current}}actual{{else}}step{{end}}</dt>
+        <dd><code>{{.Name}}</code>{{if .Applying}} · applying{{end}}{{if .Agents}} · agents: {{joinStrings .Agents ", "}}{{end}}{{if .Aggregator}} · {{.Aggregator}}{{end}}{{if .Comment}} · {{.Comment}}{{end}}</dd>
+      {{end}}
+    </div>
+    <div class="drawer-actions pipeline-actions">
+      {{range .PipelineSteps}}
+        {{$btn := flowBtnState .Flow $.RunningFlow $.Gates (printf "run --from %s" .Name)}}
+        <button class="btn {{if .Current}}primary{{else}}ghost{{end}}"
+                hx-post="/action/run/{{.Name}}/{{$key}}"
+                hx-target="#modal-slot"
+                hx-swap="innerHTML"
+                {{if $btn.Disabled}}disabled{{end}} title="{{$btn.Title}}">{{.Name}}</button>
+      {{end}}
+      <span class="needs-human-hint" style="color:var(--muted); font-size: 11px; padding: 6px 0;">manual: elegí agentes desde <code>che run --manual --from &lt;step&gt;</code></span>
+    </div>
+    {{if not .RunningFlow}}
+      <div class="drawer-blocked-reasons">
+        {{range .PipelineSteps}}{{if not .Gate.Available}}<div class="reason"><span class="flow">{{.Name}}</span> ⛔ {{.Gate.Reason}}</div>{{end}}{{end}}
+      </div>
+    {{end}}
+  {{end}}
+{{end}}
 {{$key := .IssueNumber}}{{if eq .Kind 2}}{{$key = .PRNumber}}{{end}}
 <div class="modal-backdrop">
 <div class="modal" data-entity="{{$key}}" data-tab="pr">
@@ -45,11 +73,13 @@
         {{if checksLabel .Entity }}<span class="chip {{checksChipClass .Entity}}">{{checksLabel .Entity}}</span>{{end}}
         {{if .PRVerdict}}<span class="chip {{verdictChipClass .PRVerdict}}">validated:{{.PRVerdict}}</span>{{end}}
         {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
-        {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+        {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{displayFlow .RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
         {{if and .RunningFlow .Auto}}<span class="chip chip-magenta" title="disparado por el auto-loop engine">auto</span>{{end}}
         {{if .CapReached}}<span class="chip chip-cap" title="auto-loop detenido: alcanzó el cap de {{.RunMax}} rondas. Re-corré che manualmente para seguir.">⛔ cap {{.RunMax}}/{{.RunMax}}</span>{{end}}
       </div>
     </div>
+
+    {{template "pipeline-step-actions" .}}
 
     <div class="drawer-actions">
       {{/* Botones por Status (espejo del bloque fused, líneas 161+):
@@ -109,7 +139,7 @@
 
     <div class="drawer-logs">
       <div class="drawer-logs-hdr">
-        <span><b>stream</b>{{if .RunningFlow}} · claude {{.RunningFlow}} · run {{.RunIter}}{{end}}</span>
+        <span><b>stream</b>{{if .RunningFlow}} · claude {{displayFlow .RunningFlow}} · run {{.RunIter}}{{end}}</span>
         <div class="ctl">
           <span class="on">● auto-scroll</span>
           <span>pause</span>
@@ -160,7 +190,7 @@
                gracias al embedding. */}}
           {{if checksLabel .Entity }}<span class="chip {{checksChipClass .Entity}}">{{checksLabel .Entity}}</span>{{end}}
           {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
-          {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+          {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{displayFlow .RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
           {{if and .RunningFlow .Auto}}<span class="chip chip-magenta" title="disparado por el auto-loop engine">auto</span>{{end}}
           {{if .CapReached}}<span class="chip chip-cap" title="auto-loop detenido: alcanzó el cap de {{.RunMax}} rondas. Re-corré che manualmente para seguir.">⛔ cap {{.RunMax}}/{{.RunMax}}</span>{{end}}
         </div>
@@ -180,6 +210,8 @@
         {{end}}
         {{if .PRVerdict}}<dt>verdict</dt><dd style="color:{{verdictColor .PRVerdict}}">validated:{{.PRVerdict}}</dd>{{end}}
       </div>
+
+      {{template "pipeline-step-actions" .}}
 
       <div class="drawer-actions">
         {{/* Botones fire-and-forget: hx-post lanza el subcomando y swapea
@@ -255,7 +287,7 @@
 
       <div class="drawer-logs">
         <div class="drawer-logs-hdr">
-          <span><b>stream</b>{{if .RunningFlow}} · claude {{.RunningFlow}} · run {{.RunIter}}{{end}}</span>
+          <span><b>stream</b>{{if .RunningFlow}} · claude {{displayFlow .RunningFlow}} · run {{.RunIter}}{{end}}</span>
           <div class="ctl">
             <span class="on">● auto-scroll</span>
             <span>pause</span>
@@ -338,7 +370,7 @@
         {{if .Size}}<span class="chip">size:{{.Size}}</span>{{end}}
         {{if .PlanVerdict}}<span class="chip {{verdictChipClass .PlanVerdict}}">plan-validated:{{.PlanVerdict}}</span>{{end}}
         {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
-        {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{.RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
+        {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{displayFlow .RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
         {{if and .RunningFlow .Auto}}<span class="chip chip-magenta" title="disparado por el auto-loop engine">auto</span>{{end}}
         {{if .CapReached}}<span class="chip chip-cap" title="auto-loop detenido: alcanzó el cap de {{.RunMax}} rondas. Re-corré che manualmente para seguir.">⛔ cap {{.RunMax}}/{{.RunMax}}</span>{{end}}
       </div>
@@ -350,6 +382,8 @@
       {{if .NextAction}}<dt>next</dt><dd>{{.NextAction}}</dd>{{end}}
       {{if .PlanVerdict}}<dt>verdict</dt><dd style="color:{{verdictColor .PlanVerdict}}">plan-validated:{{.PlanVerdict}}</dd>{{end}}
     </div>
+
+    {{template "pipeline-step-actions" .}}
 
     <div class="drawer-actions">
       {{/* Issue-only: botones varían por Status. flowBtnState consulta gates
@@ -476,7 +510,7 @@
 
     <div class="drawer-logs">
       <div class="drawer-logs-hdr">
-        <span><b>stream</b>{{if .RunningFlow}} · claude {{.RunningFlow}} · run {{.RunIter}}{{end}}</span>
+        <span><b>stream</b>{{if .RunningFlow}} · claude {{displayFlow .RunningFlow}} · run {{.RunIter}}{{end}}</span>
         <div class="ctl">
           <span class="on">● auto-scroll</span>
           <span>pause</span>

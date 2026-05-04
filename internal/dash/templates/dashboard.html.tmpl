@@ -946,9 +946,9 @@
          (con id=dash-board del partial) tiene solo "every NextPollSec s".
          El polling es adaptivo: idle → PollInterval, hot (hay flows locales
          en curso) → hotPollSec. Ver buildData.NextPollSec.
-         --col-count: adopt OFF → 9 columnas, adopt ON → 10. */}}
+         --col-count sigue la cantidad de columnas del pipeline activo. */}}
     <div id="dash-board" class="dash-board"
-         style="--col-count: {{if .Adopt}}10{{else}}9{{end}};"
+         style="--col-count: {{.ColCount}};"
          hx-get="/board{{if .Adopt}}?adopt=1{{end}}"
          hx-trigger="load delay:200ms, every {{.NextPollSec}}s"
          hx-swap="outerHTML">

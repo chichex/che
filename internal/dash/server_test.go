@@ -1,6 +1,7 @@
 package dash
 
 import (
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/chichex/che/internal/pipeline"
 )
 
 // TestListenWithFallback_PicksNextWhenBusy: motivación del cambio — correr
@@ -1929,6 +1932,247 @@ func TestDrawerKindPR_PostAdoptValidated(t *testing.T) {
 	if strings.Contains(got, `>adopt</span>`) {
 		t.Errorf("KindPR validated drawer: chip 'adopt' no debería aparecer post-adopt")
 	}
+}
+
+func TestBuildData_CustomPipelineUsesStepColumns(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build", IssueTitle: "compile"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{
+		{Name: "spec", Agents: []string{"claude-sonnet"}},
+		{Name: "build", Agents: []string{"claude-opus"}},
+		{Name: "ship", Agents: []string{"claude-haiku"}},
+	}}
+
+	data := s.buildData(false)
+	if data.ColCount != 3 {
+		t.Fatalf("ColCount: got %d want 3", data.ColCount)
+	}
+	want := []string{"spec", "build", "ship"}
+	for i, key := range want {
+		if data.Columns[i].Key != key {
+			t.Fatalf("Columns[%d].Key: got %q want %q (all=%+v)", i, data.Columns[i].Key, key, data.Columns)
+		}
+	}
+	if len(data.Columns[1].Entities) != 1 || data.Columns[1].Entities[0].IssueNumber != 42 {
+		t.Fatalf("build column entities: got %+v", data.Columns[1].Entities)
+	}
+}
+
+func TestDrawer_CustomPipelineRendersStepActions(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		NWO:    "demo/che",
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build", IssueTitle: "compile"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{
+		{Name: "spec", Agents: []string{"claude-sonnet"}},
+		{Name: "build", Agents: []string{"claude-opus", "claude-haiku"}, Aggregator: pipeline.AggregatorFirstBlocker, Comment: "compile checks"},
+	}}
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/drawer/42")
+	if err != nil {
+		t.Fatalf("GET drawer: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	got := string(body)
+	for _, want := range []string{
+		`hx-post="/action/run/build/42"`,
+		`claude-opus, claude-haiku`,
+		`compile checks`,
+		`che run --manual --from &lt;step&gt;`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("drawer missing %q\nbody=%s", want, got)
+		}
+	}
+}
+
+func TestActionRunFrom_CustomPipelineCallsDynamicRun(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		NWO:    "demo/che",
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build", IssueTitle: "compile"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{{Name: "build", Agents: []string{"claude-opus"}}}}
+	fr := &fakeRunner{}
+	s.runAction = fr.run
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/run/build/42", "", nil)
+	if err != nil {
+		t.Fatalf("POST run/build: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	got := fr.last()
+	if got.Flow != "run#:build" || got.TargetRef != 42 || got.EntityKey != 42 {
+		t.Fatalf("runner call: got %+v want flow=run#:build target=42 key=42", got)
+	}
+}
+
+func TestActionRunFrom_RejectsUnknownStep(t *testing.T) {
+	_, fr, ts := newCustomPipelineRunServer(t, Entity{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build"})
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/run/ship/42", "", nil)
+	if err != nil {
+		t.Fatalf("POST run/ship: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "step ship no existe") {
+		t.Fatalf("body: got %q want unknown-step reason", body)
+	}
+	if fr.count() != 0 {
+		t.Fatalf("runner calls: got %d want 0", fr.count())
+	}
+}
+
+func TestActionRunFrom_RejectsNonCurrentStep(t *testing.T) {
+	_, fr, ts := newCustomPipelineRunServer(t, Entity{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build"})
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/run/spec/42", "", nil)
+	if err != nil {
+		t.Fatalf("POST run/spec: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "run dinámico debe reanudar desde build, no spec") {
+		t.Fatalf("body: got %q want current-step reason", body)
+	}
+	if fr.count() != 0 {
+		t.Fatalf("runner calls: got %d want 0", fr.count())
+	}
+}
+
+func TestActionRunFrom_NotFound(t *testing.T) {
+	_, fr, ts := newCustomPipelineRunServer(t, Entity{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build"})
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/run/build/99", "", nil)
+	if err != nil {
+		t.Fatalf("POST run/build/99: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status: got %d want 404", resp.StatusCode)
+	}
+	if fr.count() != 0 {
+		t.Fatalf("runner calls: got %d want 0", fr.count())
+	}
+}
+
+func TestActionRunFrom_RejectsRunningEntity(t *testing.T) {
+	_, fr, ts := newCustomPipelineRunServer(t, Entity{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build", RunningFlow: "run#:build"})
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/run/build/42", "", nil)
+	if err != nil {
+		t.Fatalf("POST run/build: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "flow already running") {
+		t.Fatalf("body: got %q want already-running reason", body)
+	}
+	if fr.count() != 0 {
+		t.Fatalf("runner calls: got %d want 0", fr.count())
+	}
+}
+
+func TestActionRunFrom_RunActionFailureClearsRunning(t *testing.T) {
+	s, fr, ts := newCustomPipelineRunServer(t, Entity{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build"})
+	fr.err = errors.New("boom")
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/run/build/42", "", nil)
+	if err != nil {
+		t.Fatalf("POST run/build: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 body=%s", resp.StatusCode, body)
+	}
+	if fr.count() != 1 {
+		t.Fatalf("runner calls: got %d want 1", fr.count())
+	}
+	s.mu.Lock()
+	_, stillRunning := s.running[42]
+	s.mu.Unlock()
+	if stillRunning {
+		t.Fatalf("running overlay for entity 42 was not cleared after spawn failure")
+	}
+}
+
+func TestActionRunFrom_RejectsLockedEntity(t *testing.T) {
+	_, fr, ts := newCustomPipelineRunServer(t, Entity{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build", Locked: true})
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/run/build/42", "", nil)
+	if err != nil {
+		t.Fatalf("POST run/build: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status: got %d want 409 body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "locked") {
+		t.Fatalf("body: got %q want locked reason", body)
+	}
+	if fr.count() != 0 {
+		t.Fatalf("runner calls: got %d want 0", fr.count())
+	}
+}
+
+func TestIsDefaultPipeline_ConsidersAgentChangesCustom(t *testing.T) {
+	p := pipeline.Default()
+	p.Steps[0].Agents = []string{"claude-sonnet"}
+	if isDefaultPipeline(p) {
+		t.Fatalf("pipeline with default step names but changed agents should be treated as custom")
+	}
+}
+
+func newCustomPipelineRunServer(t *testing.T, e Entity) (*Server, *fakeRunner, *httptest.Server) {
+	t.Helper()
+	src := &fixedSource{snap: Snapshot{LastOK: time.Now(), NWO: "demo/che", Entities: []Entity{e}}}
+	s := NewServer(src, "repo", 15)
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{
+		{Name: "spec", Agents: []string{"claude-sonnet"}},
+		{Name: "build", Agents: []string{"claude-opus"}},
+	}}
+	fr := &fakeRunner{}
+	s.runAction = fr.run
+	ts := httptest.NewServer(s)
+	return s, fr, ts
 }
 
 // TestColumn_Adopt: Entity.Column() devuelve "adopt" cuando Status=="adopt".

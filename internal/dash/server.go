@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -370,6 +371,8 @@ type pageData struct {
 	Columns      []columnData
 	Snapshot     Snapshot
 	PollInterval int
+	Pipeline     pipeline.Pipeline
+	ColCount     int
 	// NextPollSec es el intervalo que el partial board-partial va a pasar
 	// al hx-trigger del wrapper. Adaptivo: cuando hay flows locales en curso
 	// (s.running no vacío) bajamos a hotPollSec; en idle usamos PollInterval.
@@ -407,8 +410,20 @@ const hotPollSec = 3
 // humano — se refleja como chip "auto" en el drawer.
 type drawerData struct {
 	Entity
-	NWO  string
-	Auto bool
+	NWO           string
+	Auto          bool
+	PipelineSteps []drawerStepData
+}
+
+type drawerStepData struct {
+	Name       string
+	Agents     []string
+	Aggregator pipeline.Aggregator
+	Comment    string
+	Current    bool
+	Applying   bool
+	Flow       string
+	Gate       FlowGate
 }
 
 // columnData representa una columna del Kanban con sus entidades ya
@@ -416,7 +431,7 @@ type drawerData struct {
 // trabajo activo en una columna transient (RunningFlow != "" en alguna
 // entidad de planning, executing, validating o closing).
 type columnData struct {
-	Key      string // 1 de los 9: idea | planning | plan | executing | executed | validating | validated | closing | closed
+	Key      string
 	Title    string
 	Hot      bool
 	Entities []Entity
@@ -475,6 +490,58 @@ func groupByColumn(entities []Entity) []columnData {
 		})
 	}
 	return out
+}
+
+func groupByPipelineColumn(entities []Entity, p pipeline.Pipeline) []columnData {
+	if len(p.Steps) == 0 || isDefaultPipeline(p) {
+		return groupByColumn(entities)
+	}
+	stepSet := make(map[string]bool, len(p.Steps))
+	for _, step := range p.Steps {
+		stepSet[step.Name] = true
+	}
+	buckets := map[string][]Entity{}
+	hot := map[string]bool{}
+	for _, e := range entities {
+		col := e.Column()
+		if e.StateStep != "" && stepSet[e.StateStep] {
+			col = e.StateStep
+		}
+		buckets[col] = append(buckets[col], e)
+		if e.RunningFlow != "" || e.StateApplying {
+			hot[col] = true
+		}
+	}
+	out := make([]columnData, 0, len(p.Steps)+1)
+	if len(buckets["adopt"]) > 0 {
+		out = append(out, columnData{Key: "adopt", Title: "adopt", Hot: hot["adopt"], Entities: buckets["adopt"]})
+	}
+	for _, step := range p.Steps {
+		out = append(out, columnData{Key: step.Name, Title: step.Name, Hot: hot[step.Name], Entities: buckets[step.Name]})
+	}
+	for _, c := range columnsOrder {
+		if c.Key == "adopt" || stepSet[c.Key] || len(buckets[c.Key]) == 0 {
+			continue
+		}
+		out = append(out, columnData{Key: c.Key, Title: c.Title, Hot: hot[c.Key], Entities: buckets[c.Key]})
+	}
+	return out
+}
+
+func isDefaultPipeline(p pipeline.Pipeline) bool {
+	def := pipeline.Default()
+	if len(p.Steps) != len(def.Steps) {
+		return false
+	}
+	for i := range p.Steps {
+		if p.Steps[i].Name != def.Steps[i].Name ||
+			p.Steps[i].Aggregator != def.Steps[i].Aggregator ||
+			p.Steps[i].Comment != def.Steps[i].Comment ||
+			!slices.Equal(p.Steps[i].Agents, def.Steps[i].Agents) {
+			return false
+		}
+	}
+	return true
 }
 
 // templateFuncs son las funciones expuestas a los templates. Son helpers de
@@ -588,8 +655,17 @@ func (s *Server) templateFuncs() template.FuncMap {
 		// gateOf devuelve el FlowGate para un flow puntual con un fallback
 		// "Available=true" si gates es nil (no rompe templates pre-gates,
 		// p.ej. tests que arman drawerData a mano).
-		"gateOf": gateOf,
+		"gateOf":      gateOf,
+		"displayFlow": displayFlow,
+		"joinStrings": strings.Join,
 	}
+}
+
+func displayFlow(flow string) string {
+	if run, ok := decodeDynamicRunFlow(flow); ok {
+		return "run --from " + run.Step
+	}
+	return flow
 }
 
 // FlowBtnState es el resultado de resolver el estado UI de un botón de
@@ -729,6 +805,7 @@ func errShort(err error) string {
 // snapshot antes de agrupar — el dash se ve idéntico a pre-adopt-mode.
 // Con adopt=true, esas entities pasan y se agrupan en la columna "adopt".
 func (s *Server) buildData(adopt bool) pageData {
+	activePipeline := s.activePipeline()
 	snap := s.source.Snapshot()
 	snap.Entities = s.overlayRunning(snap.Entities)
 	if !adopt {
@@ -764,7 +841,7 @@ func (s *Server) buildData(adopt bool) pageData {
 	if hot && next > hotPollSec {
 		next = hotPollSec
 	}
-	cols := groupByColumn(snap.Entities)
+	cols := groupByPipelineColumn(snap.Entities, activePipeline)
 	if !adopt {
 		// Con el toggle OFF también dropeamos la columna "adopt" para que el
 		// board quede idéntico a como estaba pre-feature (9 columnas, no 10).
@@ -782,6 +859,8 @@ func (s *Server) buildData(adopt bool) pageData {
 		Columns:      cols,
 		Snapshot:     snap,
 		PollInterval: s.pollInterval,
+		Pipeline:     activePipeline,
+		ColCount:     len(cols),
 		NextPollSec:  next,
 		ActiveLoops:  active,
 		Version:      s.version,
@@ -801,6 +880,7 @@ func (s *Server) buildData(adopt bool) pageData {
 // Clave canónica: IssueNumber para KindIssue/KindFused, PRNumber para
 // KindPR (adopt sin issue linkeado). Ver Entity.EntityKey.
 func (s *Server) findEntity(id int) (Entity, bool) {
+	activePipeline := s.activePipeline()
 	for _, e := range s.source.Snapshot().Entities {
 		if e.EntityKey() == id {
 			s.mu.Lock()
@@ -813,10 +893,44 @@ func (s *Server) findEntity(id int) (Entity, bool) {
 			// RunningFlow per se. Si en el futuro alguna gate consulta
 			// RunningFlow, el orden ya está bien (overlay primero).
 			e.Gates = computeGates(e)
+			for _, step := range activePipeline.Steps {
+				flow := encodeDynamicRunFlow(dynamicRunFlow{Step: step.Name, PR: e.Kind == KindPR || (e.Kind == KindFused && e.PRNumber > 0)})
+				e.Gates[flow] = gatePipelineRunFrom(e, activePipeline, step.Name)
+			}
 			return e, true
 		}
 	}
 	return Entity{}, false
+}
+
+func buildDrawerSteps(e Entity, p pipeline.Pipeline) []drawerStepData {
+	if len(p.Steps) == 0 || e.StateStep == "" || isDefaultPipeline(p) {
+		return nil
+	}
+	out := make([]drawerStepData, 0, len(p.Steps))
+	for _, step := range p.Steps {
+		flow := encodeDynamicRunFlow(dynamicRunFlow{Step: step.Name, PR: e.Kind == KindPR || (e.Kind == KindFused && e.PRNumber > 0)})
+		out = append(out, drawerStepData{
+			Name:       step.Name,
+			Agents:     append([]string(nil), step.Agents...),
+			Aggregator: step.Aggregator,
+			Comment:    step.Comment,
+			Current:    step.Name == e.StateStep,
+			Applying:   step.Name == e.StateStep && e.StateApplying,
+			Flow:       flow,
+			Gate:       gatePipelineRunFrom(e, p, step.Name),
+		})
+	}
+	return out
+}
+
+func (s *Server) newDrawerData(e Entity, auto bool, p pipeline.Pipeline) drawerData {
+	return drawerData{
+		Entity:        e,
+		NWO:           s.source.Snapshot().NWO,
+		Auto:          auto,
+		PipelineSteps: buildDrawerSteps(e, p),
+	}
 }
 
 // overlayRunning aplica el estado local (s.running) sobre un slice de
@@ -1237,7 +1351,8 @@ func (s *Server) buildMux() *http.ServeMux {
 		// Wrapper drawerData: el template necesita NWO para armar URLs a GH
 		// en los refs del header; Entity pelada no lo lleva. Auto (step 6)
 		// indica si el RunningFlow fue disparado por el auto-loop engine.
-		data := drawerData{Entity: entity, NWO: s.source.Snapshot().NWO, Auto: s.isAutoRunning(id)}
+		activePipeline := s.activePipeline()
+		data := s.newDrawerData(entity, s.isAutoRunning(id), activePipeline)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		if err := s.tmpl.ExecuteTemplate(w, "drawer.html.tmpl", data); err != nil {
@@ -1258,6 +1373,58 @@ func (s *Server) buildMux() *http.ServeMux {
 	// flow se valida contra allowedFlows antes de pasarlo a exec.Command.
 	// Responde con el partial del drawer refreshado (que ahora mostrará
 	// el chip ⟳ y los botones disabled por RunningFlow != "").
+	mux.HandleFunc("POST /action/run/{step}/{id}", func(w http.ResponseWriter, r *http.Request) {
+		step := r.PathValue("step")
+		idStr := r.PathValue("id")
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			http.Error(w, "invalid id", http.StatusBadRequest)
+			return
+		}
+		entity, ok := s.findEntity(id)
+		if !ok {
+			http.Error(w, "entity not found", http.StatusNotFound)
+			return
+		}
+		activePipeline := s.activePipeline()
+		flow := encodeDynamicRunFlow(dynamicRunFlow{Step: step, PR: entity.Kind == KindPR || (entity.Kind == KindFused && entity.PRNumber > 0)})
+		// No hay allowlist constante para steps: la whitelist dinámica es el
+		// pipeline activo, validado por gatePipelineRunFrom(step ∈ p.Steps).
+		gate := gatePipelineRunFrom(entity, activePipeline, step)
+		if !gate.Available {
+			reason := gate.Reason
+			if reason == "" {
+				reason = "step no disponible para esta entity"
+			}
+			http.Error(w, reason, http.StatusConflict)
+			return
+		}
+		if _, okRes := s.markRunning(id, flow); !okRes {
+			http.Error(w, "flow already running for this entity", http.StatusConflict)
+			return
+		}
+		s.loop.incRounds(id)
+		targetRef := entity.EntityKey()
+		if run, ok := decodeDynamicRunFlow(flow); ok && run.PR {
+			targetRef = entity.PRNumber
+		}
+		if err := s.runAction(flow, targetRef, id, s.repoPath); err != nil {
+			s.clearRunning(id)
+			http.Error(w, "spawn failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.bumpSource()
+		entity.RunningFlow = flow
+		entity.Gates[flow] = gate
+		data := s.newDrawerData(entity, false, activePipeline)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		if err := s.tmpl.ExecuteTemplate(w, "drawer.html.tmpl", data); err != nil {
+			http.Error(w, "template error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+
 	mux.HandleFunc("POST /action/{flow}/{id}", func(w http.ResponseWriter, r *http.Request) {
 		flow := r.PathValue("flow")
 		if !allowedFlows[flow] {
@@ -1333,7 +1500,8 @@ func (s *Server) buildMux() *http.ServeMux {
 		// y los botones disabled sin esperar al próximo poll. Auto=false
 		// porque este dispatch vino del handler manual.
 		entity.RunningFlow = flow
-		data := drawerData{Entity: entity, NWO: s.source.Snapshot().NWO, Auto: false}
+		activePipeline := s.activePipeline()
+		data := s.newDrawerData(entity, false, activePipeline)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		if err := s.tmpl.ExecuteTemplate(w, "drawer.html.tmpl", data); err != nil {
