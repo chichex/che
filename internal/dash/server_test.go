@@ -1,11 +1,15 @@
 package dash
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2158,6 +2162,112 @@ func TestIsDefaultPipeline_ConsidersAgentChangesCustom(t *testing.T) {
 	p.Steps[0].Agents = []string{"claude-sonnet"}
 	if isDefaultPipeline(p) {
 		t.Fatalf("pipeline with default step names but changed agents should be treated as custom")
+	}
+}
+
+func TestPipelineEditor_RendersActivePipeline(t *testing.T) {
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{
+		{Name: "build", Agents: []string{"claude-opus", "claude-haiku"}, Aggregator: pipeline.AggregatorFirstBlocker, Comment: "compile"},
+	}}
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/pipeline/editor")
+	if err != nil {
+		t.Fatalf("GET editor: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	got := string(body)
+	for _, want := range []string{
+		`class="modal pipeline-editor"`,
+		`value="build"`,
+		`value="claude-opus, claude-haiku"`,
+		`first_blocker`,
+		`value="compile"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("editor missing %q\nbody=%s", want, got)
+		}
+	}
+}
+
+func TestPipelineEditor_SaveMaterializesBuiltinDefault(t *testing.T) {
+	root := t.TempDir()
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	s.pipelineRoot = root
+	s.pipeline = pipeline.Default()
+	s.pipelineName = "default"
+	s.pipelineKind = pipeline.SourceBuiltin
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	form := url.Values{}
+	form.Add("step_name", "spec")
+	form.Add("step_agents", "claude-sonnet")
+	form.Add("step_aggregator", string(pipeline.AggregatorMajority))
+	form.Add("step_comment", "write spec")
+	resp, err := http.PostForm(ts.URL+"/pipeline/editor", form)
+	if err != nil {
+		t.Fatalf("POST editor: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200 body=%s", resp.StatusCode, body)
+	}
+	path := filepath.Join(root, pipeline.PipelinesDirRel, "default.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved pipeline: %v", err)
+	}
+	var got pipeline.Pipeline
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal saved pipeline: %v", err)
+	}
+	if len(got.Steps) != 1 || got.Steps[0].Name != "spec" || got.Steps[0].Agents[0] != "claude-sonnet" {
+		t.Fatalf("saved pipeline mismatch: %+v", got)
+	}
+	cfgRaw, err := os.ReadFile(filepath.Join(root, pipeline.ConfigFileRel))
+	if err != nil {
+		t.Fatalf("read pipeline config: %v", err)
+	}
+	var cfg pipeline.Config
+	if err := json.Unmarshal(cfgRaw, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg.Default != "default" {
+		t.Fatalf("config default: got %q want default", cfg.Default)
+	}
+}
+
+func TestPipelineEditor_SaveRejectsInvalidPipeline(t *testing.T) {
+	root := t.TempDir()
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	s.pipelineRoot = root
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	form := url.Values{}
+	form.Add("step_name", "Bad Name")
+	form.Add("step_agents", "claude-sonnet")
+	form.Add("step_aggregator", string(pipeline.AggregatorMajority))
+	form.Add("step_comment", "")
+	resp, err := http.PostForm(ts.URL+"/pipeline/editor", form)
+	if err != nil {
+		t.Fatalf("POST editor: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200 body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "invalid step name") {
+		t.Fatalf("body missing validation error: %s", body)
+	}
+	if _, err := os.Stat(filepath.Join(root, pipeline.PipelinesDirRel, "default.json")); !os.IsNotExist(err) {
+		t.Fatalf("invalid pipeline should not be written, stat err=%v", err)
 	}
 }
 

@@ -128,6 +128,19 @@
      del resto. */
   .col[data-status="adopt"] .col-hdr b { color: var(--orange); }
 
+  .pipeline-editor-btn {
+    background: var(--panel);
+    border: 1px solid var(--elevated);
+    color: var(--cyan);
+    font: inherit;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 16px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .pipeline-editor-btn:hover { border-color: var(--cyan); }
+
   .auto-loop-wrap {
     position: relative;
   }
@@ -908,6 +921,43 @@
   .md img { max-width: 100%; border-radius: 4px; }
   .md input[type="checkbox"] { margin-right: 6px; }
   .md del { color: var(--muted); }
+
+  .pipeline-editor .drawer-hdr { border-bottom: 1px solid var(--elevated); }
+  .pipeline-editor-form { padding: 14px; overflow: auto; min-height: 0; }
+  .pipeline-editor-head,
+  .pipeline-editor-row {
+    display: grid;
+    grid-template-columns: 1fr 1.8fr 1.1fr 1.8fr 32px;
+    gap: 8px;
+    align-items: center;
+  }
+  .pipeline-editor-head {
+    color: var(--muted);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 6px;
+  }
+  .pipeline-editor-row { margin-bottom: 8px; }
+  .pipeline-editor-row input,
+  .pipeline-editor-row select {
+    width: 100%;
+    background: #15161b;
+    border: 1px solid var(--elevated);
+    color: var(--text);
+    border-radius: 4px;
+    font: inherit;
+    padding: 6px 8px;
+  }
+  .pipeline-editor-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+  .pipeline-editor-error,
+  .pipeline-editor-ok { margin-top: 8px; padding: 6px 8px; border-radius: 4px; font-size: 11px; }
+  .pipeline-editor-error { color: var(--red); background: rgba(255,85,85,0.1); border: 1px solid rgba(255,85,85,0.35); }
+  .pipeline-editor-ok { color: var(--green); background: rgba(80,250,123,0.1); border: 1px solid rgba(80,250,123,0.35); }
+  @media (max-width: 860px) {
+    .pipeline-editor-head { display: none; }
+    .pipeline-editor-row { grid-template-columns: 1fr; border: 1px solid var(--elevated); border-radius: 6px; padding: 8px; }
+  }
 </style>
 </head>
 <body>
@@ -927,6 +977,11 @@
       <span class="switch"></span>
       <span class="label">show untracked PRs</span>
     </label>
+    <button class="pipeline-editor-btn"
+            hx-get="/pipeline/editor"
+            hx-target="#modal-slot"
+            hx-swap="innerHTML"
+            title="editar pipeline activo">pipeline</button>
     <div class="auto-loop-wrap">
       {{template "auto-loop-toggle" .Loop}}
       <div id="loop-popover" class="loop-popover" aria-hidden="true"></div>
