@@ -85,8 +85,8 @@ built-in default. Usá --map old=new para agregar o sobreescribir mapeos en
 pipelines reorganizados.
 
 El comando imprime un preview antes de aplicar. Con --dry-run sólo imprime el
-plan sin tocar GitHub. Los labels validated:* viejos se remueven porque el
-verdict pasa a vivir en el marker/audit log del pipeline.
+plan sin tocar GitHub. No remueve validated:* ni plan-validated:*: los flows
+actuales todavía los usan como gates de iterate/close.
 
 La migración no es atómica: si GitHub falla a mitad, pueden quedar refs con
 labels mixtos. Re-correr el comando es seguro porque add/remove son
@@ -201,21 +201,15 @@ func migrationPairsForPipeline(p pipeline.Pipeline, overrides []string) ([]pipel
 
 func defaultPipelineMigrationPairs() []pipelineLabelPair {
 	return []pipelineLabelPair{
-		{Old: v1CheIdea, New: pipelinelabels.StateLabel("idea")},
-		{Old: v1ChePlanning, New: pipelinelabels.ApplyingLabel("explore")},
-		{Old: v1ChePlan, New: pipelinelabels.StateLabel("explore")},
-		{Old: v1CheExecuting, New: pipelinelabels.ApplyingLabel("execute")},
-		{Old: v1CheExecuted, New: pipelinelabels.StateLabel("execute")},
-		{Old: v1CheValidating, NewIssue: pipelinelabels.ApplyingLabel("validate_issue"), NewPR: pipelinelabels.ApplyingLabel("validate_pr")},
-		{Old: v1CheValidated, NewIssue: pipelinelabels.StateLabel("validate_issue"), NewPR: pipelinelabels.StateLabel("validate_pr")},
-		{Old: v1CheClosing, New: pipelinelabels.ApplyingLabel("close")},
-		{Old: v1CheClosed, New: pipelinelabels.StateLabel("close")},
-		{Old: labels.ValidatedApprove},
-		{Old: labels.ValidatedChangesRequested},
-		{Old: labels.ValidatedNeedsHuman},
-		{Old: labels.PlanValidatedApprove},
-		{Old: labels.PlanValidatedChangesRequested},
-		{Old: labels.PlanValidatedNeedsHuman},
+		{Old: v1CheIdea, New: pipelinelabels.StateIdea},
+		{Old: v1ChePlanning, New: pipelinelabels.StateApplyingExplore},
+		{Old: v1ChePlan, New: pipelinelabels.StateExplore},
+		{Old: v1CheExecuting, New: pipelinelabels.StateApplyingExecute},
+		{Old: v1CheExecuted, New: pipelinelabels.StateExecute},
+		{Old: v1CheValidating, NewIssue: pipelinelabels.ApplyingLabel("validate_issue"), NewPR: pipelinelabels.StateApplyingValidatePR},
+		{Old: v1CheValidated, NewIssue: pipelinelabels.StateLabel("validate_issue"), NewPR: pipelinelabels.StateValidatePR},
+		{Old: v1CheClosing, New: pipelinelabels.StateApplyingClose},
+		{Old: v1CheClosed, New: pipelinelabels.StateClose},
 	}
 }
 
@@ -271,6 +265,9 @@ func runPipelineMigrateLabels(out io.Writer, client pipelineLabelClient, pairs [
 			if err := client.RemoveLabel(ref.Number, pair.Old); err != nil {
 				return fmt.Errorf("removing %s from #%d: %w", pair.Old, ref.Number, err)
 			}
+		}
+		if deleteOld && truncated {
+			return fmt.Errorf("not deleting legacy repo label %s: search reached GitHub limit; re-run migration until it no longer warns", pair.Old)
 		}
 		if deleteOld {
 			if err := client.DeleteRepoLabel(pair.Old); err != nil {
@@ -389,7 +386,7 @@ func (ghPipelineLabelClient) SearchRefsWithLabel(name string) ([]pipelineLabelRe
 	if err != nil {
 		return nil, false, err
 	}
-	cmd := exec.Command("gh", "search", "issues", "repo:"+nwo, fmt.Sprintf("label:%q", name), "--json", "number,isPullRequest", "--limit", "1000")
+	cmd := exec.Command("gh", searchRefsWithLabelArgs(nwo, name)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, false, fmt.Errorf("gh search issues: %s", strings.TrimSpace(string(out)))
@@ -406,6 +403,10 @@ func (ghPipelineLabelClient) SearchRefsWithLabel(name string) ([]pipelineLabelRe
 		refs = append(refs, pipelineLabelRef{Number: r.Number, IsPR: r.IsPullRequest})
 	}
 	return refs, len(raw) >= 1000, nil
+}
+
+func searchRefsWithLabelArgs(repo, name string) []string {
+	return []string{"search", "issues", "repo:" + repo, fmt.Sprintf("label:%q", name), "--include-prs", "--json", "number,isPullRequest", "--limit", "1000"}
 }
 
 func (ghPipelineLabelClient) AddLabels(number int, names ...string) error {

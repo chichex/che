@@ -13,12 +13,13 @@ import (
 )
 
 type fakePipelineLabelClient struct {
-	ensured []string
-	deleted []string
-	added   map[int][]string
-	removed map[int][]string
-	labels  map[int][]string
-	search  map[string][]pipelineLabelRef
+	ensured   []string
+	deleted   []string
+	added     map[int][]string
+	removed   map[int][]string
+	labels    map[int][]string
+	search    map[string][]pipelineLabelRef
+	truncated bool
 }
 
 func (f *fakePipelineLabelClient) EnsureLabel(name string, skipExisting bool) error {
@@ -32,7 +33,7 @@ func (f *fakePipelineLabelClient) DeleteRepoLabel(name string) error {
 }
 
 func (f *fakePipelineLabelClient) SearchRefsWithLabel(name string) ([]pipelineLabelRef, bool, error) {
-	return append([]pipelineLabelRef(nil), f.search[name]...), false, nil
+	return append([]pipelineLabelRef(nil), f.search[name]...), f.truncated, nil
 }
 
 func (f *fakePipelineLabelClient) AddLabels(number int, names ...string) error {
@@ -84,21 +85,15 @@ func TestPipelineInitLabels_ExpectedLabels(t *testing.T) {
 func TestDefaultPipelineMigrationPairs(t *testing.T) {
 	pairs := defaultPipelineMigrationPairs()
 	want := []pipelineLabelPair{
-		{Old: v1CheIdea, New: pipelinelabels.StateLabel("idea")},
-		{Old: v1ChePlanning, New: pipelinelabels.ApplyingLabel("explore")},
-		{Old: v1ChePlan, New: pipelinelabels.StateLabel("explore")},
-		{Old: v1CheExecuting, New: pipelinelabels.ApplyingLabel("execute")},
-		{Old: v1CheExecuted, New: pipelinelabels.StateLabel("execute")},
-		{Old: v1CheValidating, NewIssue: pipelinelabels.ApplyingLabel("validate_issue"), NewPR: pipelinelabels.ApplyingLabel("validate_pr")},
-		{Old: v1CheValidated, NewIssue: pipelinelabels.StateLabel("validate_issue"), NewPR: pipelinelabels.StateLabel("validate_pr")},
-		{Old: v1CheClosing, New: pipelinelabels.ApplyingLabel("close")},
-		{Old: v1CheClosed, New: pipelinelabels.StateLabel("close")},
-		{Old: labels.ValidatedApprove},
-		{Old: labels.ValidatedChangesRequested},
-		{Old: labels.ValidatedNeedsHuman},
-		{Old: labels.PlanValidatedApprove},
-		{Old: labels.PlanValidatedChangesRequested},
-		{Old: labels.PlanValidatedNeedsHuman},
+		{Old: v1CheIdea, New: pipelinelabels.StateIdea},
+		{Old: v1ChePlanning, New: pipelinelabels.StateApplyingExplore},
+		{Old: v1ChePlan, New: pipelinelabels.StateExplore},
+		{Old: v1CheExecuting, New: pipelinelabels.StateApplyingExecute},
+		{Old: v1CheExecuted, New: pipelinelabels.StateExecute},
+		{Old: v1CheValidating, NewIssue: pipelinelabels.ApplyingLabel("validate_issue"), NewPR: pipelinelabels.StateApplyingValidatePR},
+		{Old: v1CheValidated, NewIssue: pipelinelabels.StateLabel("validate_issue"), NewPR: pipelinelabels.StateValidatePR},
+		{Old: v1CheClosing, New: pipelinelabels.StateApplyingClose},
+		{Old: v1CheClosed, New: pipelinelabels.StateClose},
 	}
 	if !reflect.DeepEqual(pairs, want) {
 		t.Fatalf("pairs = %#v, want %#v", pairs, want)
@@ -124,13 +119,11 @@ func TestMigrationPairsForPipeline_MapOverrideAndValidation(t *testing.T) {
 func TestRunPipelineMigrateLabels_AppliesRefsAndPreservesOldByDefault(t *testing.T) {
 	fake := &fakePipelineLabelClient{
 		search: map[string][]pipelineLabelRef{
-			v1ChePlan:               {{Number: 12}},
-			labels.ValidatedApprove: {{Number: 12}, {Number: 13}},
+			v1ChePlan: {{Number: 12}},
 		},
 	}
 	pairs := []pipelineLabelPair{
 		{Old: v1ChePlan, New: pipelinelabels.StateLabel("explore")},
-		{Old: labels.ValidatedApprove},
 	}
 	var out bytes.Buffer
 	if err := runPipelineMigrateLabels(&out, fake, pairs, false, false); err != nil {
@@ -142,7 +135,7 @@ func TestRunPipelineMigrateLabels_AppliesRefsAndPreservesOldByDefault(t *testing
 	if !reflect.DeepEqual(fake.added[12], []string{pipelinelabels.StateLabel("explore")}) {
 		t.Fatalf("added[12] = %#v", fake.added[12])
 	}
-	wantRemoved12 := []string{v1ChePlan, labels.ValidatedApprove}
+	wantRemoved12 := []string{v1ChePlan}
 	if !reflect.DeepEqual(fake.removed[12], wantRemoved12) {
 		t.Fatalf("removed[12] = %#v, want %#v", fake.removed[12], wantRemoved12)
 	}
@@ -154,6 +147,23 @@ func TestRunPipelineMigrateLabels_AppliesRefsAndPreservesOldByDefault(t *testing
 	}
 }
 
+func TestDefaultPipelineMigrationPairs_PreservesVerdictLabels(t *testing.T) {
+	for _, pair := range defaultPipelineMigrationPairs() {
+		for _, verdict := range []string{
+			labels.ValidatedApprove,
+			labels.ValidatedChangesRequested,
+			labels.ValidatedNeedsHuman,
+			labels.PlanValidatedApprove,
+			labels.PlanValidatedChangesRequested,
+			labels.PlanValidatedNeedsHuman,
+		} {
+			if pair.Old == verdict {
+				t.Fatalf("default migration should preserve runtime gate label %s", verdict)
+			}
+		}
+	}
+}
+
 func TestRunPipelineMigrateLabels_DeleteOldOptIn(t *testing.T) {
 	fake := &fakePipelineLabelClient{search: map[string][]pipelineLabelRef{v1ChePlan: {{Number: 12}}}}
 	var out bytes.Buffer
@@ -162,6 +172,24 @@ func TestRunPipelineMigrateLabels_DeleteOldOptIn(t *testing.T) {
 	}
 	if !reflect.DeepEqual(fake.deleted, []string{v1ChePlan}) {
 		t.Fatalf("deleted = %#v", fake.deleted)
+	}
+}
+
+func TestRunPipelineMigrateLabels_DeleteOldBlockedWhenTruncated(t *testing.T) {
+	fake := &fakePipelineLabelClient{
+		search:    map[string][]pipelineLabelRef{v1ChePlan: {{Number: 12}}},
+		truncated: true,
+	}
+	var out bytes.Buffer
+	err := runPipelineMigrateLabels(&out, fake, []pipelineLabelPair{{Old: v1ChePlan, New: pipelinelabels.StateExplore}}, false, true)
+	if err == nil {
+		t.Fatalf("expected truncation error")
+	}
+	if len(fake.deleted) != 0 {
+		t.Fatalf("deleted on truncated search: %#v", fake.deleted)
+	}
+	if !strings.Contains(out.String(), "warn: search for che:plan reached GitHub limit") {
+		t.Fatalf("missing truncation warning: %q", out.String())
 	}
 }
 
@@ -186,6 +214,25 @@ func TestRunPipelineMigrateLabels_ValidateMappingUsesRefKind(t *testing.T) {
 	if !reflect.DeepEqual(fake.added[11], []string{pipelinelabels.StateLabel("validate_pr")}) {
 		t.Fatalf("pr added = %#v", fake.added[11])
 	}
+}
+
+func TestSearchRefsWithLabelArgsIncludesPRs(t *testing.T) {
+	args := searchRefsWithLabelArgs("owner/repo", v1CheValidated)
+	if !containsArg(args, "--include-prs") {
+		t.Fatalf("args missing --include-prs: %#v", args)
+	}
+	if !containsArg(args, "number,isPullRequest") {
+		t.Fatalf("args missing isPullRequest json field: %#v", args)
+	}
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRunPipelineReset_RemovesLockApplyingAndSetsFrom(t *testing.T) {
