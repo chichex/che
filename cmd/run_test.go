@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/chichex/che/internal/engine"
@@ -15,12 +16,21 @@ import (
 // nombre del agente, y el invoker NO spawnea nada — todo en memoria.
 type fakeRunInvoker struct {
 	responder func(agent string) (string, engine.OutputFormat, error)
+	mu        sync.Mutex
 	calls     []string
 }
 
 func (f *fakeRunInvoker) Invoke(_ context.Context, agentName string, _ string) (string, engine.OutputFormat, error) {
+	f.mu.Lock()
 	f.calls = append(f.calls, agentName)
+	f.mu.Unlock()
 	return f.responder(agentName)
+}
+
+func (f *fakeRunInvoker) Calls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
 }
 
 // minimalPipelineWithEntry: pipeline JSON con entry + 3 steps. Compatible
@@ -361,11 +371,12 @@ func TestRun_SelectorManualFiltraSubset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if got := len(inv.calls); got != 1 {
+	calls := inv.Calls()
+	if got := len(calls); got != 1 {
 		t.Fatalf("invocaciones=%d want 1", got)
 	}
-	if inv.calls[0] != "claude-opus" {
-		t.Errorf("motor invocó %q want claude-opus (subset manual)", inv.calls[0])
+	if calls[0] != "claude-opus" {
+		t.Errorf("motor invocó %q want claude-opus (subset manual)", calls[0])
 	}
 }
 

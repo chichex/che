@@ -382,6 +382,10 @@ func clonePipeline(p pipeline.Pipeline) pipeline.Pipeline {
 // ServeHTTP delega al mux interno; lo implementamos explícito para poder
 // usar Server como http.Handler sin exponer el mux.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost && r.Header.Get("HX-Request") != "true" {
+		http.Error(w, "HX-Request header required", http.StatusForbidden)
+		return
+	}
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -444,6 +448,7 @@ type drawerData struct {
 	NWO           string
 	Auto          bool
 	PipelineSteps []drawerStepData
+	MigrateHint   bool
 }
 
 type drawerStepData struct {
@@ -537,6 +542,9 @@ func groupByPipelineColumn(entities []Entity, p pipeline.Pipeline) []columnData 
 		col := e.Column()
 		if e.StateStep != "" && stepSet[e.StateStep] {
 			col = e.StateStep
+		} else if e.StateStep != "" {
+			col = "drift"
+			e.StateStepOrphan = true
 		}
 		buckets[col] = append(buckets[col], e)
 		if e.RunningFlow != "" || e.StateApplying {
@@ -547,11 +555,14 @@ func groupByPipelineColumn(entities []Entity, p pipeline.Pipeline) []columnData 
 	if len(buckets["adopt"]) > 0 {
 		out = append(out, columnData{Key: "adopt", Title: "adopt", Hot: hot["adopt"], Entities: buckets["adopt"]})
 	}
+	if len(buckets["drift"]) > 0 {
+		out = append(out, columnData{Key: "drift", Title: "Drift", Hot: hot["drift"], Entities: buckets["drift"]})
+	}
 	for _, step := range p.Steps {
 		out = append(out, columnData{Key: step.Name, Title: step.Name, Hot: hot[step.Name], Entities: buckets[step.Name]})
 	}
 	for _, c := range columnsOrder {
-		if c.Key == "adopt" || stepSet[c.Key] || len(buckets[c.Key]) == 0 {
+		if c.Key == "adopt" || c.Key == "drift" || stepSet[c.Key] || len(buckets[c.Key]) == 0 {
 			continue
 		}
 		out = append(out, columnData{Key: c.Key, Title: c.Title, Hot: hot[c.Key], Entities: buckets[c.Key]})
@@ -967,12 +978,19 @@ func (s *Server) saveDashboardPipeline(p pipeline.Pipeline) (pipelineEditorData,
 		path = filepath.Join(mgr.PipelinesDir(), name+".json")
 		source = pipeline.SourceConfig
 	}
+	_, existingPipelineErr := os.Lstat(path)
+	pipelineExisted := existingPipelineErr == nil
 	if err := writePipelineFile(path, p); err != nil {
 		s.pipelineMu.Unlock()
 		return pipelineEditorData{}, fmt.Errorf("escribir %s: %w", path, err)
 	}
 	if s.pipelinePath == "" || mgr.Config.Default == "" {
 		if err := writePipelineConfig(mgr.ConfigPath(), pipeline.Config{Version: pipeline.ConfigVersion, Default: name}); err != nil {
+			if !pipelineExisted {
+				if rollbackErr := os.Remove(path); rollbackErr != nil && !errors.Is(rollbackErr, os.ErrNotExist) {
+					fmt.Fprintf(os.Stderr, "dash pipeline editor: rollback %s failed after config write error: %v\n", path, rollbackErr)
+				}
+			}
 			s.pipelineMu.Unlock()
 			return pipelineEditorData{}, fmt.Errorf("escribir %s: %w", mgr.ConfigPath(), err)
 		}
@@ -1087,12 +1105,30 @@ func buildDrawerSteps(e Entity, p pipeline.Pipeline) []drawerStepData {
 }
 
 func (s *Server) newDrawerData(e Entity, auto bool, p pipeline.Pipeline) drawerData {
+	e.StateStepOrphan = isStateStepOrphan(e, p)
 	return drawerData{
 		Entity:        e,
 		NWO:           s.source.Snapshot().NWO,
 		Auto:          auto,
 		PipelineSteps: buildDrawerSteps(e, p),
+		MigrateHint:   shouldShowMigrateHint(e, p),
 	}
+}
+
+func isStateStepOrphan(e Entity, p pipeline.Pipeline) bool {
+	if e.StateStep == "" || len(p.Steps) == 0 || isDefaultPipeline(p) {
+		return false
+	}
+	for _, step := range p.Steps {
+		if step.Name == e.StateStep {
+			return false
+		}
+	}
+	return true
+}
+
+func shouldShowMigrateHint(e Entity, p pipeline.Pipeline) bool {
+	return e.StateStep == "" && len(p.Steps) > 0 && !isDefaultPipeline(p)
 }
 
 // overlayRunning aplica el estado local (s.running) sobre un slice de
@@ -1542,10 +1578,12 @@ func (s *Server) buildMux() *http.ServeMux {
 	})
 
 	mux.HandleFunc("POST /pipeline/editor", func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("HX-Request") != "true" {
-			http.Error(w, "HX-Request header required", http.StatusForbidden)
-			return
-		}
+		// Force-refresh del cache desde disco antes de validar/escribir:
+		// activePipeline() tiene side-effect de releer el config y mutar
+		// s.pipeline/s.pipelineName. Evita que el editor escriba sobre un
+		// snapshot obsoleto si otro proceso modificó el archivo entre el
+		// GET inicial y este POST. El return value se descarta a propósito.
+		_ = s.activePipeline()
 		p, err := s.pipelineEditorFromRequest(r)
 		data := s.activePipelineResolved()
 		status := http.StatusOK
@@ -1565,6 +1603,7 @@ func (s *Server) buildMux() *http.ServeMux {
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(status)
 		if err := s.tmpl.ExecuteTemplate(w, "pipeline_editor.html.tmpl", data); err != nil {
+			fmt.Fprintf(os.Stderr, "dash pipeline editor: render POST response failed: %v\n", err)
 			return
 		}
 	})

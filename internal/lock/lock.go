@@ -85,6 +85,7 @@ type Handle struct {
 	current     string // label aplicado actualmente
 	mu          sync.Mutex
 	stop        chan struct{}
+	done        chan struct{}
 	stopped     bool
 	stopOnce    sync.Once
 	now         func() time.Time // inyectable para tests del heartbeat
@@ -117,9 +118,9 @@ type Options struct {
 
 	// AddLabel, DelLabel, ListLabels son los hooks REST. Defaults llaman
 	// a `gh api`. Tests stubean para evitar shell-out.
-	AddLabel    func(number int, label string) error
-	DelLabel    func(number int, label string) error
-	ListLabels  func(number int) ([]string, error)
+	AddLabel   func(number int, label string) error
+	DelLabel   func(number int, label string) error
+	ListLabels func(number int) ([]string, error)
 
 	// LogErrf es el logger para warnings del heartbeat (errores no
 	// fatales mientras refresca). Default no-op. Los flows lo wirean al
@@ -333,6 +334,7 @@ func Acquire(ref string, opts Options) (*Handle, error) {
 		host:        host,
 		current:     label,
 		stop:        make(chan struct{}),
+		done:        make(chan struct{}),
 		now:         now,
 		ensureLabel: ensureLabel,
 		addLabel:    addLabel,
@@ -357,6 +359,23 @@ func (h *Handle) Release() error {
 	h.stopOnce.Do(func() {
 		close(h.stop)
 	})
+	if h.done != nil {
+		// Bounded wait: el heartbeatLoop puede estar dentro de un `gh api`
+		// lento (network hang, GitHub 503) sin timeout propio — si esperamos
+		// indefinidamente acá colgamos al `defer releaseLock()` del caller
+		// y al proceso entero. Preferimos un Release lento-pero-bounded: si
+		// la goroutine no responde en 30s, logueamos y seguimos con la
+		// limpieza del label. El tick que estaba en vuelo puede dejar el
+		// label aplicado (esa es la race que el sync original previene),
+		// pero el TTL del lock garantiza recovery eventual.
+		select {
+		case <-h.done:
+		case <-time.After(30 * time.Second):
+			if h.logErr != nil {
+				h.logErr("lock: Release timeout esperando heartbeatLoop (30s); procediendo con cleanup, posible label colgado hasta TTL")
+			}
+		}
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.stopped {
@@ -393,6 +412,7 @@ func (h *Handle) CurrentLabel() string {
 // liste vea AMBOS y no asuma "no hay lock". Si alguna falla, loggea pero
 // no aborta el loop (red transitoria, token recién rotado, etc.).
 func (h *Handle) heartbeatLoop() {
+	defer close(h.done)
 	t := time.NewTicker(HeartbeatInterval)
 	defer t.Stop()
 	for {

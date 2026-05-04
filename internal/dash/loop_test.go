@@ -757,7 +757,7 @@ func TestTick_ManualDispatchCountsForCap(t *testing.T) {
 
 	// Disparar 5 manuales sobre #42 (libera entre cada uno).
 	for i := 0; i < LoopCap; i++ {
-		resp, err := http.Post(ts.URL+"/action/execute/42", "", nil)
+		resp, err := postHTMX(t, ts.URL+"/action/execute/42")
 		if err != nil {
 			t.Fatalf("POST #%d: %v", i, err)
 		}
@@ -784,7 +784,7 @@ func TestTick_AutoFlagOnlyForTick(t *testing.T) {
 	ts, s, fr := newActionServer(t)
 	_ = fr
 	// Manual primero.
-	resp, err := http.Post(ts.URL+"/action/execute/42", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/execute/42")
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -864,7 +864,7 @@ func TestLoopEndpoints_ExclusiveValidateExecuteRaw(t *testing.T) {
 	defer ts.Close()
 
 	// Prender validate-plan.
-	resp, err := http.Post(ts.URL+"/loop/rule/validate-plan", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/loop/rule/validate-plan")
 	if err != nil {
 		t.Fatalf("POST validate-plan: %v", err)
 	}
@@ -878,7 +878,7 @@ func TestLoopEndpoints_ExclusiveValidateExecuteRaw(t *testing.T) {
 	}
 
 	// Prender execute-raw → debe apagar validate-plan.
-	resp, err = http.Post(ts.URL+"/loop/rule/execute-raw", "", nil)
+	resp, err = postHTMX(t, ts.URL+"/loop/rule/execute-raw")
 	if err != nil {
 		t.Fatalf("POST execute-raw: %v", err)
 	}
@@ -892,7 +892,7 @@ func TestLoopEndpoints_ExclusiveValidateExecuteRaw(t *testing.T) {
 	}
 
 	// Volver a prender validate-plan → debe apagar execute-raw.
-	resp, err = http.Post(ts.URL+"/loop/rule/validate-plan", "", nil)
+	resp, err = postHTMX(t, ts.URL+"/loop/rule/validate-plan")
 	if err != nil {
 		t.Fatalf("POST validate-plan #2: %v", err)
 	}
@@ -932,7 +932,7 @@ func TestLoopEndpoints_BulkOn(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/loop/bulk/on", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/loop/bulk/on")
 	if err != nil {
 		t.Fatalf("POST /loop/bulk/on: %v", err)
 	}
@@ -962,7 +962,7 @@ func TestLoopEndpoints_BulkOff(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/loop/bulk/off", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/loop/bulk/off")
 	if err != nil {
 		t.Fatalf("POST /loop/bulk/off: %v", err)
 	}
@@ -983,7 +983,7 @@ func TestLoopEndpoints_BulkInvalidMode(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/loop/bulk/half", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/loop/bulk/half")
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -999,7 +999,7 @@ func TestLoopEndpoints_Rule(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/loop/rule/validate-plan", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/loop/rule/validate-plan")
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -1021,7 +1021,7 @@ func TestLoopEndpoints_InvalidRule(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/loop/rule/exec-everything", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/loop/rule/exec-everything")
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -1095,7 +1095,7 @@ func TestLoopEndpoints_Concurrency(t *testing.T) {
 	for i := 0; i < N; i++ {
 		go func() {
 			defer wg.Done()
-			resp, err := http.Post(ts.URL+"/loop/rule/validate-plan", "", nil)
+			resp, err := postHTMX(t, ts.URL+"/loop/rule/validate-plan")
 			if err != nil {
 				t.Errorf("POST: %v", err)
 				return
@@ -1165,7 +1165,7 @@ func TestAction_GateRejects409(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/action/validate/146", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/validate/146")
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}

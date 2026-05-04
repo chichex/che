@@ -11,7 +11,10 @@ import (
 	"github.com/chichex/che/internal/agent"
 	"github.com/chichex/che/internal/agentregistry"
 	"github.com/chichex/che/internal/engine"
+	"github.com/chichex/che/internal/labels"
+	chelock "github.com/chichex/che/internal/lock"
 	"github.com/chichex/che/internal/pipeline"
+	"github.com/chichex/che/internal/pipelinelabels"
 	"github.com/chichex/che/internal/runner"
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
@@ -209,9 +212,17 @@ func runPipelineRun(ctx context.Context, out, errOut io.Writer, mgr *pipeline.Ma
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	labelHooks, releaseLock, err := runLabelHooks(args.input, args.fromStep, errOut)
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
+
 	run, err := engine.RunPipeline(ctx, ep, inv, engine.Options{
-		EntryStep: args.fromStep,
-		Input:     args.input,
+		EntryStep:   args.fromStep,
+		Input:       args.input,
+		BeforeStep:  labelHooks.beforeStep,
+		AfterStepOK: labelHooks.afterStepOK,
 	})
 	if err != nil {
 		return fmt.Errorf("engine: %w", err)
@@ -233,6 +244,74 @@ func runPipelineRun(ctx context.Context, out, errOut io.Writer, mgr *pipeline.Ma
 		// son outcomes legítimos del pipeline. Exit 0 + mensaje en out.
 	}
 	return nil
+}
+
+type runPipelineLabelHooks struct {
+	beforeStep  func(context.Context, string) error
+	afterStepOK func(context.Context, string) error
+}
+
+func runLabelHooks(input, fromStep string, errOut io.Writer) (runPipelineLabelHooks, func(), error) {
+	ref := strings.TrimSpace(input)
+	if strings.HasPrefix(ref, "!") {
+		ref = "#" + strings.TrimPrefix(ref, "!")
+	}
+	number, err := labels.RefNumber(ref)
+	if err != nil {
+		return runPipelineLabelHooks{}, func() {}, nil
+	}
+	h, err := chelock.Acquire(ref, chelock.Options{
+		LogErrf: func(format string, args ...any) {
+			fmt.Fprintf(errOut, "che run: lock heartbeat warning: "+format+"\n", args...)
+		},
+	})
+	if err != nil {
+		return runPipelineLabelHooks{}, func() {}, err
+	}
+	currentTerminal := ""
+	if fromStep != "" {
+		currentTerminal = pipelinelabels.StateLabel(fromStep)
+	}
+	hooks := runPipelineLabelHooks{
+		beforeStep: func(_ context.Context, step string) error {
+			applying := pipelinelabels.ApplyingLabel(step)
+			if err := labels.EnsureAll(applying, pipelinelabels.StateLabel(step)); err != nil {
+				return err
+			}
+			if currentTerminal != "" {
+				if err := labels.RemoveLabel(number, currentTerminal); err != nil {
+					return err
+				}
+			}
+			if err := labels.RemoveLabel(number, pipelinelabels.StateLabel(step)); err != nil {
+				return err
+			}
+			if err := labels.AddLabels(number, applying); err != nil {
+				return err
+			}
+			currentTerminal = ""
+			return nil
+		},
+		afterStepOK: func(_ context.Context, step string) error {
+			state := pipelinelabels.StateLabel(step)
+			if err := labels.EnsureAll(state, pipelinelabels.ApplyingLabel(step)); err != nil {
+				return err
+			}
+			if err := labels.RemoveLabel(number, pipelinelabels.ApplyingLabel(step)); err != nil {
+				return err
+			}
+			if err := labels.AddLabels(number, state); err != nil {
+				return err
+			}
+			currentTerminal = state
+			return nil
+		},
+	}
+	return hooks, func() {
+		if err := h.Release(); err != nil {
+			fmt.Fprintf(errOut, "che run: lock release warning: %v\n", err)
+		}
+	}, nil
 }
 
 // writeRunSummary imprime el outcome del run en formato humano (no

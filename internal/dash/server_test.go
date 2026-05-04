@@ -3,6 +3,7 @@ package dash
 import (
 	"encoding/json"
 	"errors"
+	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -639,7 +640,7 @@ func newActionServer(t *testing.T) (*httptest.Server, *Server, *fakeRunner) {
 func TestAction_DispatchesFlow(t *testing.T) {
 	ts, _, fr := newActionServer(t)
 
-	resp, err := http.Post(ts.URL+"/action/execute/42", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/execute/42")
 	if err != nil {
 		t.Fatalf("POST /action/execute/42: %v", err)
 	}
@@ -687,7 +688,7 @@ func TestAction_FusedValidateUsesPR(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/action/validate/122", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/validate/122")
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -709,7 +710,7 @@ func TestAction_FusedValidateUsesPR(t *testing.T) {
 	// iterate hace el mismo mapeo.
 	fr2 := &fakeRunner{}
 	s.runAction = fr2.run
-	resp2, err := http.Post(ts.URL+"/action/iterate/122", "", nil)
+	resp2, err := postHTMX(t, ts.URL+"/action/iterate/122")
 	if err != nil {
 		t.Fatalf("POST iterate: %v", err)
 	}
@@ -717,7 +718,7 @@ func TestAction_FusedValidateUsesPR(t *testing.T) {
 	// 409 esperado (ya hay un validate en curso del dispatch anterior).
 	// Relajamos: chequeamos que cuando SE dispare (lo liberamos abajo) use PR.
 	s.clearRunning(122)
-	resp3, err := http.Post(ts.URL+"/action/iterate/122", "", nil)
+	resp3, err := postHTMX(t, ts.URL+"/action/iterate/122")
 	if err != nil {
 		t.Fatalf("POST iterate#2: %v", err)
 	}
@@ -759,7 +760,7 @@ func TestAction_KindPRSnapshotRunningBlocksDispatch(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/action/iterate/301", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/iterate/301")
 	if err != nil {
 		t.Fatalf("POST iterate/301: %v", err)
 	}
@@ -789,7 +790,7 @@ func TestAction_FusedCloseUsesPR(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/action/close/122", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/close/122")
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -881,7 +882,7 @@ func TestAction_IssueOnlyValidateUsesIssue(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	resp, _ := http.Post(ts.URL+"/action/validate/42", "", nil)
+	resp, _ := postHTMX(t, ts.URL+"/action/validate/42")
 	resp.Body.Close()
 	got := fr.last()
 	if got.TargetRef != 42 || got.EntityKey != 42 {
@@ -894,7 +895,7 @@ func TestAction_IssueOnlyValidateUsesIssue(t *testing.T) {
 func TestAction_InvalidFlow(t *testing.T) {
 	ts, _, fr := newActionServer(t)
 
-	resp, err := http.Post(ts.URL+"/action/foobar/42", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/foobar/42")
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -911,7 +912,7 @@ func TestAction_InvalidFlow(t *testing.T) {
 func TestAction_UnknownEntity(t *testing.T) {
 	ts, _, fr := newActionServer(t)
 
-	resp, err := http.Post(ts.URL+"/action/execute/999", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/execute/999")
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -930,7 +931,7 @@ func TestAction_UnknownEntity(t *testing.T) {
 func TestAction_DoubleDispatch(t *testing.T) {
 	ts, _, fr := newActionServer(t)
 
-	resp1, err := http.Post(ts.URL+"/action/execute/42", "", nil)
+	resp1, err := postHTMX(t, ts.URL+"/action/execute/42")
 	if err != nil {
 		t.Fatalf("POST #1: %v", err)
 	}
@@ -939,7 +940,7 @@ func TestAction_DoubleDispatch(t *testing.T) {
 		t.Fatalf("status #1: got %d want 200", resp1.StatusCode)
 	}
 
-	resp2, err := http.Post(ts.URL+"/action/validate/42", "", nil)
+	resp2, err := postHTMX(t, ts.URL+"/action/validate/42")
 	if err != nil {
 		t.Fatalf("POST #2: %v", err)
 	}
@@ -960,7 +961,7 @@ func TestAction_SnapshotRunningBlocks(t *testing.T) {
 
 	// Issue 7 está en status=executing con RunningFlow=execute en el snapshot
 	// — ver newActionServer.
-	resp, err := http.Post(ts.URL+"/action/iterate/7", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/iterate/7")
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -1325,7 +1326,7 @@ func TestActionHandler_CallsBumpAfterSpawn(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/action/execute/42", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/execute/42")
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -1756,7 +1757,7 @@ func TestAction_AdoptRejectsOutOfSetFlows(t *testing.T) {
 	// no en la puerta de entrada.
 	for _, flow := range []string{"iterate", "execute", "explore", "close"} {
 		// Adopt KindPR: data-entity=PRNumber.
-		resp, err := http.Post(ts.URL+"/action/"+flow+"/301", "", nil)
+		resp, err := postHTMX(t, ts.URL+"/action/"+flow+"/301")
 		if err != nil {
 			t.Fatalf("POST adopt+%s: %v", flow, err)
 		}
@@ -1765,7 +1766,7 @@ func TestAction_AdoptRejectsOutOfSetFlows(t *testing.T) {
 			t.Errorf("adopt+%s: got %d want 409", flow, resp.StatusCode)
 		}
 		// Adopt KindFused: data-entity=IssueNumber.
-		resp2, err := http.Post(ts.URL+"/action/"+flow+"/500", "", nil)
+		resp2, err := postHTMX(t, ts.URL+"/action/"+flow+"/500")
 		if err != nil {
 			t.Fatalf("POST adopt-fused+%s: %v", flow, err)
 		}
@@ -1796,7 +1797,7 @@ func TestAction_AdoptAllowsValidate(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/action/validate/301", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/validate/301")
 	if err != nil {
 		t.Fatalf("POST validate/301: %v", err)
 	}
@@ -2000,6 +2001,65 @@ func TestDrawer_CustomPipelineRendersStepActions(t *testing.T) {
 			t.Fatalf("drawer missing %q\nbody=%s", want, got)
 		}
 	}
+	if !strings.Contains(got, `<dl class="drawer-meta pipeline-meta">`) {
+		t.Fatalf("drawer should wrap pipeline metadata in <dl>; body=%s", got)
+	}
+}
+
+func TestBoard_CustomPipelineShowsDriftColumnAndChip(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		NWO:    "demo/che",
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, Status: "plan", StateStep: "ghost", IssueTitle: "orphaned"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{
+		{Name: "spec", Agents: []string{"claude-sonnet"}},
+		{Name: "build", Agents: []string{"claude-opus"}},
+	}}
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/board")
+	if err != nil {
+		t.Fatalf("GET board: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	got := string(body)
+	if !strings.Contains(got, `data-status="drift"`) || !strings.Contains(got, `>Drift<`) {
+		t.Fatalf("board missing Drift column; body=%s", got)
+	}
+	if !strings.Contains(got, `step orphan:`) || !strings.Contains(got, `<code>ghost</code>`) {
+		t.Fatalf("board missing step orphan chip; body=%s", got)
+	}
+}
+
+func TestDrawer_CustomPipelineSuggestsMigrateLabels(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		NWO:    "demo/che",
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, Status: "plan", IssueTitle: "legacy labels"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{{Name: "spec", Agents: []string{"claude-sonnet"}}}}
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/drawer/42")
+	if err != nil {
+		t.Fatalf("GET drawer: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	got := string(body)
+	if !strings.Contains(got, "che pipeline migrate-labels") {
+		t.Fatalf("drawer missing migrate-labels hint; body=%s", got)
+	}
 }
 
 func TestActionRunFrom_CustomPipelineCallsDynamicRun(t *testing.T) {
@@ -2017,7 +2077,7 @@ func TestActionRunFrom_CustomPipelineCallsDynamicRun(t *testing.T) {
 	ts := httptest.NewServer(s)
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/action/run/build/42", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/run/build/42")
 	if err != nil {
 		t.Fatalf("POST run/build: %v", err)
 	}
@@ -2035,7 +2095,7 @@ func TestActionRunFrom_RejectsUnknownStep(t *testing.T) {
 	_, fr, ts := newCustomPipelineRunServer(t, Entity{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build"})
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/action/run/ship/42", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/run/ship/42")
 	if err != nil {
 		t.Fatalf("POST run/ship: %v", err)
 	}
@@ -2056,7 +2116,7 @@ func TestActionRunFrom_RejectsNonCurrentStep(t *testing.T) {
 	_, fr, ts := newCustomPipelineRunServer(t, Entity{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build"})
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/action/run/spec/42", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/run/spec/42")
 	if err != nil {
 		t.Fatalf("POST run/spec: %v", err)
 	}
@@ -2077,7 +2137,7 @@ func TestActionRunFrom_NotFound(t *testing.T) {
 	_, fr, ts := newCustomPipelineRunServer(t, Entity{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build"})
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/action/run/build/99", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/run/build/99")
 	if err != nil {
 		t.Fatalf("POST run/build/99: %v", err)
 	}
@@ -2094,7 +2154,7 @@ func TestActionRunFrom_RejectsRunningEntity(t *testing.T) {
 	_, fr, ts := newCustomPipelineRunServer(t, Entity{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build", RunningFlow: "run#:build"})
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/action/run/build/42", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/run/build/42")
 	if err != nil {
 		t.Fatalf("POST run/build: %v", err)
 	}
@@ -2116,7 +2176,7 @@ func TestActionRunFrom_RunActionFailureClearsRunning(t *testing.T) {
 	fr.err = errors.New("boom")
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/action/run/build/42", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/run/build/42")
 	if err != nil {
 		t.Fatalf("POST run/build: %v", err)
 	}
@@ -2140,7 +2200,7 @@ func TestActionRunFrom_RejectsLockedEntity(t *testing.T) {
 	_, fr, ts := newCustomPipelineRunServer(t, Entity{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build", Locked: true})
 	defer ts.Close()
 
-	resp, err := http.Post(ts.URL+"/action/run/build/42", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/run/build/42")
 	if err != nil {
 		t.Fatalf("POST run/build: %v", err)
 	}
@@ -2242,6 +2302,41 @@ func TestPipelineEditor_SaveMaterializesBuiltinDefault(t *testing.T) {
 	}
 }
 
+func TestPipelineEditor_RollsBackDefaultWhenConfigWriteFails(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".che"), 0o755); err != nil {
+		t.Fatalf("mkdir .che: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "elsewhere.json"), filepath.Join(root, pipeline.ConfigFileRel)); err != nil {
+		t.Fatalf("symlink config: %v", err)
+	}
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	s.pipelineRoot = root
+	s.pipeline = pipeline.Default()
+	s.pipelineName = "default"
+	s.pipelineKind = pipeline.SourceBuiltin
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	form := url.Values{}
+	form.Add("step_name", "spec")
+	form.Add("step_agents", "claude-sonnet")
+	form.Add("step_aggregator", string(pipeline.AggregatorMajority))
+	form.Add("step_comment", "write spec")
+	resp, err := postPipelineEditorForm(ts.URL, form)
+	if err != nil {
+		t.Fatalf("POST editor: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 body=%s", resp.StatusCode, body)
+	}
+	if _, err := os.Stat(filepath.Join(root, pipeline.PipelinesDirRel, "default.json")); !os.IsNotExist(err) {
+		t.Fatalf("default.json should be rolled back, stat err=%v", err)
+	}
+}
+
 func TestPipelineEditor_SaveRejectsInvalidPipeline(t *testing.T) {
 	root := t.TempDir()
 	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
@@ -2271,6 +2366,167 @@ func TestPipelineEditor_SaveRejectsInvalidPipeline(t *testing.T) {
 	}
 }
 
+func TestPipelineEditor_RejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, pipeline.PipelinesDirRel), 0o755); err != nil {
+		t.Fatalf("mkdir pipelines: %v", err)
+	}
+	path := filepath.Join(root, pipeline.PipelinesDirRel, "default.json")
+	if err := os.Symlink(filepath.Join(root, "elsewhere.json"), path); err != nil {
+		t.Fatalf("symlink pipeline: %v", err)
+	}
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	s.pipelineRoot = root
+	s.pipelineName = "default"
+	s.pipelinePath = path
+	s.pipelineKind = pipeline.SourceConfig
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := postPipelineEditorForm(ts.URL, validPipelineEditorForm())
+	if err != nil {
+		t.Fatalf("POST editor: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want 500 body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "symlink") {
+		t.Fatalf("body missing symlink error: %s", body)
+	}
+}
+
+func TestPipelineEditor_AggregatorInvalid(t *testing.T) {
+	root := t.TempDir()
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	s.pipelineRoot = root
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	form := validPipelineEditorForm()
+	form.Set("step_aggregator", "bogus")
+	resp, err := postPipelineEditorForm(ts.URL, form)
+	if err != nil {
+		t.Fatalf("POST editor: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200 body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "unknown aggregator") {
+		t.Fatalf("body missing aggregator error: %s", body)
+	}
+}
+
+func TestPipelineEditor_ZeroSteps(t *testing.T) {
+	root := t.TempDir()
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	s.pipelineRoot = root
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := postPipelineEditorForm(ts.URL, url.Values{})
+	if err != nil {
+		t.Fatalf("POST editor: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200 body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "pipeline must declare at least one step") {
+		t.Fatalf("body missing zero steps error: %s", body)
+	}
+}
+
+func TestPipelineEditor_LengthMismatch(t *testing.T) {
+	root := t.TempDir()
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	s.pipelineRoot = root
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	form := validPipelineEditorForm()
+	form.Del("step_comment")
+	resp, err := postPipelineEditorForm(ts.URL, form)
+	if err != nil {
+		t.Fatalf("POST editor: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200 body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "filas de steps desalineadas") {
+		t.Fatalf("body missing length mismatch error: %s", body)
+	}
+}
+
+func TestPipelineEditor_AlreadyHasDefaultCustom(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".che"), 0o755); err != nil {
+		t.Fatalf("mkdir .che: %v", err)
+	}
+	configPath := filepath.Join(root, pipeline.ConfigFileRel)
+	if err := os.WriteFile(configPath, []byte(`{"version":1,"default":"default"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	originalConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	path := filepath.Join(root, pipeline.PipelinesDirRel, "default.json")
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	s.pipelineRoot = root
+	s.pipelineName = "default"
+	s.pipelinePath = path
+	s.pipelineKind = pipeline.SourceConfig
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := postPipelineEditorForm(ts.URL, validPipelineEditorForm())
+	if err != nil {
+		t.Fatalf("POST editor: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200 body=%s", resp.StatusCode, body)
+	}
+	afterConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after: %v", err)
+	}
+	if string(afterConfig) != string(originalConfig) {
+		t.Fatalf("existing config should not be rewritten: got %s want %s", afterConfig, originalConfig)
+	}
+}
+
+func TestPipelineEditor_POSTRenderErrorIsLogged(t *testing.T) {
+	root := t.TempDir()
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	s.pipelineRoot = root
+	s.tmpl = template.Must(template.New("broken").Funcs(template.FuncMap{
+		"fail": func() (string, error) { return "", errors.New("render boom") },
+	}).Parse(`{{define "pipeline_editor.html.tmpl"}}{{fail}}{{end}}`))
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	stderr := captureStderr(t, func() {
+		resp, err := postPipelineEditorForm(ts.URL, validPipelineEditorForm())
+		if err != nil {
+			t.Fatalf("POST editor: %v", err)
+		}
+		_, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+	})
+	if !strings.Contains(stderr, "render POST response failed") || !strings.Contains(stderr, "render boom") {
+		t.Fatalf("stderr missing render error log: %q", stderr)
+	}
+}
+
 func TestPipelineEditor_RejectsNonHTMXPost(t *testing.T) {
 	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
 	ts := httptest.NewServer(s)
@@ -2295,12 +2551,77 @@ func TestPipelineEditor_RejectsNonHTMXPost(t *testing.T) {
 	}
 }
 
+func TestDashPOSTs_RejectNonHTMX(t *testing.T) {
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	paths := []string{
+		"/action/execute/42",
+		"/action/run/build/42",
+		"/loop/rule/validate-plan",
+		"/loop/bulk/on",
+	}
+	for _, path := range paths {
+		resp, err := http.Post(ts.URL+path, "", nil)
+		if err != nil {
+			t.Fatalf("POST %s without HX: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("POST %s status: got %d want 403 body=%s", path, resp.StatusCode, body)
+		}
+		if !strings.Contains(string(body), "HX-Request") {
+			t.Fatalf("POST %s body missing HX reason: %s", path, body)
+		}
+	}
+}
+
+func validPipelineEditorForm() url.Values {
+	form := url.Values{}
+	form.Add("step_name", "spec")
+	form.Add("step_agents", "claude-sonnet")
+	form.Add("step_aggregator", string(pipeline.AggregatorMajority))
+	form.Add("step_comment", "write spec")
+	return form
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe stderr: %v", err)
+	}
+	os.Stderr = w
+	fn()
+	w.Close()
+	os.Stderr = old
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stderr pipe: %v", err)
+	}
+	r.Close()
+	return string(out)
+}
+
 func postPipelineEditorForm(baseURL string, form url.Values) (*http.Response, error) {
 	req, err := http.NewRequest(http.MethodPost, baseURL+"/pipeline/editor", strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("HX-Request", "true")
+	return http.DefaultClient.Do(req)
+}
+
+func postHTMX(t *testing.T, url string) (*http.Response, error) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, url, http.NoBody)
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("HX-Request", "true")
 	return http.DefaultClient.Do(req)
 }
