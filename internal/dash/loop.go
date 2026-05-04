@@ -609,7 +609,12 @@ func nextPipelineDispatch(e Entity, steps []string, rounds int) (flow string, ta
 		// Dynamic verdict handling lives in the pipeline agents/markers: the dash
 		// only resumes from the current StateStep and lets `che run --auto` decide
 		// advance, goto markers and skips. Legacy verdict rules are fallback only.
-		return encodeDynamicRunFlow(dynamicRunFlow{Step: e.StateStep, PR: e.Kind == KindPR}), e.EntityKey(), "step:" + e.StateStep
+		run := dynamicRunFlow{Step: e.StateStep, PR: e.Kind == KindPR || (e.Kind == KindFused && e.PRNumber > 0)}
+		targetRef := e.EntityKey()
+		if run.PR {
+			targetRef = e.PRNumber
+		}
+		return encodeDynamicRunFlow(run), targetRef, "step:" + e.StateStep
 	}
 	return "", 0, "step-not-in-pipeline"
 }
@@ -704,7 +709,7 @@ func (s *Server) runTick() int {
 	}
 	s.mu.Unlock()
 	for _, e := range ents {
-		running := e.RunningFlow != "" || localRunning[e.IssueNumber] != ""
+		running := e.RunningFlow != "" || localRunning[e.EntityKey()] != ""
 		if !running {
 			continue
 		}

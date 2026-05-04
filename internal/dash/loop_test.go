@@ -596,6 +596,28 @@ func TestTick_IssueAndPRSimultaneous(t *testing.T) {
 	}
 }
 
+func TestTick_KindPRRunningOccupiesPRSlot(t *testing.T) {
+	ents := []Entity{
+		{Kind: KindPR, PRNumber: 301, Status: "validated", PRVerdict: "changes-requested", RunningFlow: "validate"},
+		{Kind: KindFused, IssueNumber: 2, PRNumber: 22, Status: "executed"},
+		{Kind: KindIssue, IssueNumber: 1, Status: "plan"},
+	}
+	s, fr := newLoopServer(t, ents)
+	s.loop.rules[RuleValidatePlan] = true
+	s.loop.rules[RuleValidatePR] = true
+
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick dispatches: got %d want 1 (KindPR running ocupa slot PR, issue slot queda libre)", n)
+	}
+	if fr.count() != 1 {
+		t.Fatalf("runner calls: got %d want 1", fr.count())
+	}
+	got := fr.last()
+	if got.Flow != "validate" || got.TargetRef != 1 || got.EntityKey != 1 {
+		t.Errorf("dispatch: got %+v want issue-side validate target=1 key=1", got)
+	}
+}
+
 // TestTick_CapFive: mismo entity pasa por 5 rondas; el 6to tick no dispatcha.
 func TestTick_CapFive(t *testing.T) {
 	ents := []Entity{
