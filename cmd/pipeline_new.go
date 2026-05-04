@@ -45,8 +45,8 @@ func init() {
 
 // runPipelineNew valida el nombre, materializa el built-in y reporta.
 func runPipelineNew(out io.Writer, mgr *pipeline.Manager, name string, force bool) error {
-	if name == "" {
-		return fmt.Errorf("pipeline name no puede ser vacío")
+	if err := pipeline.ValidateName(name); err != nil {
+		return err
 	}
 	dest := filepath.Join(mgr.PipelinesDir(), name+".json")
 	if !force {

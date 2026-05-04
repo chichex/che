@@ -3,6 +3,8 @@ package pipeline
 import (
 	"fmt"
 	"regexp"
+	"strings"
+	"unicode/utf8"
 )
 
 // stepNameRe matchea el fragmento permitido para `Step.Name`.
@@ -13,6 +15,70 @@ import (
 // schema (`schemas/pipeline.json`) declara el mismo pattern — si cambia
 // uno, el otro también.
 var stepNameRe = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
+
+var windowsReservedPipelineNames = map[string]bool{
+	"CON":  true,
+	"PRN":  true,
+	"AUX":  true,
+	"NUL":  true,
+	"COM1": true,
+	"COM2": true,
+	"COM3": true,
+	"COM4": true,
+	"COM5": true,
+	"COM6": true,
+	"COM7": true,
+	"COM8": true,
+	"COM9": true,
+	"LPT1": true,
+	"LPT2": true,
+	"LPT3": true,
+	"LPT4": true,
+	"LPT5": true,
+	"LPT6": true,
+	"LPT7": true,
+	"LPT8": true,
+	"LPT9": true,
+}
+
+// ValidateName valida el nombre canónico de un pipeline, es decir el filename
+// sin extensión bajo `.che/pipelines/<name>.json`.
+func ValidateName(name string) error {
+	if name == "" {
+		return fmt.Errorf("pipeline name no puede ser vacío")
+	}
+	if !utf8.ValidString(name) {
+		return fmt.Errorf("pipeline name %q no es UTF-8 válido", name)
+	}
+	if strings.TrimSpace(name) != name {
+		return fmt.Errorf("pipeline name %q no puede tener espacios al inicio o final", name)
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("pipeline name %q no puede ser un segmento de path", name)
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("pipeline name %q no puede contener separadores de path", name)
+	}
+	if strings.ContainsAny(name, `<>:"|?*`) {
+		return fmt.Errorf("pipeline name %q contiene caracteres incompatibles con Windows", name)
+	}
+	if strings.HasSuffix(name, ".") || strings.HasSuffix(name, " ") {
+		return fmt.Errorf("pipeline name %q no puede terminar en punto o espacio", name)
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("pipeline name %q contiene caracteres de control", name)
+		}
+	}
+	base := name
+	if idx := strings.IndexByte(base, '.'); idx >= 0 {
+		base = base[:idx]
+	}
+	if windowsReservedPipelineNames[strings.ToUpper(base)] {
+		return fmt.Errorf("pipeline name %q está reservado en Windows", name)
+	}
+	return nil
+}
 
 // Validate corre las verificaciones semánticas que `encoding/json` no
 // cubre por sí solo: versión soportada, mínimo 1 step, nombres válidos,

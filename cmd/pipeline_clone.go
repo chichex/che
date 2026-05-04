@@ -65,8 +65,11 @@ func init() {
 // parsea las reglas --replace, aplica sustituciones, valida el resultado
 // y lo escribe en .che/pipelines/<dst>.json.
 func runPipelineClone(out io.Writer, mgr *pipeline.Manager, src, dst string, rawReplace []string, force bool) error {
-	if src == "" || dst == "" {
-		return fmt.Errorf("src y dst son obligatorios")
+	if err := pipeline.ValidateName(src); err != nil {
+		return fmt.Errorf("src inválido: %w", err)
+	}
+	if err := pipeline.ValidateName(dst); err != nil {
+		return fmt.Errorf("dst inválido: %w", err)
 	}
 	if src == dst {
 		return fmt.Errorf("src y dst no pueden ser iguales (%q)", src)

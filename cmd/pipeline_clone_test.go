@@ -157,3 +157,15 @@ func TestPipelineClone_BadReplace_RejectsEmptyAgent(t *testing.T) {
 		t.Errorf("clone escribió archivo aunque el resultado era inválido")
 	}
 }
+
+func TestPipelineClone_RejectsTraversalDst(t *testing.T) {
+	mgr, root := pipelineFixture(t, nil, "")
+	var out bytes.Buffer
+	err := runPipelineClone(&out, mgr, "default", "../evil", nil, false)
+	if err == nil {
+		t.Fatalf("esperaba error, got nil")
+	}
+	if _, statErr := pipeline.Load(filepath.Join(root, ".che", "evil.json")); statErr == nil {
+		t.Fatalf("clone escribió fuera de .che/pipelines")
+	}
+}

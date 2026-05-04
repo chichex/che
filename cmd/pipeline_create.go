@@ -257,6 +257,9 @@ func runPipelineCreate(out io.Writer, mgr *pipeline.Manager, agents []agentregis
 func promptPipelineName(prompt pipelineCreatePrompt, mgr *pipeline.Manager, name string, force bool) (string, bool, error) {
 	name = strings.TrimSpace(name)
 	if name != "" {
+		if err := pipeline.ValidateName(name); err != nil {
+			return "", false, err
+		}
 		return name, false, nil
 	}
 	for {
@@ -267,6 +270,9 @@ func promptPipelineName(prompt pipelineCreatePrompt, mgr *pipeline.Manager, name
 		asked = strings.TrimSpace(asked)
 		if asked == "" {
 			return "", true, fmt.Errorf("pipeline name no puede ser vacío")
+		}
+		if err := pipeline.ValidateName(asked); err != nil {
+			continue
 		}
 		if force || !pipelineFileExists(filepath.Join(mgr.PipelinesDir(), asked+".json")) {
 			return asked, true, nil

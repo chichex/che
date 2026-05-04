@@ -137,6 +137,29 @@ func TestPipelineCreate_PromptedNameRetriesExisting(t *testing.T) {
 	}
 }
 
+func TestPipelineCreate_PromptedNameRetriesInvalid(t *testing.T) {
+	mgr, root := pipelineFixture(t, nil, "")
+	agents := []agentregistry.Agent{{Name: "claude-opus", Source: agentregistry.SourceBuiltin}}
+	prompt := &fakePipelineCreatePrompt{
+		asks:     []string{"../evil", "fresh", "idea", ""},
+		confirms: []bool{false, false, false, true},
+		multis:   [][]int{{0}},
+	}
+	var out bytes.Buffer
+	if err := runPipelineCreate(&out, mgr, agents, prompt, "", false); err != nil {
+		t.Fatalf("runPipelineCreate: %v", err)
+	}
+	if _, err := pipeline.Load(filepath.Join(root, ".che", "pipelines", "fresh.json")); err != nil {
+		t.Fatalf("fresh pipeline was not saved: %v", err)
+	}
+	if _, err := pipeline.Load(filepath.Join(root, ".che", "evil.json")); err == nil {
+		t.Fatalf("create escribió fuera de .che/pipelines")
+	}
+	if got := countLabels(prompt.labels, "ask:nombre del pipeline"); got != 2 {
+		t.Errorf("pipeline name prompts = %d, want 2; labels=%v", got, prompt.labels)
+	}
+}
+
 func TestPipelineCreate_StepNameRetriesUntilValid(t *testing.T) {
 	mgr, root := pipelineFixture(t, nil, "")
 	agents := []agentregistry.Agent{{Name: "claude-opus", Source: agentregistry.SourceBuiltin}}

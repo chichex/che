@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -9,9 +11,17 @@ import (
 )
 
 // savePipelineFile serializa un pipeline a JSON indentado y lo escribe
-// en path, creando el dir padre si falta.
+// atomically en path, creando el dir padre si falta.
 func savePipelineFile(path string, p pipeline.Pipeline) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("rechazado symlink en destino %s", path)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	data, err := json.MarshalIndent(p, "", "  ")
@@ -19,5 +29,25 @@ func savePipelineFile(path string, p pipeline.Pipeline) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return nil
 }
