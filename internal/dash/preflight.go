@@ -99,13 +99,13 @@ func computeGates(e Entity) FlowGates {
 
 func computeDispatchGates(e Entity, p pipeline.Pipeline, flow string) FlowGates {
 	gates := computeGates(e)
-	if step, _, ok := runStepFromFlow(flow); ok {
-		gates[flow] = gatePipelineStep(e, p, step)
+	if run, ok := decodeDynamicRunFlow(flow); ok {
+		gates[flow] = gatePipelineRunFrom(e, p, run.Step)
 	}
 	return gates
 }
 
-func gatePipelineStep(e Entity, p pipeline.Pipeline, step string) FlowGate {
+func gatePipelineRunFrom(e Entity, _ pipeline.Pipeline, step string) FlowGate {
 	if e.Locked {
 		return FlowGate{false, lockedReason(e)}
 	}
@@ -115,24 +115,16 @@ func gatePipelineStep(e Entity, p pipeline.Pipeline, step string) FlowGate {
 	if step == "" {
 		return FlowGate{false, "step vacío"}
 	}
-	current := e.StateStep
-	if current == "" {
-		current = e.Status
+	if e.StateStep == "" {
+		return FlowGate{false, "entity sin che:state:<step> — fallback legacy"}
 	}
-	for i, s := range p.Steps {
-		if s.Name != current {
-			continue
-		}
-		if i+1 >= len(p.Steps) {
-			return FlowGate{false, fmt.Sprintf("%s es el último step del pipeline", current)}
-		}
-		next := p.Steps[i+1].Name
-		if next != step {
-			return FlowGate{false, fmt.Sprintf("el próximo step desde %s es %s", current, next)}
-		}
-		return FlowGate{true, ""}
+	if step != e.StateStep {
+		return FlowGate{false, fmt.Sprintf("run dinámico debe reanudar desde %s, no %s", e.StateStep, step)}
 	}
-	return FlowGate{false, fmt.Sprintf("step actual %s no existe en el pipeline activo", emptyAsIdea(current))}
+	// TODO(#58): los botones del drawer siguen usando las gates legacy de
+	// computeGates. El auto-loop dinámico enchufa su gate en este shape común
+	// sólo para el tick; la UI dinámica completa queda para el wiring de #58.
+	return FlowGate{true, ""}
 }
 
 // adoptGates devuelve el set fijo por kind para entities en columna "adopt".

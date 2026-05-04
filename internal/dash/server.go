@@ -107,6 +107,7 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	srv.pipelineRoot = root
 	mgr, err := pipeline.NewManager(root)
 	if err != nil {
 		return fmt.Errorf("init pipeline manager: %w", err)
@@ -234,9 +235,12 @@ type Server struct {
 	logs *LogStore
 
 	// pipeline es el pipeline activo del repo para gates/auto-loop dinámicos.
-	// NewServer usa pipeline.Default() para tests y mock mode; Run lo reemplaza
-	// por el default resuelto desde `.che/pipelines.config.json` cuando existe.
-	pipeline pipeline.Pipeline
+	// NewServer usa pipeline.Default() para tests y mock mode. Run setea
+	// pipelineRoot y activePipeline() lo re-resuelve por tick para no quedar con
+	// un snapshot stale si el usuario edita `.che/pipelines/` mientras el dash
+	// sigue abierto.
+	pipeline     pipeline.Pipeline
+	pipelineRoot string
 }
 
 // allowedFlows es la allowlist de flows disparables desde el dashboard. Se
@@ -302,6 +306,24 @@ func NewServer(source Source, repoName string, pollInterval int) *Server {
 	s.tmpl = tmpl
 	s.mux = s.buildMux()
 	return s
+}
+
+func (s *Server) activePipeline() pipeline.Pipeline {
+	if s.pipelineRoot == "" {
+		return s.pipeline
+	}
+	mgr, err := pipeline.NewManager(s.pipelineRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dash auto-loop: init pipeline manager failed: %v — using last pipeline snapshot\n", err)
+		return s.pipeline
+	}
+	resolved, err := mgr.Resolve("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dash auto-loop: resolve pipeline failed: %v — using last pipeline snapshot\n", err)
+		return s.pipeline
+	}
+	s.pipeline = resolved.Pipeline
+	return s.pipeline
 }
 
 // ServeHTTP delega al mux interno; lo implementamos explícito para poder
@@ -909,12 +931,12 @@ func (s *Server) spawnChe(flow string, targetRef, entityKey int, repo string) er
 		}
 	}
 	var cmd *exec.Cmd
-	if step, prRef, ok := runStepFromFlow(flow); ok {
+	if run, ok := decodeDynamicRunFlow(flow); ok {
 		ref := "#" + strconv.Itoa(targetRef)
-		if prRef {
+		if run.PR {
 			ref = "!" + strconv.Itoa(targetRef)
 		}
-		cmd = exec.Command(bin, "run", "--auto", "--from", step, "--input", ref)
+		cmd = exec.Command(bin, "run", "--auto", "--from", run.Step, "--input", ref)
 	} else {
 		cmd = exec.Command(bin, flow, strconv.Itoa(targetRef))
 	}
@@ -922,7 +944,7 @@ func (s *Server) spawnChe(flow string, targetRef, entityKey int, repo string) er
 		cmd.Dir = repo
 	}
 	banner := fmt.Sprintf("che %s %d (en %s)", flow, targetRef, repo)
-	if strings.HasPrefix(flow, "run") {
+	if _, ok := decodeDynamicRunFlow(flow); ok {
 		banner = fmt.Sprintf("che %s (en %s)", strings.Join(cmd.Args[1:], " "), repo)
 	}
 	return s.runCmdWithLogs(cmd, entityKey, banner)

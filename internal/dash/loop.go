@@ -549,10 +549,38 @@ func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, t
 }
 
 func usesPipeline(e Entity, steps []string) bool {
-	// FALLBACK v1/v2: entities without che:state:<step>, or dashboards with an
-	// empty pipeline snapshot, stay on the legacy matcher. This keeps repos with
-	// historical labels loopable instead of coupling fallback to a reason string.
+	// FALLBACK v1/v2: entities without che:state:<step> stay on the legacy
+	// matcher. An empty pipeline snapshot also falls back so migrated entities do
+	// not get stranded if pipeline resolution is temporarily unavailable.
 	return e.StateStep != "" && len(steps) > 0
+}
+
+const (
+	dynamicRunIssuePrefix = "run#:"
+	dynamicRunPRPrefix    = "run!:"
+)
+
+type dynamicRunFlow struct {
+	Step string
+	PR   bool
+}
+
+func encodeDynamicRunFlow(run dynamicRunFlow) string {
+	if run.PR {
+		return dynamicRunPRPrefix + run.Step
+	}
+	return dynamicRunIssuePrefix + run.Step
+}
+
+func decodeDynamicRunFlow(flow string) (dynamicRunFlow, bool) {
+	switch {
+	case len(flow) > len(dynamicRunIssuePrefix) && flow[:len(dynamicRunIssuePrefix)] == dynamicRunIssuePrefix:
+		return dynamicRunFlow{Step: flow[len(dynamicRunIssuePrefix):]}, true
+	case len(flow) > len(dynamicRunPRPrefix) && flow[:len(dynamicRunPRPrefix)] == dynamicRunPRPrefix:
+		return dynamicRunFlow{Step: flow[len(dynamicRunPRPrefix):], PR: true}, true
+	default:
+		return dynamicRunFlow{}, false
+	}
 }
 
 func nextPipelineDispatch(e Entity, steps []string, rounds int) (flow string, targetRef int, reason string) {
@@ -578,25 +606,12 @@ func nextPipelineDispatch(e Entity, steps []string, rounds int) (flow string, ta
 		if i+1 >= len(steps) {
 			return "", 0, "pipeline-complete"
 		}
-		next := steps[i+1]
-		prefix := "run#:"
-		if e.Kind == KindPR {
-			prefix = "run!:"
-		}
-		return prefix + next, e.EntityKey(), "step:" + next
+		// Dynamic verdict handling lives in the pipeline agents/markers: the dash
+		// only resumes from the current StateStep and lets `che run --auto` decide
+		// advance, goto markers and skips. Legacy verdict rules are fallback only.
+		return encodeDynamicRunFlow(dynamicRunFlow{Step: e.StateStep, PR: e.Kind == KindPR}), e.EntityKey(), "step:" + e.StateStep
 	}
 	return "", 0, "step-not-in-pipeline"
-}
-
-func runStepFromFlow(flow string) (step string, pr bool, ok bool) {
-	switch {
-	case len(flow) > len("run#:") && flow[:len("run#:")] == "run#:":
-		return flow[len("run#:"):], false, true
-	case len(flow) > len("run!:") && flow[:len("run!:")] == "run!:":
-		return flow[len("run!:"):], true, true
-	default:
-		return "", false, false
-	}
 }
 
 // entitySide clasifica la entity en issue-side o PR-side para el slot de
@@ -656,8 +671,9 @@ func (s *Server) runTick() int {
 	if !anyOn {
 		return 0
 	}
-	steps := make([]string, 0, len(s.pipeline.Steps))
-	for _, step := range s.pipeline.Steps {
+	activePipeline := s.activePipeline()
+	steps := make([]string, 0, len(activePipeline.Steps))
+	for _, step := range activePipeline.Steps {
 		steps = append(steps, step.Name)
 	}
 
@@ -718,13 +734,32 @@ func (s *Server) runTick() int {
 		// que esto es defensa para cuando se sumen reglas adopt-side.
 		key := e.EntityKey()
 		rounds := s.loop.roundsFor(key)
+		if e.StateStep != "" && len(steps) == 0 {
+			if !s.loop.markGateNotified(key, "pipeline", "no-pipeline-steps:"+e.StateStep) {
+				fmt.Fprintf(os.Stderr, "dash auto-loop: dynamic fallback for %s — no-pipeline-steps (step=%s)\n", entityRef(e), e.StateStep)
+			}
+		}
 		var flow string
 		var targetRef int
 		var reason string
-		if usesPipeline(e, steps) {
+		usedPipeline := usesPipeline(e, steps)
+		if usedPipeline {
 			flow, targetRef, reason = nextPipelineDispatch(e, steps, rounds)
 		} else {
 			flow, targetRef, reason = nextDispatch(e, rules, rounds)
+		}
+		if usedPipeline && flow == "" {
+			switch reason {
+			case "step-not-in-pipeline", "no-pipeline-steps":
+				if !s.loop.markGateNotified(key, "pipeline", reason+":"+e.StateStep) {
+					fmt.Fprintf(os.Stderr, "dash auto-loop: dynamic fallback for %s — %s (step=%s)\n", entityRef(e), reason, e.StateStep)
+				}
+				flow, targetRef, reason = nextDispatch(e, rules, rounds)
+			case "pipeline-complete":
+				if !s.loop.markGateNotified(key, "pipeline", reason+":"+e.StateStep) {
+					fmt.Fprintf(os.Stderr, "dash auto-loop: pipeline complete for %s at step %s — stop\n", entityRef(e), e.StateStep)
+				}
+			}
 		}
 		if flow == "" {
 			// Cap hit: log una vez a stderr.
@@ -749,7 +784,7 @@ func (s *Server) runTick() int {
 		// (Gates ya viene poblado por overlayRunning, pero acá usamos el
 		// snapshot crudo del Source — overlayRunning no corre en el tick).
 		// computeGates es pura, sin IO; el costo es despreciable.
-		gate := computeDispatchGates(e, s.pipeline, flow)[flow]
+		gate := computeDispatchGates(e, activePipeline, flow)[flow]
 		if !gate.Available {
 			if !s.loop.markGateNotified(key, flow, gate.Reason) {
 				fmt.Fprintf(os.Stderr, "dash auto-loop: skip %s %s — %s\n", flow, entityRef(e), gate.Reason)
