@@ -30,10 +30,19 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Detect pre-release
+        id: prerelease
+        run: |
+          if echo "${{ github.ref_name }}" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+-.+'; then
+            echo "config=.goreleaser.beta.yml" >> $GITHUB_OUTPUT
+          else
+            echo "config=.goreleaser.yml" >> $GITHUB_OUTPUT
+          fi
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"
-          args: release --clean
+          args: release --clean --config ${{ steps.prerelease.outputs.config }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

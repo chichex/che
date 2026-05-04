@@ -16,20 +16,21 @@ archives:
   - formats: [tar.gz]
 
 homebrew_casks:
-  - repository:
+  - name: che-beta
+    repository:
       owner: chichex
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Casks
     homepage: https://github.com/chichex/che
-    description: "che - workflow estandarizado para trabajar con agentes de IA sobre issues de GitHub"
+    description: "che-beta - versión pre-release de che para testing"
     license: MIT
     binaries:
       - che
     hooks:
       pre:
         install: |
-          system "/bin/bash", "-c", 'brew list --cask che-beta 2>/dev/null && (echo "che: desinstalando cask beta para evitar conflicto de binario..." && brew uninstall --cask che-beta) || true'
+          system "/bin/bash", "-c", 'brew list --cask che 2>/dev/null && (echo "che-beta: desinstalando cask estable para evitar conflicto de binario..." && brew uninstall --cask che) || true'
       post:
         install: |
           system "xattr", "-dr", "com.apple.quarantine", "#{staged_path}/che"
