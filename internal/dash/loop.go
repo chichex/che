@@ -548,9 +548,19 @@ func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, t
 	return "", 0, "status-not-loopable"
 }
 
+func usesPipeline(e Entity, steps []string) bool {
+	// FALLBACK v1/v2: entities without che:state:<step>, or dashboards with an
+	// empty pipeline snapshot, stay on the legacy matcher. This keeps repos with
+	// historical labels loopable instead of coupling fallback to a reason string.
+	return e.StateStep != "" && len(steps) > 0
+}
+
 func nextPipelineDispatch(e Entity, steps []string, rounds int) (flow string, targetRef int, reason string) {
 	if e.StateStep == "" {
-		return "", 0, "no-dynamic-state"
+		return "", 0, "no-pipeline-state"
+	}
+	if len(steps) == 0 {
+		return "", 0, "no-pipeline-steps"
 	}
 	if e.Locked {
 		return "", 0, "locked"
@@ -590,8 +600,8 @@ func runStepFromFlow(flow string) (step string, pr bool, ok bool) {
 }
 
 // entitySide clasifica la entity en issue-side o PR-side para el slot de
-// concurrencia. Por Kind: KindIssue=issue, KindFused=pr. Simple y
-// determinístico.
+// concurrencia. KindFused y KindPR ocupan el slot PR-side: ambos dispatchan
+// sobre un PR cuando viven en el motor dinámico post-adopt.
 func entitySide(e Entity) string {
 	if e.Kind == KindFused || e.Kind == KindPR {
 		return "pr"
@@ -708,8 +718,12 @@ func (s *Server) runTick() int {
 		// que esto es defensa para cuando se sumen reglas adopt-side.
 		key := e.EntityKey()
 		rounds := s.loop.roundsFor(key)
-		flow, targetRef, reason := nextPipelineDispatch(e, steps, rounds)
-		if flow == "" && reason == "no-dynamic-state" {
+		var flow string
+		var targetRef int
+		var reason string
+		if usesPipeline(e, steps) {
+			flow, targetRef, reason = nextPipelineDispatch(e, steps, rounds)
+		} else {
 			flow, targetRef, reason = nextDispatch(e, rules, rounds)
 		}
 		if flow == "" {
@@ -735,12 +749,7 @@ func (s *Server) runTick() int {
 		// (Gates ya viene poblado por overlayRunning, pero acá usamos el
 		// snapshot crudo del Source — overlayRunning no corre en el tick).
 		// computeGates es pura, sin IO; el costo es despreciable.
-		gate := FlowGate{Available: true}
-		if step, _, ok := runStepFromFlow(flow); ok {
-			gate = gatePipelineStep(e, s.pipeline, step)
-		} else {
-			gate = computeGates(e)[flow]
-		}
+		gate := computeDispatchGates(e, s.pipeline, flow)[flow]
 		if !gate.Available {
 			if !s.loop.markGateNotified(key, flow, gate.Reason) {
 				fmt.Fprintf(os.Stderr, "dash auto-loop: skip %s %s — %s\n", flow, entityRef(e), gate.Reason)

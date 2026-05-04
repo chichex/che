@@ -354,6 +354,12 @@ func TestNextDispatch_RuleTable(t *testing.T) {
 
 func TestNextPipelineDispatch_UsesStepOrder(t *testing.T) {
 	steps := []string{"triage", "spec", "build", "ship"}
+	if !usesPipeline(Entity{StateStep: "spec"}, steps) {
+		t.Fatalf("usesPipeline should be true when entity has a state step and the pipeline has steps")
+	}
+	if usesPipeline(Entity{StateStep: "spec"}, nil) {
+		t.Fatalf("usesPipeline should fall back to legacy matcher when the pipeline has no steps")
+	}
 	flow, ref, reason := nextPipelineDispatch(Entity{
 		Kind:        KindIssue,
 		IssueNumber: 42,
@@ -1381,6 +1387,9 @@ func TestEntitySide(t *testing.T) {
 	}
 	if got := entitySide(Entity{Kind: KindFused}); got != "pr" {
 		t.Errorf("KindFused: got %q want 'pr'", got)
+	}
+	if got := entitySide(Entity{Kind: KindPR}); got != "pr" {
+		t.Errorf("KindPR: got %q want 'pr'", got)
 	}
 }
 

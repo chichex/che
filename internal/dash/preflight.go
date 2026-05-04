@@ -97,6 +97,14 @@ func computeGates(e Entity) FlowGates {
 	}
 }
 
+func computeDispatchGates(e Entity, p pipeline.Pipeline, flow string) FlowGates {
+	gates := computeGates(e)
+	if step, _, ok := runStepFromFlow(flow); ok {
+		gates[flow] = gatePipelineStep(e, p, step)
+	}
+	return gates
+}
+
 func gatePipelineStep(e Entity, p pipeline.Pipeline, step string) FlowGate {
 	if e.Locked {
 		return FlowGate{false, lockedReason(e)}
