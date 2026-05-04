@@ -192,8 +192,10 @@ func runPipelineCreate(out io.Writer, mgr *pipeline.Manager, agents []agentregis
 	}
 
 	dest := filepath.Join(mgr.PipelinesDir(), name+".json")
-	if !force {
-		if _, err := os.Stat(dest); err == nil {
+	destExists := false
+	if _, err := os.Stat(dest); err == nil {
+		destExists = true
+		if !force {
 			return fmt.Errorf("%s ya existe — pasá --force para sobrescribir", dest)
 		}
 	}
@@ -224,8 +226,22 @@ func runPipelineCreate(out io.Writer, mgr *pipeline.Manager, agents []agentregis
 		}
 		return agentInfo{}, false
 	}
-	if err := renderPipelineCreatePreview(out, name, created, lookup); err != nil {
+	if err := renderPipelinePreview(out, pipelinePreviewHeader{
+		Name:         name,
+		Source:       "<wizard preview>",
+		ShowComments: true,
+	}, created, lookup); err != nil {
 		return err
+	}
+	if destExists {
+		overwrite, err := prompt.Confirm(fmt.Sprintf("sobrescribir %s", dest), false)
+		if err != nil {
+			return err
+		}
+		if !overwrite {
+			fmt.Fprintln(out, "cancelado: no se sobrescribió ningún archivo")
+			return nil
+		}
 	}
 	save, err := prompt.Confirm("guardar pipeline", true)
 	if err != nil {
@@ -339,11 +355,11 @@ func pipelineCreateAgentOptions(agents []agentregistry.Agent) []pipelineCreateOp
 }
 
 func pipelineCreateAggregatorOptions() []pipelineCreateOption {
-	return []pipelineCreateOption{
-		{Label: string(pipeline.AggregatorMajority), Hint: "gana el marker más votado; empates paran"},
-		{Label: string(pipeline.AggregatorUnanimous), Hint: "todos deben coincidir; divergencias paran"},
-		{Label: string(pipeline.AggregatorFirstBlocker), Hint: "cualquier stop bloquea; goto único avanza"},
+	options := make([]pipelineCreateOption, len(pipeline.ValidAggregators))
+	for i, agg := range pipeline.ValidAggregators {
+		options[i] = pipelineCreateOption{Label: string(agg), Hint: agg.Description()}
 	}
+	return options
 }
 
 func pipelineCreateDefaultStepComment(step pipeline.Step) string {
@@ -351,38 +367,4 @@ func pipelineCreateDefaultStepComment(step pipeline.Step) string {
 		return fmt.Sprintf("%s corre %d agentes y resuelve markers con %s", step.Name, len(step.Agents), step.Aggregator)
 	}
 	return fmt.Sprintf("%s corre %s", step.Name, step.Agents[0])
-}
-
-func renderPipelineCreatePreview(out io.Writer, name string, p pipeline.Pipeline, lookup func(string) (agentInfo, bool)) error {
-	fmt.Fprintf(out, "pipeline: %s\n", name)
-	fmt.Fprintln(out, "source:   <wizard preview>")
-	fmt.Fprintln(out, "")
-	if p.Entry != nil {
-		fmt.Fprintln(out, "entry:")
-		if err := writeAgentsTable(out, p.Entry.Agents, lookup); err != nil {
-			return err
-		}
-		fmt.Fprintln(out, "")
-	}
-	for i, step := range p.Steps {
-		fmt.Fprintf(out, "step[%d]: %s\n", i, step.Name)
-		if err := writeAgentsTable(out, step.Agents, lookup); err != nil {
-			return err
-		}
-		agg := string(step.Aggregator)
-		if agg == "" {
-			if len(step.Agents) > 1 {
-				agg = "majority (default)"
-			} else {
-				agg = "- (1 agente)"
-			}
-		}
-		fmt.Fprintf(out, "  aggregator: %s\n", agg)
-		if step.Comment != "" {
-			fmt.Fprintf(out, "  comment: %s\n", step.Comment)
-		}
-		fmt.Fprintln(out, "")
-	}
-	fmt.Fprintln(out, "(dry-run: no se invocó ningún agente)")
-	return nil
 }

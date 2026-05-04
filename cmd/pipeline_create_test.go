@@ -15,9 +15,11 @@ type fakePipelineCreatePrompt struct {
 	confirms []bool
 	choices  []int
 	multis   [][]int
+	labels   []string
 }
 
 func (f *fakePipelineCreatePrompt) Ask(label, def string) (string, error) {
+	f.labels = append(f.labels, "ask:"+label)
 	if len(f.asks) == 0 {
 		return def, nil
 	}
@@ -30,6 +32,7 @@ func (f *fakePipelineCreatePrompt) Ask(label, def string) (string, error) {
 }
 
 func (f *fakePipelineCreatePrompt) Confirm(label string, def bool) (bool, error) {
+	f.labels = append(f.labels, "confirm:"+label)
 	if len(f.confirms) == 0 {
 		return def, nil
 	}
@@ -39,6 +42,7 @@ func (f *fakePipelineCreatePrompt) Confirm(label string, def bool) (bool, error)
 }
 
 func (f *fakePipelineCreatePrompt) Choose(label string, options []pipelineCreateOption) (int, error) {
+	f.labels = append(f.labels, "choose:"+label)
 	if len(f.choices) == 0 {
 		return 0, nil
 	}
@@ -48,6 +52,7 @@ func (f *fakePipelineCreatePrompt) Choose(label string, options []pipelineCreate
 }
 
 func (f *fakePipelineCreatePrompt) MultiChoose(label string, options []pipelineCreateOption) ([]int, error) {
+	f.labels = append(f.labels, "multi:"+label)
 	if len(f.multis) == 0 {
 		return []int{0}, nil
 	}
@@ -93,6 +98,20 @@ func TestPipelineCreate_BuildsAndSavesWizardPipeline(t *testing.T) {
 	if !strings.Contains(out.String(), "dry-run") || !strings.Contains(out.String(), "custom.json") {
 		t.Errorf("stdout no muestra preview + path: %q", out.String())
 	}
+	wantLabels := []string{
+		"confirm:clonar desde un pipeline existente",
+		"confirm:agregar entry agent",
+		"choose:entry agent",
+		"ask:nombre del step",
+		"multi:agentes del step",
+		"choose:aggregator",
+		"ask:comment del step",
+		"confirm:agregar otro step",
+		"confirm:guardar pipeline",
+	}
+	if strings.Join(prompt.labels, "|") != strings.Join(wantLabels, "|") {
+		t.Errorf("prompt labels drift:\n got %v\nwant %v", prompt.labels, wantLabels)
+	}
 }
 
 func TestPipelineCreate_CancelDoesNotSave(t *testing.T) {
@@ -128,6 +147,33 @@ func TestPipelineCreate_ConflictWithoutForce(t *testing.T) {
 	}
 }
 
+func TestPipelineCreate_ForceExistingRequiresOverwriteConfirm(t *testing.T) {
+	mgr, root := pipelineFixture(t, map[string]string{"taken": minimalPipeline}, "")
+	agents := []agentregistry.Agent{{Name: "claude-opus", Source: agentregistry.SourceBuiltin}}
+	prompt := &fakePipelineCreatePrompt{
+		confirms: []bool{false, false, false},
+		asks:     []string{"idea", ""},
+		multis:   [][]int{{0}},
+	}
+	var out bytes.Buffer
+	if err := runPipelineCreate(&out, mgr, agents, prompt, "taken", true); err != nil {
+		t.Fatalf("runPipelineCreate: %v", err)
+	}
+	got, err := pipeline.Load(filepath.Join(root, ".che", "pipelines", "taken.json"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(got.Steps) != 1 || got.Steps[0].Name != "explore" {
+		t.Fatalf("archivo fue sobrescrito aunque overwrite=false: %#v", got)
+	}
+	if !strings.Contains(out.String(), "no se sobrescribió") {
+		t.Errorf("stdout no menciona cancelación de overwrite: %q", out.String())
+	}
+	if !containsLabel(prompt.labels, "confirm:sobrescribir ") {
+		t.Errorf("no pidió confirmación de overwrite: %v", prompt.labels)
+	}
+}
+
 func TestPipelineCreate_CloneExistingPipeline(t *testing.T) {
 	mgr, root := pipelineFixture(t, map[string]string{"src": minimalPipeline}, "")
 	agents := []agentregistry.Agent{{Name: "claude-opus", Source: agentregistry.SourceBuiltin}}
@@ -146,4 +192,13 @@ func TestPipelineCreate_CloneExistingPipeline(t *testing.T) {
 	if len(got.Steps) != 1 || got.Steps[0].Name != "explore" {
 		t.Fatalf("clone drift: %#v", got)
 	}
+}
+
+func containsLabel(labels []string, prefix string) bool {
+	for _, label := range labels {
+		if strings.HasPrefix(label, prefix) {
+			return true
+		}
+	}
+	return false
 }
