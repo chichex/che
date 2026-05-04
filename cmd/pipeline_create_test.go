@@ -102,7 +102,7 @@ func TestPipelineCreate_BuildsAndSavesWizardPipeline(t *testing.T) {
 		"confirm:clonar desde un pipeline existente",
 		"confirm:agregar entry agent",
 		"choose:entry agent",
-		"ask:nombre del step",
+		"ask:nombre del step ([a-z_][a-z0-9_]*)",
 		"multi:agentes del step",
 		"choose:aggregator",
 		"ask:comment del step",
@@ -111,6 +111,53 @@ func TestPipelineCreate_BuildsAndSavesWizardPipeline(t *testing.T) {
 	}
 	if strings.Join(prompt.labels, "|") != strings.Join(wantLabels, "|") {
 		t.Errorf("prompt labels drift:\n got %v\nwant %v", prompt.labels, wantLabels)
+	}
+}
+
+func TestPipelineCreate_PromptedNameRetriesExisting(t *testing.T) {
+	mgr, root := pipelineFixture(t, map[string]string{"taken": minimalPipeline}, "")
+	agents := []agentregistry.Agent{{Name: "claude-opus", Source: agentregistry.SourceBuiltin}}
+	prompt := &fakePipelineCreatePrompt{
+		asks:     []string{"taken", "fresh", "idea", ""},
+		confirms: []bool{false, false, false, true},
+		multis:   [][]int{{0}},
+	}
+	var out bytes.Buffer
+	if err := runPipelineCreate(&out, mgr, agents, prompt, "", false); err != nil {
+		t.Fatalf("runPipelineCreate: %v", err)
+	}
+	if _, err := pipeline.Load(filepath.Join(root, ".che", "pipelines", "fresh.json")); err != nil {
+		t.Fatalf("fresh pipeline was not saved: %v", err)
+	}
+	if containsLabel(prompt.labels, "confirm:sobrescribir ") {
+		t.Errorf("prompted name retry should avoid overwrite confirmation: %v", prompt.labels)
+	}
+	if got := countLabels(prompt.labels, "ask:nombre del pipeline"); got != 2 {
+		t.Errorf("pipeline name prompts = %d, want 2; labels=%v", got, prompt.labels)
+	}
+}
+
+func TestPipelineCreate_StepNameRetriesUntilValid(t *testing.T) {
+	mgr, root := pipelineFixture(t, nil, "")
+	agents := []agentregistry.Agent{{Name: "claude-opus", Source: agentregistry.SourceBuiltin}}
+	prompt := &fakePipelineCreatePrompt{
+		asks:     []string{"Bad Name", "valid_step", ""},
+		confirms: []bool{false, false, false, true},
+		multis:   [][]int{{0}},
+	}
+	var out bytes.Buffer
+	if err := runPipelineCreate(&out, mgr, agents, prompt, "validated", false); err != nil {
+		t.Fatalf("runPipelineCreate: %v", err)
+	}
+	got, err := pipeline.Load(filepath.Join(root, ".che", "pipelines", "validated.json"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.Steps[0].Name != "valid_step" {
+		t.Fatalf("step name = %q, want valid_step", got.Steps[0].Name)
+	}
+	if got := countLabels(prompt.labels, "ask:nombre del step ([a-z_][a-z0-9_]*)"); got != 2 {
+		t.Errorf("step name prompts = %d, want 2; labels=%v", got, prompt.labels)
 	}
 }
 
@@ -201,4 +248,14 @@ func containsLabel(labels []string, prefix string) bool {
 		}
 	}
 	return false
+}
+
+func countLabels(labels []string, want string) int {
+	count := 0
+	for _, label := range labels {
+		if label == want {
+			count++
+		}
+	}
+	return count
 }

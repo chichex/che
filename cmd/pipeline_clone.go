@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -94,7 +93,7 @@ func runPipelineClone(out io.Writer, mgr *pipeline.Manager, src, dst string, raw
 			return fmt.Errorf("%s ya existe — pasá --force para sobrescribir", dest)
 		}
 	}
-	if err := writeClonedPipeline(dest, cloned); err != nil {
+	if err := savePipelineFile(dest, cloned); err != nil {
 		return fmt.Errorf("escribir %s: %w", dest, err)
 	}
 	fmt.Fprintf(out, "creado %s (clonado de %q)\n", dest, src)
@@ -163,16 +162,4 @@ func replaceAll(agents []string, rules map[string]string) []string {
 		out[i] = a
 	}
 	return out
-}
-
-func writeClonedPipeline(path string, p pipeline.Pipeline) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(p, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
 }

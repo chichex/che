@@ -21,7 +21,11 @@ var pipelineCreateCmd = &cobra.Command{
 	Short: "crea un pipeline con un wizard interactivo",
 	Long: `create abre un wizard paso a paso para generar un pipeline JSON válido:
 nombre, clonado opcional, entry agent opcional, steps, aggregator y confirmación
-con preview tipo simulate antes de guardar en .che/pipelines/<name>.json.`,
+con preview tipo simulate antes de guardar en .che/pipelines/<name>.json.
+
+A diferencia de pipeline clone, create puede construir el pipeline desde cero
+interactivamente; su opción de clonar sólo copia una fuente elegida dentro del
+wizard y no aplica sustituciones --replace.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cmd.SilenceUsage = true
@@ -179,25 +183,14 @@ func runPipelineCreate(out io.Writer, mgr *pipeline.Manager, agents []agentregis
 	if len(agents) == 0 {
 		return fmt.Errorf("agent registry vacío: no hay agentes para seleccionar")
 	}
-	if strings.TrimSpace(name) == "" {
-		var err error
-		name, err = prompt.Ask("nombre del pipeline", "")
-		if err != nil {
-			return err
-		}
+	name, promptedName, err := promptPipelineName(prompt, mgr, name, force)
+	if err != nil {
+		return err
 	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return fmt.Errorf("pipeline name no puede ser vacío")
-	}
-
 	dest := filepath.Join(mgr.PipelinesDir(), name+".json")
-	destExists := false
-	if _, err := os.Stat(dest); err == nil {
-		destExists = true
-		if !force {
-			return fmt.Errorf("%s ya existe — pasá --force para sobrescribir", dest)
-		}
+	destExists := pipelineFileExists(dest)
+	if destExists && !force && !promptedName {
+		return fmt.Errorf("%s ya existe — pasá --force para sobrescribir", dest)
 	}
 
 	created, err := promptPipeline(prompt, mgr, agents)
@@ -251,11 +244,36 @@ func runPipelineCreate(out io.Writer, mgr *pipeline.Manager, agents []agentregis
 		fmt.Fprintln(out, "cancelado: no se guardó ningún archivo")
 		return nil
 	}
-	if err := writePipelineFile(dest, created); err != nil {
+	if err := savePipelineFile(dest, created); err != nil {
 		return fmt.Errorf("escribir %s: %w", dest, err)
 	}
 	fmt.Fprintf(out, "creado %s\n", dest)
 	return nil
+}
+
+func promptPipelineName(prompt pipelineCreatePrompt, mgr *pipeline.Manager, name string, force bool) (string, bool, error) {
+	name = strings.TrimSpace(name)
+	if name != "" {
+		return name, false, nil
+	}
+	for {
+		asked, err := prompt.Ask("nombre del pipeline", "")
+		if err != nil {
+			return "", true, err
+		}
+		asked = strings.TrimSpace(asked)
+		if asked == "" {
+			return "", true, fmt.Errorf("pipeline name no puede ser vacío")
+		}
+		if force || !pipelineFileExists(filepath.Join(mgr.PipelinesDir(), asked+".json")) {
+			return asked, true, nil
+		}
+	}
+}
+
+func pipelineFileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func promptPipeline(prompt pipelineCreatePrompt, mgr *pipeline.Manager, agents []agentregistry.Agent) (pipeline.Pipeline, error) {
@@ -284,11 +302,10 @@ func promptPipeline(prompt pipelineCreatePrompt, mgr *pipeline.Manager, agents [
 	}
 
 	for {
-		stepName, err := prompt.Ask("nombre del step", "")
+		stepName, err := promptStepName(prompt)
 		if err != nil {
 			return pipeline.Pipeline{}, err
 		}
-		stepName = strings.TrimSpace(stepName)
 		picked, err := prompt.MultiChoose("agentes del step", agentOptions)
 		if err != nil {
 			return pipeline.Pipeline{}, err
@@ -320,6 +337,29 @@ func promptPipeline(prompt pipelineCreatePrompt, mgr *pipeline.Manager, agents [
 		}
 	}
 	return created, nil
+}
+
+func promptStepName(prompt pipelineCreatePrompt) (string, error) {
+	for {
+		stepName, err := prompt.Ask("nombre del step ([a-z_][a-z0-9_]*)", "")
+		if err != nil {
+			return "", err
+		}
+		stepName = strings.TrimSpace(stepName)
+		if err := validatePromptStepName(stepName); err == nil {
+			return stepName, nil
+		}
+	}
+}
+
+func validatePromptStepName(name string) error {
+	return pipeline.Validate(pipeline.Pipeline{
+		Version: pipeline.CurrentVersion,
+		Steps: []pipeline.Step{{
+			Name:   name,
+			Agents: []string{"_wizard_placeholder"},
+		}},
+	})
 }
 
 func promptPipelineCloneSource(prompt pipelineCreatePrompt, mgr *pipeline.Manager) (pipeline.Pipeline, error) {
