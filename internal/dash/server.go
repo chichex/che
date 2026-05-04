@@ -1578,6 +1578,11 @@ func (s *Server) buildMux() *http.ServeMux {
 	})
 
 	mux.HandleFunc("POST /pipeline/editor", func(w http.ResponseWriter, r *http.Request) {
+		// Force-refresh del cache desde disco antes de validar/escribir:
+		// activePipeline() tiene side-effect de releer el config y mutar
+		// s.pipeline/s.pipelineName. Evita que el editor escriba sobre un
+		// snapshot obsoleto si otro proceso modificó el archivo entre el
+		// GET inicial y este POST. El return value se descarta a propósito.
 		_ = s.activePipeline()
 		p, err := s.pipelineEditorFromRequest(r)
 		data := s.activePipelineResolved()

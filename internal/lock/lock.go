@@ -360,7 +360,21 @@ func (h *Handle) Release() error {
 		close(h.stop)
 	})
 	if h.done != nil {
-		<-h.done
+		// Bounded wait: el heartbeatLoop puede estar dentro de un `gh api`
+		// lento (network hang, GitHub 503) sin timeout propio — si esperamos
+		// indefinidamente acá colgamos al `defer releaseLock()` del caller
+		// y al proceso entero. Preferimos un Release lento-pero-bounded: si
+		// la goroutine no responde en 30s, logueamos y seguimos con la
+		// limpieza del label. El tick que estaba en vuelo puede dejar el
+		// label aplicado (esa es la race que el sync original previene),
+		// pero el TTL del lock garantiza recovery eventual.
+		select {
+		case <-h.done:
+		case <-time.After(30 * time.Second):
+			if h.logErr != nil {
+				h.logErr("lock: Release timeout esperando heartbeatLoop (30s); procediendo con cleanup, posible label colgado hasta TTL")
+			}
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()

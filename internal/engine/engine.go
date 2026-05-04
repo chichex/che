@@ -297,6 +297,12 @@ type Options struct {
 	// AfterStepOK corre cuando un step terminó sin [stop] ni error técnico,
 	// antes de avanzar al siguiente step. Callers lo usan para cerrar
 	// che:state:applying:<step> -> che:state:<step>.
+	//
+	// No corre cuando el step emite [stop] ni cuando hay error técnico
+	// (StopReasonTechnicalError): en ambos casos `che:state:applying:<step>`
+	// queda colgado a propósito, como marca del último intento para el
+	// humano que retoma. Un caller futuro que asuma "AfterStepOK = step
+	// terminó" se va a confundir; por eso queda explícito acá.
 	AfterStepOK func(ctx context.Context, step string) error
 }
 
