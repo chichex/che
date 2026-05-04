@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/chichex/che/internal/pipeline"
 )
 
 // TestListenWithFallback_PicksNextWhenBusy: motivación del cambio — correr
@@ -1928,6 +1930,99 @@ func TestDrawerKindPR_PostAdoptValidated(t *testing.T) {
 	// a validated — antes se renderizaba hardcodeado para todo KindPR.
 	if strings.Contains(got, `>adopt</span>`) {
 		t.Errorf("KindPR validated drawer: chip 'adopt' no debería aparecer post-adopt")
+	}
+}
+
+func TestBuildData_CustomPipelineUsesStepColumns(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build", IssueTitle: "compile"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{
+		{Name: "spec", Agents: []string{"claude-sonnet"}},
+		{Name: "build", Agents: []string{"claude-opus"}},
+		{Name: "ship", Agents: []string{"claude-haiku"}},
+	}}
+
+	data := s.buildData(false)
+	if data.ColCount != 3 {
+		t.Fatalf("ColCount: got %d want 3", data.ColCount)
+	}
+	want := []string{"spec", "build", "ship"}
+	for i, key := range want {
+		if data.Columns[i].Key != key {
+			t.Fatalf("Columns[%d].Key: got %q want %q (all=%+v)", i, data.Columns[i].Key, key, data.Columns)
+		}
+	}
+	if len(data.Columns[1].Entities) != 1 || data.Columns[1].Entities[0].IssueNumber != 42 {
+		t.Fatalf("build column entities: got %+v", data.Columns[1].Entities)
+	}
+}
+
+func TestDrawer_CustomPipelineRendersStepActions(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		NWO:    "demo/che",
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build", IssueTitle: "compile"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{
+		{Name: "spec", Agents: []string{"claude-sonnet"}},
+		{Name: "build", Agents: []string{"claude-opus", "claude-haiku"}, Aggregator: pipeline.AggregatorFirstBlocker, Comment: "compile checks"},
+	}}
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/drawer/42")
+	if err != nil {
+		t.Fatalf("GET drawer: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	got := string(body)
+	for _, want := range []string{
+		`hx-post="/action/run/build/42"`,
+		`claude-opus, claude-haiku`,
+		`compile checks`,
+		`che run --manual --from &lt;step&gt;`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("drawer missing %q\nbody=%s", want, got)
+		}
+	}
+}
+
+func TestActionRunFrom_CustomPipelineCallsDynamicRun(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		LastOK: time.Now(),
+		NWO:    "demo/che",
+		Entities: []Entity{
+			{Kind: KindIssue, IssueNumber: 42, Status: "build", StateStep: "build", IssueTitle: "compile"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{{Name: "build", Agents: []string{"claude-opus"}}}}
+	fr := &fakeRunner{}
+	s.runAction = fr.run
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/run/build/42", "", nil)
+	if err != nil {
+		t.Fatalf("POST run/build: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status: got %d want 200", resp.StatusCode)
+	}
+	got := fr.last()
+	if got.Flow != "run#:build" || got.TargetRef != 42 || got.EntityKey != 42 {
+		t.Fatalf("runner call: got %+v want flow=run#:build target=42 key=42", got)
 	}
 }
 
