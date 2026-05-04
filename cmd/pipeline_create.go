@@ -85,6 +85,9 @@ func (p *pipelineCreateStdioPrompt) Ask(label, def string) (string, error) {
 		fmt.Fprintf(p.out, "%s: ", label)
 	}
 	text, err := p.in.ReadString('\n')
+	if err == io.EOF && text == "" {
+		return "", fmt.Errorf("stdin cerrado/no interactivo: pipeline create requiere respuestas interactivas")
+	}
 	if err != nil && err != io.EOF {
 		return "", err
 	}

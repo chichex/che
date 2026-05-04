@@ -161,6 +161,18 @@ func TestPipelineCreate_StepNameRetriesUntilValid(t *testing.T) {
 	}
 }
 
+func TestPipelineCreate_StepNameClosedStdinReturnsError(t *testing.T) {
+	prompt := newPipelineCreateStdioPrompt(strings.NewReader(""), &bytes.Buffer{})
+
+	_, err := promptStepName(prompt)
+	if err == nil {
+		t.Fatalf("esperaba error con stdin cerrado, got nil")
+	}
+	if !strings.Contains(err.Error(), "stdin cerrado/no interactivo") {
+		t.Fatalf("error = %q, want stdin cerrado/no interactivo", err.Error())
+	}
+}
+
 func TestPipelineCreate_CancelDoesNotSave(t *testing.T) {
 	mgr, root := pipelineFixture(t, nil, "")
 	agents := []agentregistry.Agent{{Name: "claude-opus", Source: agentregistry.SourceBuiltin}}
