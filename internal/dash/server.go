@@ -33,6 +33,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -533,7 +534,10 @@ func isDefaultPipeline(p pipeline.Pipeline) bool {
 		return false
 	}
 	for i := range p.Steps {
-		if p.Steps[i].Name != def.Steps[i].Name {
+		if p.Steps[i].Name != def.Steps[i].Name ||
+			p.Steps[i].Aggregator != def.Steps[i].Aggregator ||
+			p.Steps[i].Comment != def.Steps[i].Comment ||
+			!slices.Equal(p.Steps[i].Agents, def.Steps[i].Agents) {
 			return false
 		}
 	}
@@ -918,6 +922,15 @@ func buildDrawerSteps(e Entity, p pipeline.Pipeline) []drawerStepData {
 		})
 	}
 	return out
+}
+
+func (s *Server) newDrawerData(e Entity, auto bool, p pipeline.Pipeline) drawerData {
+	return drawerData{
+		Entity:        e,
+		NWO:           s.source.Snapshot().NWO,
+		Auto:          auto,
+		PipelineSteps: buildDrawerSteps(e, p),
+	}
 }
 
 // overlayRunning aplica el estado local (s.running) sobre un slice de
@@ -1339,7 +1352,7 @@ func (s *Server) buildMux() *http.ServeMux {
 		// en los refs del header; Entity pelada no lo lleva. Auto (step 6)
 		// indica si el RunningFlow fue disparado por el auto-loop engine.
 		activePipeline := s.activePipeline()
-		data := drawerData{Entity: entity, NWO: s.source.Snapshot().NWO, Auto: s.isAutoRunning(id), PipelineSteps: buildDrawerSteps(entity, activePipeline)}
+		data := s.newDrawerData(entity, s.isAutoRunning(id), activePipeline)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		if err := s.tmpl.ExecuteTemplate(w, "drawer.html.tmpl", data); err != nil {
@@ -1375,6 +1388,8 @@ func (s *Server) buildMux() *http.ServeMux {
 		}
 		activePipeline := s.activePipeline()
 		flow := encodeDynamicRunFlow(dynamicRunFlow{Step: step, PR: entity.Kind == KindPR || (entity.Kind == KindFused && entity.PRNumber > 0)})
+		// No hay allowlist constante para steps: la whitelist dinámica es el
+		// pipeline activo, validado por gatePipelineRunFrom(step ∈ p.Steps).
 		gate := gatePipelineRunFrom(entity, activePipeline, step)
 		if !gate.Available {
 			reason := gate.Reason
@@ -1401,7 +1416,7 @@ func (s *Server) buildMux() *http.ServeMux {
 		s.bumpSource()
 		entity.RunningFlow = flow
 		entity.Gates[flow] = gate
-		data := drawerData{Entity: entity, NWO: s.source.Snapshot().NWO, Auto: false, PipelineSteps: buildDrawerSteps(entity, activePipeline)}
+		data := s.newDrawerData(entity, false, activePipeline)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		if err := s.tmpl.ExecuteTemplate(w, "drawer.html.tmpl", data); err != nil {
@@ -1486,7 +1501,7 @@ func (s *Server) buildMux() *http.ServeMux {
 		// porque este dispatch vino del handler manual.
 		entity.RunningFlow = flow
 		activePipeline := s.activePipeline()
-		data := drawerData{Entity: entity, NWO: s.source.Snapshot().NWO, Auto: false, PipelineSteps: buildDrawerSteps(entity, activePipeline)}
+		data := s.newDrawerData(entity, false, activePipeline)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
 		if err := s.tmpl.ExecuteTemplate(w, "drawer.html.tmpl", data); err != nil {
