@@ -389,6 +389,9 @@ func TestNextPipelineDispatch_EdgeReasons(t *testing.T) {
 	if flow, _, reason := nextPipelineDispatch(Entity{Kind: KindIssue, IssueNumber: 1, StateStep: "spec"}, nil, map[LoopRule]bool{RuleExploreIdea: true}, 0); flow != "" || reason != "no-pipeline-steps" {
 		t.Fatalf("empty: flow=%q reason=%q, want no flow/no-pipeline-steps", flow, reason)
 	}
+	if flow, _, reason := nextPipelineDispatch(Entity{Kind: KindIssue, IssueNumber: 1, StateStep: "spec"}, []string{"spec", "ship"}, map[LoopRule]bool{RuleExploreIdea: true}, DynamicLoopCap); flow != "" || reason != "cap-reached" {
+		t.Fatalf("dynamic cap: flow=%q reason=%q, want no flow/cap-reached", flow, reason)
+	}
 }
 
 // ================== Tick & concurrency ==================
@@ -623,8 +626,9 @@ func TestTick_KindPRRunningOccupiesPRSlot(t *testing.T) {
 	}
 }
 
-// TestTick_CapFive: mismo entity pasa por 5 rondas; el 6to tick no dispatcha.
-func TestTick_CapFive(t *testing.T) {
+// TestTick_LegacyCapTen: mismo entity legacy pasa por LoopCap rondas; el
+// siguiente tick no dispatcha.
+func TestTick_LegacyCapTen(t *testing.T) {
 	ents := []Entity{
 		{Kind: KindIssue, IssueNumber: 42, Status: "plan"},
 	}
@@ -647,6 +651,31 @@ func TestTick_CapFive(t *testing.T) {
 	}
 	if fr.count() != LoopCap {
 		t.Errorf("runner calls tras cap: got %d want %d", fr.count(), LoopCap)
+	}
+}
+
+func TestTick_DynamicPipelineCapThree(t *testing.T) {
+	s, fr := newLoopServer(t, []Entity{{Kind: KindIssue, IssueNumber: 42, Status: "idea", StateStep: "idea"}})
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{
+		{Name: "idea", Agents: []string{"claude-opus"}},
+		{Name: "explore", Agents: []string{"claude-opus"}},
+	}}
+	s.loop.rules[RuleExploreIdea] = true
+
+	for i := 1; i <= DynamicLoopCap; i++ {
+		if n := s.runTick(); n != 1 {
+			t.Fatalf("tick #%d dispatches: got %d want 1", i, n)
+		}
+		s.clearRunning(42)
+	}
+	if fr.count() != DynamicLoopCap {
+		t.Fatalf("runner calls tras %d ticks: got %d want %d", DynamicLoopCap, fr.count(), DynamicLoopCap)
+	}
+	if n := s.runTick(); n != 0 {
+		t.Errorf("tick #%d (post-cap dinámico) dispatches: got %d want 0", DynamicLoopCap+1, n)
+	}
+	if fr.count() != DynamicLoopCap {
+		t.Errorf("runner calls tras cap dinámico: got %d want %d", fr.count(), DynamicLoopCap)
 	}
 }
 
@@ -736,7 +765,7 @@ func TestTick_ManualDispatchCountsForCap(t *testing.T) {
 		s.clearRunning(42)
 	}
 	if fr.count() != LoopCap {
-		t.Fatalf("calls tras 5 manuales: got %d want %d", fr.count(), LoopCap)
+		t.Fatalf("calls tras %d manuales: got %d want %d", LoopCap, fr.count(), LoopCap)
 	}
 	// Ahora el counter debería estar en cap.
 	if r := s.loop.roundsFor(42); r != LoopCap {

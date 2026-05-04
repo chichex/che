@@ -3,6 +3,8 @@ package dash
 import (
 	"strings"
 	"testing"
+
+	"github.com/chichex/che/internal/pipeline"
 )
 
 // TestComputeGates es un table-driven sweep por las 5 funciones de gate.
@@ -329,7 +331,7 @@ func TestComputeGates(t *testing.T) {
 			},
 		},
 		{
-			name: "KindPR validated sin verdict → iterate OFF con razón explícita",
+			name:   "KindPR validated sin verdict → iterate OFF con razón explícita",
 			entity: Entity{Kind: KindPR, PRNumber: 26, Status: "validated"},
 			wantAvail: map[string]bool{
 				flowIterate:  false,
@@ -416,6 +418,18 @@ func TestComputeGatesAllFlowsCovered(t *testing.T) {
 		if _, ok := gates[f]; !ok {
 			t.Errorf("computeGates no devuelve gate para flow=%q (drift entre allFlows y computeGates)", f)
 		}
+	}
+}
+
+func TestGatePipelineRunFrom_RequiresStepInActivePipeline(t *testing.T) {
+	p := pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{{Name: "spec", Agents: []string{"claude-opus"}}}}
+	e := Entity{Kind: KindIssue, IssueNumber: 42, StateStep: "spec"}
+
+	if gate := gatePipelineRunFrom(e, p, "spec"); !gate.Available {
+		t.Fatalf("gate available: got false reason=%q", gate.Reason)
+	}
+	if gate := gatePipelineRunFrom(e, p, "ghost"); gate.Available || !strings.Contains(gate.Reason, "no existe") {
+		t.Fatalf("missing step gate: got available=%v reason=%q, want unavailable/no existe", gate.Available, gate.Reason)
 	}
 }
 

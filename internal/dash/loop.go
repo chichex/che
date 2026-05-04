@@ -29,7 +29,7 @@
 //   - verdict=needs-human    → done (requiere ojo humano), no dispatch.
 //   - Locked=true            → skip este tick (no terminal; el próximo
 //     intenta de vuelta cuando se destrabe).
-//   - rounds[id] >= LoopCap  → cap alcanzado, no dispatch.
+//   - rounds[id] >= cap efectivo → cap alcanzado, no dispatch.
 //
 // Concurrency: a lo sumo 1 flow issue-side + 1 PR-side simultáneos en todo
 // el board. La clasificación es por Kind (KindIssue=issue-side, KindFused
@@ -71,15 +71,25 @@ import (
 	"github.com/chichex/che/internal/pipelinelabels"
 )
 
-// LoopCap es el número máximo de dispatches automáticos + manuales que el
-// loop engine permite para una misma entidad desde que arrancó el server.
+// LoopCap es el número máximo legacy de dispatches automáticos + manuales que
+// el loop engine permite para una misma entidad desde que arrancó el server.
 // El contador se resetea al reiniciar (in-memory). 10 cubre ~5 rondas
-// iterate↔validate — suficiente para un feature que necesita varios pulidos
-// antes de aprobarse, sin entrar en loops infinitos si el validador nunca
-// converge. El handler manual de /action NO consulta este cap (solo gatea
-// el auto-loop engine), así que el humano puede seguir disparando a mano
-// desde el modal después de que el cap se alcance.
+// iterate↔validate en el motor legacy, sin entrar en loops infinitos si el
+// validador nunca converge. El motor dinámico usa DynamicLoopCap para mitigar
+// loops de pipeline más temprano.
 const LoopCap = 10
+
+// DynamicLoopCap es el cap efectivo para dispatches dinámicos `che run --auto`.
+// Mantiene LoopCap=10 para entidades legacy, pero corta pipelines dinámicos a
+// 3 intentos sobre la misma entity antes de requerir intervención humana.
+const DynamicLoopCap = 3
+
+func loopCapForEntity(e Entity) int {
+	if e.StateStep != "" {
+		return DynamicLoopCap
+	}
+	return LoopCap
+}
 
 // LoopRule es el identificador de una de las 4 reglas loopeables. Usado
 // como clave del map del state y en la URL del endpoint POST /loop/rule/...
@@ -430,7 +440,7 @@ type loopFromGroup struct {
 //
 // Reglas de corte (en orden de chequeo):
 //  1. Locked=true → skip (motivo: "locked").
-//  2. Cap hit (rounds >= LoopCap) → stop (motivo: "cap-reached").
+//  2. Cap hit (rounds >= LoopCap legacy) → stop (motivo: "cap-reached").
 //  3. Verdict terminal (approve / needs-human) → stop.
 //  4. Match de reglas ON → dispatch.
 //
@@ -636,7 +646,7 @@ func nextPipelineDispatch(e Entity, steps []string, rules map[LoopRule]bool, rou
 	if e.StateApplying {
 		return "", 0, "applying"
 	}
-	if rounds >= LoopCap {
+	if rounds >= DynamicLoopCap {
 		return "", 0, "cap-reached"
 	}
 	for i, step := range steps {
@@ -791,7 +801,9 @@ func (s *Server) runTick() int {
 		var targetRef int
 		var reason string
 		usedPipeline := usesPipeline(e, steps)
+		cap := LoopCap
 		if usedPipeline {
+			cap = DynamicLoopCap
 			flow, targetRef, reason = nextPipelineDispatch(e, steps, rules, rounds)
 		} else {
 			flow, targetRef, reason = nextDispatch(e, rules, rounds)
@@ -817,7 +829,7 @@ func (s *Server) runTick() int {
 			// Cap hit: log una vez a stderr.
 			if reason == "cap-reached" {
 				if !s.loop.markCapNotified(key) {
-					fmt.Fprintf(os.Stderr, "dash auto-loop: cap %d reached for %s — stop\n", LoopCap, entityRef(e))
+					fmt.Fprintf(os.Stderr, "dash auto-loop: cap %d reached for %s — stop\n", cap, entityRef(e))
 				}
 			}
 			continue

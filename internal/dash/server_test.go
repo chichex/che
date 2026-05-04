@@ -1441,7 +1441,7 @@ func TestStatusChip_UsesNextPollSec(t *testing.T) {
 // TestOverlayRunning_InjectsRoundsCounter: el chip magenta del card muestra
 // ⟳ <flow> <RunIter>/<RunMax>. Esos campos nunca se asignaban, siempre
 // mostraba "0/0". Ahora overlayRunning lee el counter del loopState y el
-// cap (LoopCap) y los copia al Entity cuando RunningFlow != "".
+// cap efectivo y los copia al Entity cuando RunningFlow != "".
 func TestOverlayRunning_InjectsRoundsCounter(t *testing.T) {
 	src := &fixedSource{snap: Snapshot{LastOK: time.Now()}}
 	s := NewServer(src, "repo", 15)
@@ -1470,6 +1470,22 @@ func TestOverlayRunning_InjectsRoundsCounter(t *testing.T) {
 	// Entity sin flow corriendo no debe tener RunIter/RunMax seteados.
 	if out[1].RunIter != 0 || out[1].RunMax != 0 {
 		t.Errorf("out[1] idle: got RunIter=%d RunMax=%d, want 0/0", out[1].RunIter, out[1].RunMax)
+	}
+}
+
+func TestOverlayRunning_InjectsDynamicRunMax(t *testing.T) {
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	s.loop.incRounds(42)
+	s.mu.Lock()
+	s.running[42] = "run#:idea"
+	s.mu.Unlock()
+
+	out := s.overlayRunning([]Entity{{Kind: KindIssue, IssueNumber: 42, Status: "idea", StateStep: "idea"}})
+	if out[0].RunIter != 1 {
+		t.Errorf("RunIter: got %d want 1", out[0].RunIter)
+	}
+	if out[0].RunMax != DynamicLoopCap {
+		t.Errorf("RunMax: got %d want %d (DynamicLoopCap)", out[0].RunMax, DynamicLoopCap)
 	}
 }
 

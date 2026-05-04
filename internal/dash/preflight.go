@@ -105,7 +105,7 @@ func computeDispatchGates(e Entity, p pipeline.Pipeline, flow string) FlowGates 
 	return gates
 }
 
-func gatePipelineRunFrom(e Entity, _ pipeline.Pipeline, step string) FlowGate {
+func gatePipelineRunFrom(e Entity, p pipeline.Pipeline, step string) FlowGate {
 	if e.Locked {
 		return FlowGate{false, lockedReason(e)}
 	}
@@ -114,6 +114,16 @@ func gatePipelineRunFrom(e Entity, _ pipeline.Pipeline, step string) FlowGate {
 	}
 	if step == "" {
 		return FlowGate{false, "step vacío"}
+	}
+	stepFound := false
+	for _, pipelineStep := range p.Steps {
+		if pipelineStep.Name == step {
+			stepFound = true
+			break
+		}
+	}
+	if !stepFound {
+		return FlowGate{false, fmt.Sprintf("step %s no existe en el pipeline activo", step)}
 	}
 	if e.StateStep == "" {
 		return FlowGate{false, "entity sin che:state:<step> — fallback legacy"}

@@ -67,7 +67,7 @@ type Entity struct {
 	RunIter     int    // iteración actual (1-based)
 	RunMax      int    // max iteraciones del loop
 	// CapReached: el auto-loop dejó de dispatchar sobre este issue porque
-	// rounds[id] ya alcanzó LoopCap. Señal visual para el humano: "no vas a
+	// rounds[id] ya alcanzó el cap efectivo. Señal visual para el humano: "no vas a
 	// ver esto moverse solo, decidí algo". Se setea en overlayRunning solo
 	// para entities en status loopable (plan / validated / executed) — en
 	// closing/closed/idea/etc el cap es irrelevante.

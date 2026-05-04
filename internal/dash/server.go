@@ -239,6 +239,7 @@ type Server struct {
 	// pipelineRoot y activePipeline() lo re-resuelve por tick para no quedar con
 	// un snapshot stale si el usuario edita `.che/pipelines/` mientras el dash
 	// sigue abierto.
+	pipelineMu   sync.RWMutex
 	pipeline     pipeline.Pipeline
 	pipelineRoot string
 }
@@ -309,21 +310,50 @@ func NewServer(source Source, repoName string, pollInterval int) *Server {
 }
 
 func (s *Server) activePipeline() pipeline.Pipeline {
+	s.pipelineMu.RLock()
+	root := s.pipelineRoot
 	if s.pipelineRoot == "" {
-		return s.pipeline
+		p := clonePipeline(s.pipeline)
+		s.pipelineMu.RUnlock()
+		return p
 	}
-	mgr, err := pipeline.NewManager(s.pipelineRoot)
+	s.pipelineMu.RUnlock()
+
+	mgr, err := pipeline.NewManager(root)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dash auto-loop: init pipeline manager failed: %v — using last pipeline snapshot\n", err)
-		return s.pipeline
+		s.pipelineMu.RLock()
+		p := clonePipeline(s.pipeline)
+		s.pipelineMu.RUnlock()
+		return p
 	}
 	resolved, err := mgr.Resolve("")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dash auto-loop: resolve pipeline failed: %v — using last pipeline snapshot\n", err)
-		return s.pipeline
+		s.pipelineMu.RLock()
+		p := clonePipeline(s.pipeline)
+		s.pipelineMu.RUnlock()
+		return p
 	}
+	s.pipelineMu.Lock()
 	s.pipeline = resolved.Pipeline
-	return s.pipeline
+	p := clonePipeline(s.pipeline)
+	s.pipelineMu.Unlock()
+	return p
+}
+
+func clonePipeline(p pipeline.Pipeline) pipeline.Pipeline {
+	out := p
+	if p.Entry != nil {
+		entry := *p.Entry
+		entry.Agents = append([]string(nil), p.Entry.Agents...)
+		out.Entry = &entry
+	}
+	out.Steps = append([]pipeline.Step(nil), p.Steps...)
+	for i := range out.Steps {
+		out.Steps[i].Agents = append([]string(nil), out.Steps[i].Agents...)
+	}
+	return out
 }
 
 // ServeHTTP delega al mux interno; lo implementamos explícito para poder
@@ -823,23 +853,24 @@ func (s *Server) overlayRunning(in []Entity) []Entity {
 			e.RunningFlow = flow
 		}
 		// Inyectar counter de rounds al chip magenta del card. RunMax es
-		// el cap compartido; si nunca se disparó un flow para este id,
-		// rounds[id]=0 → RunIter=0, lo cual es el estado correcto (el cap
-		// va al renderer igual, para que se vea "⟳ execute 0/5").
+		// el cap efectivo (dinámico=3, legacy=10); si nunca se disparó un
+		// flow para este id, rounds[id]=0 → RunIter=0, lo cual es correcto (el cap
+		// va al renderer igual, para que se vea "⟳ execute 0/N").
+		cap := loopCapForEntity(e)
 		if e.RunningFlow != "" {
 			e.RunIter = rounds[key]
-			e.RunMax = LoopCap
+			e.RunMax = cap
 		}
-		// Cap-reached chip: rounds >= LoopCap + entity en status loopable.
+		// Cap-reached chip: rounds >= cap efectivo + entity en status loopable.
 		// Gate por status para que cards en closed/closing/idea no prendan
 		// el chip (ahí el cap no tiene sentido — el auto-loop no iba a
 		// dispatchar igual). Sí aplica durante un run (RunningFlow != "")
 		// para cubrir el caso "este run es el #5 y el próximo tick corta".
-		if rounds[key] >= LoopCap {
+		if rounds[key] >= cap {
 			switch e.Status {
 			case "plan", "validated", "executed":
 				e.CapReached = true
-				e.RunMax = LoopCap
+				e.RunMax = cap
 			}
 		}
 		// Computamos gates sobre el estado YA mutado (con RunningFlow del
