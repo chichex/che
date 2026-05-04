@@ -79,6 +79,67 @@ func TestRun_LinealConNext(t *testing.T) {
 	}
 }
 
+func TestRun_StepHooksWrapSuccessfulSteps(t *testing.T) {
+	inv := newFakeInvoker(func(agent string, _ int) (string, OutputFormat, error) {
+		return "ok\n[next]", FormatText, nil
+	})
+	var events []string
+	run, err := RunPipeline(context.Background(), Pipeline{Steps: []Step{
+		{Name: "spec", Agents: []string{"agent-a"}},
+		{Name: "build", Agents: []string{"agent-b"}},
+	}}, inv, Options{
+		BeforeStep: func(_ context.Context, step string) error {
+			events = append(events, "before:"+step)
+			return nil
+		},
+		AfterStepOK: func(_ context.Context, step string) error {
+			events = append(events, "after:"+step)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if run.Stopped {
+		t.Fatalf("Stopped=true reason=%q detail=%q", run.StopReason, run.StopDetail)
+	}
+	want := []string{"before:spec", "after:spec", "before:build", "after:build"}
+	if len(events) != len(want) {
+		t.Fatalf("events=%v want %v", events, want)
+	}
+	for i := range want {
+		if events[i] != want[i] {
+			t.Fatalf("events=%v want %v", events, want)
+		}
+	}
+}
+
+func TestRun_StepHooksLeaveApplyingOnStop(t *testing.T) {
+	inv := newFakeInvoker(func(agent string, _ int) (string, OutputFormat, error) {
+		return "[stop]", FormatText, nil
+	})
+	var events []string
+	run, err := RunPipeline(context.Background(), Pipeline{Steps: []Step{{Name: "spec", Agents: []string{"agent-a"}}}}, inv, Options{
+		BeforeStep: func(_ context.Context, step string) error {
+			events = append(events, "before:"+step)
+			return nil
+		},
+		AfterStepOK: func(_ context.Context, step string) error {
+			events = append(events, "after:"+step)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !run.Stopped || run.StopReason != StopReasonAgentMarker {
+		t.Fatalf("run stop: stopped=%v reason=%q", run.Stopped, run.StopReason)
+	}
+	if len(events) != 1 || events[0] != "before:spec" {
+		t.Fatalf("events=%v want only before:spec", events)
+	}
+}
+
 func TestRun_DefaultNextSinMarcador(t *testing.T) {
 	// PRD §3.b paso 5: invocación exitosa sin marker → default [next].
 	inv := newFakeInvoker(func(agent string, _ int) (string, OutputFormat, error) {

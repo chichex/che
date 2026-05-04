@@ -104,7 +104,7 @@ func TestStream_StreamsHistoryAndLiveLines(t *testing.T) {
 	ts, _ := newStreamServer(t, []string{"alpha", "beta", "gamma"})
 
 	// 1. Dispatch del flow.
-	resp, err := http.Post(ts.URL+"/action/execute/42", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/execute/42")
 	if err != nil {
 		t.Fatalf("POST /action: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestSpawnChe_StartFailurePath(t *testing.T) {
 	ts := httptest.NewServer(s)
 	t.Cleanup(ts.Close)
 
-	resp, err := http.Post(ts.URL+"/action/execute/42", "", nil)
+	resp, err := postHTMX(t, ts.URL+"/action/execute/42")
 	if err != nil {
 		t.Fatalf("POST: %v", err)
 	}
@@ -413,7 +413,7 @@ func TestSpawnChe_StartFailurePath(t *testing.T) {
 		t.Fatalf("status: got %d want 500", resp.StatusCode)
 	}
 	// Reserva limpiada: un 2do POST no debe dar 409.
-	resp2, err := http.Post(ts.URL+"/action/execute/42", "", nil)
+	resp2, err := postHTMX(t, ts.URL+"/action/execute/42")
 	if err != nil {
 		t.Fatalf("POST#2: %v", err)
 	}

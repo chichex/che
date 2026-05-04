@@ -144,27 +144,36 @@ func RunChecks(ctx context.Context, opts Options) []Result {
 	}
 
 	results := make([]Result, len(jobs))
-	done := make(chan struct{}, len(jobs))
+	done := make(chan struct {
+		idx int
+		res Result
+	}, len(jobs))
 
 	for i, j := range jobs {
 		i, j := i, j
 		// Skip persisted: marcamos como no-triggered sin correr la
 		// función. El array preserva el orden por índice.
 		if IsSkipped(opts.RepoRoot, j.name) {
-			results[i] = Result{Name: j.name}
-			done <- struct{}{}
+			done <- struct {
+				idx int
+				res Result
+			}{idx: i, res: Result{Name: j.name}}
 			continue
 		}
 		go func() {
+			res := Result{Name: j.name}
 			defer func() {
 				// Cualquier panic en un check secundario no debe romper
 				// la TUI: capturamos y marcamos como error silencioso.
 				if r := recover(); r != nil {
-					results[i] = Result{Name: j.name, Err: fmt.Errorf("panic: %v", r)}
+					res = Result{Name: j.name, Err: fmt.Errorf("panic: %v", r)}
 				}
-				done <- struct{}{}
+				done <- struct {
+					idx int
+					res Result
+				}{idx: i, res: res}
 			}()
-			results[i] = j.fn(ctx, runner)
+			res = j.fn(ctx, runner)
 		}()
 	}
 
@@ -177,7 +186,8 @@ func RunChecks(ctx context.Context, opts Options) []Result {
 	// afecta a la UI (que ya leyó el snapshot).
 	for i := 0; i < len(jobs); i++ {
 		select {
-		case <-done:
+		case r := <-done:
+			results[r.idx] = r.res
 		case <-ctx.Done():
 			// Timeout: devolvemos lo que tengamos (los slots no
 			// completos quedan como Result{} = no triggered).

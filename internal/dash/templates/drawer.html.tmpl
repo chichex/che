@@ -16,13 +16,13 @@
 {{define "pipeline-step-actions"}}
   {{if .PipelineSteps}}
     {{$key := .IssueNumber}}{{if eq .Kind 2}}{{$key = .PRNumber}}{{end}}
-    <div class="drawer-meta pipeline-meta">
+    <dl class="drawer-meta pipeline-meta">
       <dt>pipeline</dt><dd>steps del pipeline activo; el step actual queda habilitado para reanudar con <code>che run --auto --from</code></dd>
       {{range .PipelineSteps}}
         <dt>{{if .Current}}actual{{else}}step{{end}}</dt>
         <dd><code>{{.Name}}</code>{{if .Applying}} · applying{{end}}{{if .Agents}} · agents: {{joinStrings .Agents ", "}}{{end}}{{if .Aggregator}} · {{.Aggregator}}{{end}}{{if .Comment}} · {{.Comment}}{{end}}</dd>
       {{end}}
-    </div>
+    </dl>
     <div class="drawer-actions pipeline-actions">
       {{range .PipelineSteps}}
         {{$btn := flowBtnState .Flow $.RunningFlow $.Gates (printf "run --from %s" .Name)}}
@@ -75,6 +75,7 @@
         {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
         {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{displayFlow .RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
         {{if and .RunningFlow .Auto}}<span class="chip chip-magenta" title="disparado por el auto-loop engine">auto</span>{{end}}
+        {{if .StateStepOrphan}}<span class="chip chip-red">step orphan: <code>{{.StateStep}}</code></span>{{end}}
         {{if .CapReached}}<span class="chip chip-cap" title="auto-loop detenido: alcanzó el cap de {{.RunMax}} rondas. Re-corré che manualmente para seguir.">⛔ cap {{.RunMax}}/{{.RunMax}}</span>{{end}}
       </div>
     </div>
@@ -192,11 +193,12 @@
           {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
           {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{displayFlow .RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
           {{if and .RunningFlow .Auto}}<span class="chip chip-magenta" title="disparado por el auto-loop engine">auto</span>{{end}}
+          {{if .StateStepOrphan}}<span class="chip chip-red">step orphan: <code>{{.StateStep}}</code></span>{{end}}
           {{if .CapReached}}<span class="chip chip-cap" title="auto-loop detenido: alcanzó el cap de {{.RunMax}} rondas. Re-corré che manualmente para seguir.">⛔ cap {{.RunMax}}/{{.RunMax}}</span>{{end}}
         </div>
       </div>
 
-      <div class="drawer-meta">
+      <dl class="drawer-meta">
         {{if .LoopSpec}}<dt>loop</dt><dd class="loop-line">{{.LoopSpec}}</dd>{{end}}
         {{if .LastAction}}<dt>última</dt><dd>{{.LastAction}}</dd>{{end}}
         {{if .NextAction}}<dt>next</dt><dd>{{.NextAction}}</dd>{{end}}
@@ -209,7 +211,7 @@
           </dd>
         {{end}}
         {{if .PRVerdict}}<dt>verdict</dt><dd style="color:{{verdictColor .PRVerdict}}">validated:{{.PRVerdict}}</dd>{{end}}
-      </div>
+      </dl>
 
       {{template "pipeline-step-actions" .}}
 
@@ -372,16 +374,23 @@
         {{if .Locked}}<span class="chip chip-lock">🔒 locked</span>{{end}}
         {{if .RunningFlow}}<span class="chip chip-magenta">⟳ {{displayFlow .RunningFlow}} {{.RunIter}}/{{.RunMax}}</span>{{end}}
         {{if and .RunningFlow .Auto}}<span class="chip chip-magenta" title="disparado por el auto-loop engine">auto</span>{{end}}
+        {{if .StateStepOrphan}}<span class="chip chip-red">step orphan: <code>{{.StateStep}}</code></span>{{end}}
         {{if .CapReached}}<span class="chip chip-cap" title="auto-loop detenido: alcanzó el cap de {{.RunMax}} rondas. Re-corré che manualmente para seguir.">⛔ cap {{.RunMax}}/{{.RunMax}}</span>{{end}}
       </div>
     </div>
 
-    <div class="drawer-meta">
+    <dl class="drawer-meta">
       {{if .LoopSpec}}<dt>loop</dt><dd class="loop-line">{{.LoopSpec}}</dd>{{end}}
       {{if .LastAction}}<dt>última</dt><dd>{{.LastAction}}</dd>{{end}}
       {{if .NextAction}}<dt>next</dt><dd>{{.NextAction}}</dd>{{end}}
       {{if .PlanVerdict}}<dt>verdict</dt><dd style="color:{{verdictColor .PlanVerdict}}">plan-validated:{{.PlanVerdict}}</dd>{{end}}
-    </div>
+    </dl>
+
+    {{if .MigrateHint}}
+      <div class="drawer-blocked-reasons">
+        <div class="reason"><span class="flow">pipeline</span> ejecutá <code>che pipeline migrate-labels</code> para convertir labels legacy al pipeline custom activo.</div>
+      </div>
+    {{end}}
 
     {{template "pipeline-step-actions" .}}
 

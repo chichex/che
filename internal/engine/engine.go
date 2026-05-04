@@ -288,6 +288,16 @@ type Options struct {
 	// invoker; los PRs siguientes (PR5c+) decidirán cómo enriquecerlo
 	// con outputs previos.
 	Input string
+
+	// BeforeStep corre justo antes de invocar los agentes de un step. Si
+	// devuelve error, el motor corta como StopReasonTechnicalError sin invocar
+	// el step. Callers lo usan para escribir che:state:applying:<step>.
+	BeforeStep func(ctx context.Context, step string) error
+
+	// AfterStepOK corre cuando un step terminó sin [stop] ni error técnico,
+	// antes de avanzar al siguiente step. Callers lo usan para cerrar
+	// che:state:applying:<step> -> che:state:<step>.
+	AfterStepOK func(ctx context.Context, step string) error
 }
 
 // RunPipeline ejecuta el pipeline secuencialmente:
@@ -295,8 +305,8 @@ type Options struct {
 //  1. Resuelve el step inicial:
 //     a. Si Options.EntryStep != "" → ese step (bypassa el entry agent).
 //     b. Si Pipeline.Entry != nil → invoca el entry agent y aplica su
-//        marker (`[next]` → primer step, `[goto: X]` → step X,
-//        `[stop]` → no corre nada y devuelve StopReasonEntryStop).
+//     marker (`[next]` → primer step, `[goto: X]` → step X,
+//     `[stop]` → no corre nada y devuelve StopReasonEntryStop).
 //     c. Sin lo anterior → primer step de la lista.
 //  2. Para cada step: pickea el primer agente declarado, invoca via
 //     Invoker, parsea el marker (text o stream-json según el format que
@@ -387,6 +397,20 @@ func RunPipeline(ctx context.Context, p Pipeline, inv Invoker, opts Options) (Ru
 		run.Transitions++
 
 		step := p.Steps[currentIdx]
+		if opts.BeforeStep != nil {
+			if err := opts.BeforeStep(ctx, step.Name); err != nil {
+				run.Steps = append(run.Steps, StepRun{
+					Step:     step.Name,
+					Marker:   Marker{Kind: MarkerStop},
+					Resolved: "before-step-error",
+					Err:      err,
+				})
+				run.Stopped = true
+				run.StopReason = StopReasonTechnicalError
+				run.StopDetail = fmt.Sprintf("before step %q: %v", step.Name, err)
+				return run, nil
+			}
+		}
 		if len(step.Agents) == 0 {
 			// Defensa: pipeline mal armado escapó al validator. Stop con
 			// razón explícita para que el caller corrija el JSON.
@@ -486,17 +510,42 @@ func RunPipeline(ctx context.Context, p Pipeline, inv Invoker, opts Options) (Ru
 			}
 		}
 
-		run.Steps = append(run.Steps, stepRun)
-
 		switch marker.Kind {
 		case MarkerStop:
+			run.Steps = append(run.Steps, stepRun)
 			run.Stopped = true
 			run.StopReason = StopReasonAgentMarker
 			run.StopDetail = fmt.Sprintf("step %q emitted [stop]", step.Name)
 			return run, nil
 		case MarkerGoto:
+			if opts.AfterStepOK != nil {
+				if err := opts.AfterStepOK(ctx, step.Name); err != nil {
+					stepRun.Marker = Marker{Kind: MarkerStop}
+					stepRun.Resolved = "after-step-error"
+					stepRun.Err = err
+					run.Steps = append(run.Steps, stepRun)
+					run.Stopped = true
+					run.StopReason = StopReasonTechnicalError
+					run.StopDetail = fmt.Sprintf("after step %q: %v", step.Name, err)
+					return run, nil
+				}
+			}
+			run.Steps = append(run.Steps, stepRun)
 			currentIdx = nameToIdx[marker.Goto]
 		case MarkerNext, MarkerNone:
+			if opts.AfterStepOK != nil {
+				if err := opts.AfterStepOK(ctx, step.Name); err != nil {
+					stepRun.Marker = Marker{Kind: MarkerStop}
+					stepRun.Resolved = "after-step-error"
+					stepRun.Err = err
+					run.Steps = append(run.Steps, stepRun)
+					run.Stopped = true
+					run.StopReason = StopReasonTechnicalError
+					run.StopDetail = fmt.Sprintf("after step %q: %v", step.Name, err)
+					return run, nil
+				}
+			}
+			run.Steps = append(run.Steps, stepRun)
 			// Avance natural. Si era el último step, terminamos OK.
 			if currentIdx == len(p.Steps)-1 {
 				return run, nil
