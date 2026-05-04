@@ -182,9 +182,9 @@ type Server struct {
 	//
 	// targetRef = número que recibe el subcomando como argumento (PRNumber
 	// para fused validate/iterate, IssueNumber para el resto — ver
-	// resolveTargetRef). entityKey = EntityKey de la entidad; se usa como clave
-	// del overlay de running y del LogStore para que el modal y el stream SSE la
-	// encuentren.
+	// resolveTargetRef). entityKey = IssueNumber de la entidad; se usa como
+	// clave del overlay de running y del LogStore para que el modal y el
+	// stream SSE la encuentren.
 	runAction func(flow string, targetRef, entityKey int, repo string) error
 
 	// mu protege running y autoRunning. El map running trackea flows
@@ -194,8 +194,8 @@ type Server struct {
 	// paralelo que distingue "disparado por el auto-loop engine" de
 	// "disparado por el humano" para pintar un chip extra en el drawer.
 	mu          sync.Mutex
-	running     map[int]string // EntityKey → flow corriendo
-	autoRunning map[int]bool   // EntityKey → disparado por auto-loop (step 6)
+	running     map[int]string // IssueNumber → flow corriendo
+	autoRunning map[int]bool   // IssueNumber → disparado por auto-loop (step 6)
 
 	// loop es el estado del auto-loop engine (step 6): master switch +
 	// flags por regla + contador de rounds. Protegido por su propio
@@ -494,8 +494,8 @@ func (s *Server) templateFuncs() template.FuncMap {
 		// Step 6 — auto-loop pill label helpers. Se exponen acá para
 		// que el partial "auto-loop-toggle" los use tanto en render
 		// inicial como en OOB swap. Ambos reciben loopPopoverData.
-		"pillLabel":           pillLabel,
-		"pillLabelHasSpinner": pillLabelHasSpinner,
+		"pillLabel":            pillLabel,
+		"pillLabelHasSpinner":  pillLabelHasSpinner,
 		// Preflight gates (PR de gates UI, abril 2026): resolución del
 		// estado de un botón hx-post a partir de RunningFlow + Gates.
 		// flowBtnState centraliza la prioridad: RunningFlow gana sobre
@@ -784,7 +784,7 @@ func (s *Server) overlayRunning(in []Entity) []Entity {
 		// el chip (ahí el cap no tiene sentido — el auto-loop no iba a
 		// dispatchar igual). Sí aplica durante un run (RunningFlow != "")
 		// para cubrir el caso "este run es el #5 y el próximo tick corta".
-		if rounds[key] >= LoopCap {
+		if rounds[e.IssueNumber] >= LoopCap {
 			switch e.Status {
 			case "plan", "validated", "executed":
 				e.CapReached = true
@@ -815,7 +815,7 @@ func (s *Server) markRunning(id int, flow string) (string, bool) {
 	// fuera de lock sería ok (Snapshot() es concurrency-safe), pero
 	// mantenerlo bajo lock simplifica razonar sobre ordenamientos.
 	for _, e := range s.source.Snapshot().Entities {
-		if e.EntityKey() == id && e.RunningFlow != "" {
+		if e.IssueNumber == id && e.RunningFlow != "" {
 			return e.RunningFlow, false
 		}
 	}

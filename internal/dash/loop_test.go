@@ -18,12 +18,12 @@ import (
 // alguien cambió la semántica y conviene discutirla antes de mergear.
 func TestNextDispatch_RuleTable(t *testing.T) {
 	tests := []struct {
-		name       string
-		e          Entity
-		rules      map[LoopRule]bool
-		rounds     int
-		wantFlow   string
-		wantRef    int
+		name      string
+		e         Entity
+		rules     map[LoopRule]bool
+		rounds    int
+		wantFlow  string
+		wantRef   int
 		wantSubstr string // substring que debe aparecer en reason
 	}{
 		{
@@ -472,28 +472,6 @@ func TestTick_IssueAndPRSimultaneous(t *testing.T) {
 	}
 	if seen[2] != 22 {
 		t.Errorf("PR-side call: got target=%d want 22", seen[2])
-	}
-}
-
-func TestTick_KindPRRunningOccupiesPRSlot(t *testing.T) {
-	ents := []Entity{
-		{Kind: KindPR, PRNumber: 301, Status: "validated", PRVerdict: "changes-requested", RunningFlow: "validate"},
-		{Kind: KindFused, IssueNumber: 2, PRNumber: 22, Status: "executed"},
-		{Kind: KindIssue, IssueNumber: 1, Status: "plan"},
-	}
-	s, fr := newLoopServer(t, ents)
-	s.loop.rules[RuleValidatePlan] = true
-	s.loop.rules[RuleValidatePR] = true
-
-	if n := s.runTick(); n != 1 {
-		t.Fatalf("tick dispatches: got %d want 1 (KindPR running ocupa slot PR, issue slot queda libre)", n)
-	}
-	if fr.count() != 1 {
-		t.Fatalf("runner calls: got %d want 1", fr.count())
-	}
-	got := fr.last()
-	if got.Flow != "validate" || got.TargetRef != 1 || got.EntityKey != 1 {
-		t.Errorf("dispatch: got %+v want issue-side validate target=1 key=1", got)
 	}
 }
 
