@@ -10,7 +10,7 @@ El diseño completo (flujos, diagramas, walkthrough punta a punta, observabilida
 
 ```sh
 # macOS (recomendado, vía homebrew tap)
-brew install chichex/tap/che
+brew install --cask chichex/tap/che
 
 # Cualquier OS — script de install que baja el binario del último release
 curl -sSL https://raw.githubusercontent.com/chichex/che/main/install.sh | sh
@@ -20,6 +20,18 @@ make install
 ```
 
 `che upgrade` actualiza a la última versión publicada. `che doctor` chequea que el entorno esté listo.
+
+### Versión beta (pre-release)
+
+Para probar features en desarrollo antes del release estable:
+
+```sh
+brew install --cask chichex/tap/che-beta
+```
+
+> Si tenés instalado el cask estable (`che`), el instalador lo reemplaza automáticamente con un aviso. Para volver al estable: `brew install --cask chichex/tap/che`.
+
+Las versiones beta se publican con tags `vX.Y.Z-rc.N`. No se garantiza estabilidad de API ni backward compatibility.
 
 ## Uso
 
