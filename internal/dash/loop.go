@@ -6,29 +6,29 @@
 // cerrando el ciclo humano → IA sin intervención manual.
 //
 // Reglas (7), enumeradas en orden didáctico (issue-side primero, después PR-side):
-//   1. Status=idea (o "")                          → che explore  <IssueNumber>
-//      (idea→plan: arranca el ciclo desde un issue con `ct:plan` aplicado.)
-//   2. Status=plan sin PlanVerdict                 → che validate <IssueNumber>
-//   3. Status=validated + PlanVerdict=changes-req  → che iterate  <IssueNumber>
-//      (post-v0.0.49: validate transiciona plan→validated; el verdict
-//       "changes-requested" queda como label plan-validated:* sobre un
-//       issue en che:validated.)
-//   4. Status=validated + PlanVerdict=approve      → che execute  <IssueNumber>
-//      (issue-only; sin PR previo. Cierra el gap post-validate plan:
-//       un plan aprobado automáticamente pasa a ejecución.)
-//   5. Status=plan sin PlanVerdict                 → che execute  <IssueNumber>
-//      (fast-lane "plan→executed" sin pasar por validate. Mutuamente
-//       excluyente con regla 2 a nivel de UI: si ambas están ON, validate
-//       gana — preferimos validar antes de ejecutar cuando hay duda.)
-//   6. Status=executed sin PRVerdict               → che validate <PRNumber>
-//   7. Status=executed + PRVerdict=changes-req     → che iterate  <PRNumber>
-//      (también matchea Status=validated cuando validate-pr ya transicionó.)
+//  1. Status=idea (o "")                          → che explore  <IssueNumber>
+//     (idea→plan: arranca el ciclo desde un issue con `ct:plan` aplicado.)
+//  2. Status=plan sin PlanVerdict                 → che validate <IssueNumber>
+//  3. Status=validated + PlanVerdict=changes-req  → che iterate  <IssueNumber>
+//     (post-v0.0.49: validate transiciona plan→validated; el verdict
+//     "changes-requested" queda como label plan-validated:* sobre un
+//     issue en che:validated.)
+//  4. Status=validated + PlanVerdict=approve      → che execute  <IssueNumber>
+//     (issue-only; sin PR previo. Cierra el gap post-validate plan:
+//     un plan aprobado automáticamente pasa a ejecución.)
+//  5. Status=plan sin PlanVerdict                 → che execute  <IssueNumber>
+//     (fast-lane "plan→executed" sin pasar por validate. Mutuamente
+//     excluyente con regla 2 a nivel de UI: si ambas están ON, validate
+//     gana — preferimos validar antes de ejecutar cuando hay duda.)
+//  6. Status=executed sin PRVerdict               → che validate <PRNumber>
+//  7. Status=executed + PRVerdict=changes-req     → che iterate  <PRNumber>
+//     (también matchea Status=validated cuando validate-pr ya transicionó.)
 //
 // Stop conditions por entity:
 //   - verdict=approve        → done (feliz), no dispatch.
 //   - verdict=needs-human    → done (requiere ojo humano), no dispatch.
 //   - Locked=true            → skip este tick (no terminal; el próximo
-//                              intenta de vuelta cuando se destrabe).
+//     intenta de vuelta cuando se destrabe).
 //   - rounds[id] >= LoopCap  → cap alcanzado, no dispatch.
 //
 // Concurrency: a lo sumo 1 flow issue-side + 1 PR-side simultáneos en todo
@@ -52,9 +52,10 @@
 //     diseño del flow.
 //   - execute:  1x opus  — `che execute` default de `--agent` es opus.
 //     El loop dispatcha execute via dos reglas: RuleExecutePlan (validated
-//     + approve = luz verde explícita del validador) o RuleExecuteRaw
+//   - approve = luz verde explícita del validador) o RuleExecuteRaw
 //     (plan sin verdict = fast-lane, opt-in para usuarios que confían en
 //     el plan sin validarlo).
+//
 // El loop invoca los subcomandos sin flags de agent — heredan estos
 // defaults. Mantener esto sincronizado si los defaults cambien en cmd/.
 package dash
@@ -426,10 +427,10 @@ type loopFromGroup struct {
 // puro y vive en el tick.
 //
 // Reglas de corte (en orden de chequeo):
-//   1. Locked=true → skip (motivo: "locked").
-//   2. Cap hit (rounds >= LoopCap) → stop (motivo: "cap-reached").
-//   3. Verdict terminal (approve / needs-human) → stop.
-//   4. Match de reglas ON → dispatch.
+//  1. Locked=true → skip (motivo: "locked").
+//  2. Cap hit (rounds >= LoopCap) → stop (motivo: "cap-reached").
+//  3. Verdict terminal (approve / needs-human) → stop.
+//  4. Match de reglas ON → dispatch.
 //
 // Devuelve flow="" si nada dispatcha; reason siempre describe por qué.
 func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, targetRef int, reason string) {
@@ -548,10 +549,10 @@ func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, t
 }
 
 // entitySide clasifica la entity en issue-side o PR-side para el slot de
-// concurrencia. Por Kind: KindIssue=issue, KindFused=pr. Simple y
-// determinístico.
+// concurrencia. KindFused y KindPR ocupan el lado PR; KindPR no tiene
+// IssueNumber, así que tratarlo como issue-side bloqueaba el slot equivocado.
 func entitySide(e Entity) string {
-	if e.Kind == KindFused {
+	if e.Kind == KindFused || e.Kind == KindPR {
 		return "pr"
 	}
 	return "issue"
@@ -632,7 +633,7 @@ func (s *Server) runTick() int {
 	}
 	s.mu.Unlock()
 	for _, e := range ents {
-		running := e.RunningFlow != "" || localRunning[e.IssueNumber] != ""
+		running := e.RunningFlow != "" || localRunning[e.EntityKey()] != ""
 		if !running {
 			continue
 		}
@@ -950,4 +951,3 @@ func pillLabel(data loopPopoverData) string {
 func pillLabelHasSpinner(data loopPopoverData) bool {
 	return data.ActiveRules > 0 && data.AutoLoops > 0
 }
-
