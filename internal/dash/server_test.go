@@ -2208,7 +2208,7 @@ func TestPipelineEditor_SaveMaterializesBuiltinDefault(t *testing.T) {
 	form.Add("step_agents", "claude-sonnet")
 	form.Add("step_aggregator", string(pipeline.AggregatorMajority))
 	form.Add("step_comment", "write spec")
-	resp, err := http.PostForm(ts.URL+"/pipeline/editor", form)
+	resp, err := postPipelineEditorForm(ts.URL, form)
 	if err != nil {
 		t.Fatalf("POST editor: %v", err)
 	}
@@ -2254,7 +2254,7 @@ func TestPipelineEditor_SaveRejectsInvalidPipeline(t *testing.T) {
 	form.Add("step_agents", "claude-sonnet")
 	form.Add("step_aggregator", string(pipeline.AggregatorMajority))
 	form.Add("step_comment", "")
-	resp, err := http.PostForm(ts.URL+"/pipeline/editor", form)
+	resp, err := postPipelineEditorForm(ts.URL, form)
 	if err != nil {
 		t.Fatalf("POST editor: %v", err)
 	}
@@ -2269,6 +2269,40 @@ func TestPipelineEditor_SaveRejectsInvalidPipeline(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, pipeline.PipelinesDirRel, "default.json")); !os.IsNotExist(err) {
 		t.Fatalf("invalid pipeline should not be written, stat err=%v", err)
 	}
+}
+
+func TestPipelineEditor_RejectsNonHTMXPost(t *testing.T) {
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	form := url.Values{}
+	form.Add("step_name", "spec")
+	form.Add("step_agents", "claude-sonnet")
+	form.Add("step_aggregator", string(pipeline.AggregatorMajority))
+	form.Add("step_comment", "")
+	resp, err := http.PostForm(ts.URL+"/pipeline/editor", form)
+	if err != nil {
+		t.Fatalf("POST editor without HX: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status: got %d want 403 body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "HX-Request") {
+		t.Fatalf("body missing HX reason: %s", body)
+	}
+}
+
+func postPipelineEditorForm(baseURL string, form url.Values) (*http.Response, error) {
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/pipeline/editor", strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("HX-Request", "true")
+	return http.DefaultClient.Do(req)
 }
 
 func newCustomPipelineRunServer(t *testing.T, e Entity) (*Server, *fakeRunner, *httptest.Server) {

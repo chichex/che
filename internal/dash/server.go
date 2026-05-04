@@ -355,7 +355,6 @@ func (s *Server) activePipeline() pipeline.Pipeline {
 }
 
 func (s *Server) activePipelineResolved() pipelineEditorData {
-	_ = s.activePipeline()
 	s.pipelineMu.RLock()
 	defer s.pipelineMu.RUnlock()
 	return pipelineEditorData{
@@ -959,31 +958,33 @@ func (s *Server) saveDashboardPipeline(p pipeline.Pipeline) (pipelineEditorData,
 	if err != nil {
 		return pipelineEditorData{}, fmt.Errorf("init pipeline manager: %w", err)
 	}
-	resolved := s.activePipelineResolved()
-	name := resolved.Name
-	path := resolved.Path
-	source := resolved.Source
+	s.pipelineMu.Lock()
+	name := s.pipelineName
+	path := s.pipelinePath
+	source := s.pipelineKind
 	if path == "" {
 		name = "default"
 		path = filepath.Join(mgr.PipelinesDir(), name+".json")
 		source = pipeline.SourceConfig
 	}
 	if err := writePipelineFile(path, p); err != nil {
+		s.pipelineMu.Unlock()
 		return pipelineEditorData{}, fmt.Errorf("escribir %s: %w", path, err)
 	}
-	if resolved.Path == "" || mgr.Config.Default == "" {
+	if s.pipelinePath == "" || mgr.Config.Default == "" {
 		if err := writePipelineConfig(mgr.ConfigPath(), pipeline.Config{Version: pipeline.ConfigVersion, Default: name}); err != nil {
+			s.pipelineMu.Unlock()
 			return pipelineEditorData{}, fmt.Errorf("escribir %s: %w", mgr.ConfigPath(), err)
 		}
 	}
-	s.pipelineMu.Lock()
 	s.pipeline = clonePipeline(p)
 	s.pipelineName = name
 	s.pipelinePath = path
 	s.pipelineKind = source
+	out := pipelineEditorData{Name: name, Source: source, Path: path, Pipe: clonePipeline(p), Saved: true}
 	s.pipelineMu.Unlock()
 	s.bumpSource()
-	return pipelineEditorData{Name: name, Source: source, Path: path, Pipe: clonePipeline(p), Saved: true}, nil
+	return out, nil
 }
 
 func writePipelineFile(path string, p pipeline.Pipeline) error {
@@ -1533,6 +1534,7 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /pipeline/editor", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
+		_ = s.activePipeline()
 		if err := s.tmpl.ExecuteTemplate(w, "pipeline_editor.html.tmpl", s.activePipelineResolved()); err != nil {
 			http.Error(w, "template error: "+err.Error(), http.StatusInternalServerError)
 			return
@@ -1540,6 +1542,10 @@ func (s *Server) buildMux() *http.ServeMux {
 	})
 
 	mux.HandleFunc("POST /pipeline/editor", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("HX-Request") != "true" {
+			http.Error(w, "HX-Request header required", http.StatusForbidden)
+			return
+		}
 		p, err := s.pipelineEditorFromRequest(r)
 		data := s.activePipelineResolved()
 		status := http.StatusOK
