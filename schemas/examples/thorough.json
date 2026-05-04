@@ -1,0 +1,29 @@
+{
+  "$schema": "../pipeline.json",
+  "version": 1,
+  "steps": [
+    {
+      "name": "explore",
+      "agents": ["claude-opus", "claude-opus", "claude-opus"],
+      "aggregator": "majority",
+      "_comment": "Best-of-3 de planificación; empates paran."
+    },
+    {
+      "name": "execute",
+      "agents": ["claude-opus"],
+      "_comment": "Implementación única sobre el plan ganador."
+    },
+    {
+      "name": "security",
+      "agents": ["claude-opus", "claude-opus"],
+      "aggregator": "unanimous",
+      "_comment": "Gate estricto: cualquier divergencia bloquea."
+    },
+    {
+      "name": "validate_pr",
+      "agents": ["claude-opus", "claude-opus", "claude-opus"],
+      "aggregator": "first_blocker",
+      "_comment": "Cualquier reviewer puede mandar [goto: execute] o [stop]."
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "$schema": "../pipeline.json",
+  "version": 1,
+  "steps": [
+    {
+      "name": "idea",
+      "agents": ["claude-opus"],
+      "_comment": "Convierte una idea vaga en issue(s) accionables."
+    },
+    {
+      "name": "explore",
+      "agents": ["claude-opus"],
+      "_comment": "Investiga el issue y produce el plan consolidado."
+    },
+    {
+      "name": "validate_issue",
+      "agents": ["plan-reviewer-strict", "plan-reviewer-pragmatic", "claude-opus"],
+      "aggregator": "majority",
+      "_comment": "Valida el plan antes de ejecutar; los reviewers custom pueden pedir [goto: explore]."
+    },
+    {
+      "name": "execute",
+      "agents": ["claude-opus"],
+      "_comment": "Implementa el plan y abre PR draft."
+    },
+    {
+      "name": "validate_pr",
+      "agents": ["code-reviewer-strict", "code-reviewer-security", "claude-opus"],
+      "aggregator": "majority",
+      "_comment": "Valida el PR; los reviewers pueden pedir [goto: execute]."
+    },
+    {
+      "name": "close",
+      "agents": ["claude-opus"],
+      "_comment": "Deja listo el cierre humano del PR."
+    }
+  ]
+}

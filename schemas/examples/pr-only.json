@@ -1,0 +1,27 @@
+{
+  "$schema": "../pipeline.json",
+  "version": 1,
+  "entry": {
+    "agents": ["claude-opus"],
+    "aggregator": "first_blocker"
+  },
+  "steps": [
+    {
+      "name": "review",
+      "agents": ["claude-opus", "claude-opus"],
+      "aggregator": "first_blocker",
+      "_comment": "Revisa PRs existentes; el entry debe emitir [stop] para issues sin PR."
+    },
+    {
+      "name": "fix",
+      "agents": ["claude-opus"],
+      "_comment": "Aplica fixes pedidos por review."
+    },
+    {
+      "name": "recheck",
+      "agents": ["claude-opus", "claude-opus"],
+      "aggregator": "unanimous",
+      "_comment": "Ambos reviewers deben coincidir en [next] antes de cerrar."
+    }
+  ]
+}

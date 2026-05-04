@@ -1,0 +1,25 @@
+{
+  "$schema": "../pipeline.json",
+  "version": 1,
+  "entry": {
+    "agents": ["claude-opus"],
+    "aggregator": "first_blocker"
+  },
+  "steps": [
+    {
+      "name": "triage",
+      "agents": ["claude-opus"],
+      "_comment": "El entry puede arrancar acá con [goto: triage] para inputs ambiguos."
+    },
+    {
+      "name": "execute",
+      "agents": ["claude-opus"],
+      "_comment": "El entry puede saltar directo con [goto: execute] si el input ya trae plan."
+    },
+    {
+      "name": "validate_pr",
+      "agents": ["claude-opus"],
+      "_comment": "Validación final."
+    }
+  ]
+}

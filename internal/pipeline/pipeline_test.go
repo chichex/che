@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -137,6 +138,36 @@ func TestSchemaFileExists(t *testing.T) {
 	}
 	if doc["$schema"] == nil {
 		t.Errorf("schema missing $schema (meta-schema URL)")
+	}
+}
+
+func TestExamples_Load(t *testing.T) {
+	repoRoot := filepath.Join("..", "..")
+	examplesDir := filepath.Join(repoRoot, "schemas", "examples")
+	entries, err := os.ReadDir(examplesDir)
+	if err != nil {
+		t.Fatalf("read examples dir: %v", err)
+	}
+
+	var names []string
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		path := filepath.Join(examplesDir, entry.Name())
+		p, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load(%s): %v", path, err)
+		}
+		if p.Schema == "" {
+			t.Fatalf("%s should include $schema for editor autocomplete", path)
+		}
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	want := []string{"default.json", "fast.json", "pr-only.json", "thorough.json", "with-entry.json"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("examples drift: got %v want %v", names, want)
 	}
 }
 
