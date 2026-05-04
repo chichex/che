@@ -724,6 +724,47 @@ func TestAction_FusedValidateUsesPR(t *testing.T) {
 	}
 }
 
+func TestResolveTargetRef_FusedPRSideUsesPR(t *testing.T) {
+	e := Entity{Kind: KindFused, IssueNumber: 122, PRNumber: 140}
+	for _, flow := range []string{"validate", "iterate", "close"} {
+		if got := resolveTargetRef(e, flow); got != 140 {
+			t.Errorf("%s target: got %d want PRNumber 140", flow, got)
+		}
+	}
+	for _, flow := range []string{"explore", "execute"} {
+		if got := resolveTargetRef(e, flow); got != 122 {
+			t.Errorf("%s target: got %d want IssueNumber 122", flow, got)
+		}
+	}
+}
+
+func TestAction_KindPRSnapshotRunningBlocksDispatch(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{
+		NWO:    "demo/che",
+		LastOK: time.Now(),
+		Entities: []Entity{
+			{Kind: KindPR, PRNumber: 301, PRTitle: "orphan", Status: "validated", PRVerdict: "changes-requested", RunningFlow: "validate"},
+		},
+	}}
+	s := NewServer(src, "repo", 15)
+	fr := &fakeRunner{}
+	s.runAction = fr.run
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/action/iterate/301", "", nil)
+	if err != nil {
+		t.Fatalf("POST iterate/301: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("status: got %d want 409", resp.StatusCode)
+	}
+	if fr.count() != 0 {
+		t.Fatalf("runner calls: got %d want 0", fr.count())
+	}
+}
+
 // TestAction_FusedCloseUsesPR: close en fused también mapea a PRNumber
 // (che close acepta <pr>, no issue). Same pattern que validate/iterate.
 func TestAction_FusedCloseUsesPR(t *testing.T) {
@@ -1186,12 +1227,12 @@ func min(a, b int) int {
 // bumpableSource es una Source que implementa Bumper contando calls.
 // Alrededor de fixedSource — embebe el snapshot y agrega el counter.
 type bumpableSource struct {
-	snap     Snapshot
+	snap      Snapshot
 	bumpCalls atomic.Int64
 }
 
 func (b *bumpableSource) Snapshot() Snapshot { return b.snap }
-func (b *bumpableSource) Bump()                { b.bumpCalls.Add(1) }
+func (b *bumpableSource) Bump()              { b.bumpCalls.Add(1) }
 
 // TestBuildData_NextPollSecIsBaselineWhenIdle: sin flows locales corriendo,
 // NextPollSec == PollInterval (tick regular).
@@ -1400,7 +1441,7 @@ func TestStatusChip_UsesNextPollSec(t *testing.T) {
 // TestOverlayRunning_InjectsRoundsCounter: el chip magenta del card muestra
 // ⟳ <flow> <RunIter>/<RunMax>. Esos campos nunca se asignaban, siempre
 // mostraba "0/0". Ahora overlayRunning lee el counter del loopState y el
-// cap (LoopCap) y los copia al Entity cuando RunningFlow != "".
+// cap efectivo y los copia al Entity cuando RunningFlow != "".
 func TestOverlayRunning_InjectsRoundsCounter(t *testing.T) {
 	src := &fixedSource{snap: Snapshot{LastOK: time.Now()}}
 	s := NewServer(src, "repo", 15)
@@ -1429,6 +1470,22 @@ func TestOverlayRunning_InjectsRoundsCounter(t *testing.T) {
 	// Entity sin flow corriendo no debe tener RunIter/RunMax seteados.
 	if out[1].RunIter != 0 || out[1].RunMax != 0 {
 		t.Errorf("out[1] idle: got RunIter=%d RunMax=%d, want 0/0", out[1].RunIter, out[1].RunMax)
+	}
+}
+
+func TestOverlayRunning_InjectsDynamicRunMax(t *testing.T) {
+	s := NewServer(&fixedSource{snap: Snapshot{LastOK: time.Now()}}, "repo", 15)
+	s.loop.incRounds(42)
+	s.mu.Lock()
+	s.running[42] = "run#:idea"
+	s.mu.Unlock()
+
+	out := s.overlayRunning([]Entity{{Kind: KindIssue, IssueNumber: 42, Status: "idea", StateStep: "idea"}})
+	if out[0].RunIter != 1 {
+		t.Errorf("RunIter: got %d want 1", out[0].RunIter)
+	}
+	if out[0].RunMax != DynamicLoopCap {
+		t.Errorf("RunMax: got %d want %d (DynamicLoopCap)", out[0].RunMax, DynamicLoopCap)
 	}
 }
 
@@ -1495,6 +1552,24 @@ func TestOverlayRunning_SetsCapReachedWhenIdle(t *testing.T) {
 	}
 	if out[0].RunMax != LoopCap {
 		t.Errorf("out[0].RunMax: got %d want %d (cap debe inyectarse aunque no haya run)", out[0].RunMax, LoopCap)
+	}
+}
+
+func TestOverlayRunning_KindPRCapUsesPRKey(t *testing.T) {
+	src := &fixedSource{snap: Snapshot{LastOK: time.Now()}}
+	s := NewServer(src, "repo", 15)
+	for i := 0; i < LoopCap; i++ {
+		s.loop.incRounds(301)
+	}
+	in := []Entity{
+		{Kind: KindPR, PRNumber: 301, Status: "validated", PRVerdict: "changes-requested"},
+	}
+	out := s.overlayRunning(in)
+	if !out[0].CapReached {
+		t.Errorf("KindPR CapReached: got false, want true (rounds keyed by PRNumber)")
+	}
+	if out[0].RunMax != LoopCap {
+		t.Errorf("KindPR RunMax: got %d want %d", out[0].RunMax, LoopCap)
 	}
 }
 

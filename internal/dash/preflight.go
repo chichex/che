@@ -29,6 +29,7 @@ package dash
 import (
 	"fmt"
 
+	"github.com/chichex/che/internal/pipeline"
 	planpkg "github.com/chichex/che/internal/plan"
 )
 
@@ -94,6 +95,46 @@ func computeGates(e Entity) FlowGates {
 		flowExecute:  gateExecute(e),
 		flowClose:    gateClose(e),
 	}
+}
+
+func computeDispatchGates(e Entity, p pipeline.Pipeline, flow string) FlowGates {
+	gates := computeGates(e)
+	if run, ok := decodeDynamicRunFlow(flow); ok {
+		gates[flow] = gatePipelineRunFrom(e, p, run.Step)
+	}
+	return gates
+}
+
+func gatePipelineRunFrom(e Entity, p pipeline.Pipeline, step string) FlowGate {
+	if e.Locked {
+		return FlowGate{false, lockedReason(e)}
+	}
+	if e.StateApplying {
+		return FlowGate{false, fmt.Sprintf("step %s en curso — esperá que termine", e.StateStep)}
+	}
+	if step == "" {
+		return FlowGate{false, "step vacío"}
+	}
+	stepFound := false
+	for _, pipelineStep := range p.Steps {
+		if pipelineStep.Name == step {
+			stepFound = true
+			break
+		}
+	}
+	if !stepFound {
+		return FlowGate{false, fmt.Sprintf("step %s no existe en el pipeline activo", step)}
+	}
+	if e.StateStep == "" {
+		return FlowGate{false, "entity sin che:state:<step> — fallback legacy"}
+	}
+	if step != e.StateStep {
+		return FlowGate{false, fmt.Sprintf("run dinámico debe reanudar desde %s, no %s", e.StateStep, step)}
+	}
+	// TODO(#58): los botones del drawer siguen usando las gates legacy de
+	// computeGates. El auto-loop dinámico enchufa su gate en este shape común
+	// sólo para el tick; la UI dinámica completa queda para el wiring de #58.
+	return FlowGate{true, ""}
 }
 
 // adoptGates devuelve el set fijo por kind para entities en columna "adopt".

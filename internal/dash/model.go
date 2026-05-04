@@ -56,16 +56,18 @@ type Entity struct {
 	// "idea", "planning", "plan", "executing", "executed", "validating",
 	// "validated", "closing", "closed". Vacío o desconocido cae a "idea"
 	// (default defensivo en Column()).
-	Status      string
-	PlanVerdict string // "approve" | "changes-requested" | "needs-human" — vacío = no validado
-	PRVerdict   string // idem, solo aplica si KindFused
-	Locked      bool   // che:locked
+	Status        string
+	StateStep     string // step real de che:state:<step> / che:state:applying:<step>
+	StateApplying bool   // true si el label activo es che:state:applying:<step>
+	PlanVerdict   string // "approve" | "changes-requested" | "needs-human" — vacío = no validado
+	PRVerdict     string // idem, solo aplica si KindFused
+	Locked        bool   // che:locked
 
 	RunningFlow string // "explore" | "execute" | "iterate" | "validate" | "close" — vacío = idle
 	RunIter     int    // iteración actual (1-based)
 	RunMax      int    // max iteraciones del loop
 	// CapReached: el auto-loop dejó de dispatchar sobre este issue porque
-	// rounds[id] ya alcanzó LoopCap. Señal visual para el humano: "no vas a
+	// rounds[id] ya alcanzó el cap efectivo. Señal visual para el humano: "no vas a
 	// ver esto moverse solo, decidí algo". Se setea en overlayRunning solo
 	// para entities en status loopable (plan / validated / executed) — en
 	// closing/closed/idea/etc el cap es irrelevante.

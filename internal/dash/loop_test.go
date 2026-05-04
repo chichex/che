@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/chichex/che/internal/pipeline"
 )
 
 // ================== Matcher puro ==================
@@ -18,12 +20,12 @@ import (
 // alguien cambió la semántica y conviene discutirla antes de mergear.
 func TestNextDispatch_RuleTable(t *testing.T) {
 	tests := []struct {
-		name      string
-		e         Entity
-		rules     map[LoopRule]bool
-		rounds    int
-		wantFlow  string
-		wantRef   int
+		name       string
+		e          Entity
+		rules      map[LoopRule]bool
+		rounds     int
+		wantFlow   string
+		wantRef    int
 		wantSubstr string // substring que debe aparecer en reason
 	}{
 		{
@@ -350,6 +352,48 @@ func TestNextDispatch_RuleTable(t *testing.T) {
 	}
 }
 
+func TestNextPipelineDispatch_DispatchesFromStateStep(t *testing.T) {
+	steps := []string{"idea", "explore", "validate_issue"}
+	if !usesPipeline(Entity{StateStep: "idea"}, steps) {
+		t.Fatalf("usesPipeline should be true when entity has a state step and the pipeline has steps")
+	}
+	if usesPipeline(Entity{StateStep: "idea"}, nil) {
+		t.Fatalf("usesPipeline should fall back to legacy matcher when the pipeline has no steps")
+	}
+	flow, ref, reason := nextPipelineDispatch(Entity{
+		Kind:        KindIssue,
+		IssueNumber: 42,
+		StateStep:   "idea",
+		Status:      "idea",
+	}, steps, map[LoopRule]bool{RuleExploreIdea: true}, 0)
+	if flow != "run#:idea" {
+		t.Fatalf("flow: got %q want run#:idea (reason=%s)", flow, reason)
+	}
+	if ref != 42 {
+		t.Fatalf("ref: got %d want 42", ref)
+	}
+
+	flow, _, reason = nextPipelineDispatch(Entity{Kind: KindIssue, IssueNumber: 42, StateStep: "idea", StateApplying: true}, steps, map[LoopRule]bool{RuleExploreIdea: true}, 0)
+	if flow != "" || reason != "applying" {
+		t.Fatalf("applying: flow=%q reason=%q, want no flow/applying", flow, reason)
+	}
+}
+
+func TestNextPipelineDispatch_EdgeReasons(t *testing.T) {
+	if flow, _, reason := nextPipelineDispatch(Entity{Kind: KindIssue, IssueNumber: 1, StateStep: "ship"}, []string{"spec", "ship"}, map[LoopRule]bool{RuleExploreIdea: true}, 0); flow != "" || reason != "pipeline-complete" {
+		t.Fatalf("complete: flow=%q reason=%q, want no flow/pipeline-complete", flow, reason)
+	}
+	if flow, _, reason := nextPipelineDispatch(Entity{Kind: KindIssue, IssueNumber: 1, StateStep: "ghost"}, []string{"spec", "ship"}, map[LoopRule]bool{RuleExploreIdea: true}, 0); flow != "" || reason != "step-not-in-pipeline" {
+		t.Fatalf("orphan: flow=%q reason=%q, want no flow/step-not-in-pipeline", flow, reason)
+	}
+	if flow, _, reason := nextPipelineDispatch(Entity{Kind: KindIssue, IssueNumber: 1, StateStep: "spec"}, nil, map[LoopRule]bool{RuleExploreIdea: true}, 0); flow != "" || reason != "no-pipeline-steps" {
+		t.Fatalf("empty: flow=%q reason=%q, want no flow/no-pipeline-steps", flow, reason)
+	}
+	if flow, _, reason := nextPipelineDispatch(Entity{Kind: KindIssue, IssueNumber: 1, StateStep: "spec"}, []string{"spec", "ship"}, map[LoopRule]bool{RuleExploreIdea: true}, DynamicLoopCap); flow != "" || reason != "cap-reached" {
+		t.Fatalf("dynamic cap: flow=%q reason=%q, want no flow/cap-reached", flow, reason)
+	}
+}
+
 // ================== Tick & concurrency ==================
 
 // newLoopServer arma un Server con fixedSource mutable + fakeRunner. El
@@ -442,6 +486,91 @@ func TestTick_ConcurrencyIssueSide(t *testing.T) {
 	}
 }
 
+func TestTick_DynamicPipelineRequiresMatchingRule(t *testing.T) {
+	s, fr := newLoopServer(t, []Entity{{
+		Kind:        KindIssue,
+		IssueNumber: 42,
+		Status:      "idea",
+		StateStep:   "idea",
+	}})
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{
+		{Name: "idea", Agents: []string{"claude-opus"}},
+		{Name: "explore", Agents: []string{"claude-opus"}},
+	}}
+	s.loop.rules[RuleValidatePlan] = true
+
+	if n := s.runTick(); n != 0 {
+		t.Fatalf("tick dispatches with only validate-plan enabled: got %d want 0", n)
+	}
+	if fr.count() != 0 {
+		t.Fatalf("runner calls with only validate-plan enabled: got %d want 0", fr.count())
+	}
+
+	s.loop.rules[RuleExploreIdea] = true
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick dispatches: got %d want 1", n)
+	}
+	call := fr.last()
+	if call.Flow != "run#:idea" {
+		t.Fatalf("flow: got %q want run#:idea", call.Flow)
+	}
+	if call.TargetRef != 42 || call.EntityKey != 42 {
+		t.Fatalf("refs: target=%d key=%d, want 42/42", call.TargetRef, call.EntityKey)
+	}
+}
+
+func TestTick_FallbackWithoutStateStepUsesLegacyMatcher(t *testing.T) {
+	s, fr := newLoopServer(t, []Entity{{Kind: KindIssue, IssueNumber: 42, Status: "plan"}})
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{{Name: "spec", Agents: []string{"claude-opus"}}}}
+	s.loop.rules[RuleValidatePlan] = true
+
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick dispatches: got %d want 1", n)
+	}
+	if got := fr.last().Flow; got != "validate" {
+		t.Fatalf("flow: got %q want validate", got)
+	}
+}
+
+func TestTick_PipelineEmptyFallsBackToLegacyMatcher(t *testing.T) {
+	s, fr := newLoopServer(t, []Entity{{Kind: KindIssue, IssueNumber: 42, Status: "plan", StateStep: "spec"}})
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion}
+	s.loop.rules[RuleValidatePlan] = true
+
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick dispatches: got %d want 1", n)
+	}
+	if got := fr.last().Flow; got != "validate" {
+		t.Fatalf("flow: got %q want validate", got)
+	}
+}
+
+func TestTick_OrphanStepFallsBackToLegacyMatcher(t *testing.T) {
+	s, fr := newLoopServer(t, []Entity{{Kind: KindIssue, IssueNumber: 42, Status: "plan", StateStep: "ghost"}})
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{{Name: "spec", Agents: []string{"claude-opus"}}, {Name: "build", Agents: []string{"claude-opus"}}}}
+	s.loop.rules[RuleValidatePlan] = true
+
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick dispatches: got %d want 1", n)
+	}
+	if got := fr.last().Flow; got != "validate" {
+		t.Fatalf("flow: got %q want validate", got)
+	}
+}
+
+func TestTick_PipelineCompleteLogsAndStops(t *testing.T) {
+	s, fr := newLoopServer(t, []Entity{{Kind: KindIssue, IssueNumber: 42, Status: "validated", StateStep: "ship", PlanVerdict: "approve"}})
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{{Name: "spec", Agents: []string{"claude-opus"}}, {Name: "ship", Agents: []string{"claude-opus"}}}}
+	s.loop.rules[RuleExecutePlan] = true
+
+	if n := s.runTick(); n != 0 {
+		t.Fatalf("tick dispatches: got %d want 0", n)
+	}
+	if fr.count() != 0 {
+		t.Fatalf("runner calls: got %d want 0", fr.count())
+	}
+}
+
 // TestTick_IssueAndPRSimultaneous: 1 issue-side + 1 PR-side libres → los 2
 // dispatchan en el mismo tick.
 func TestTick_IssueAndPRSimultaneous(t *testing.T) {
@@ -475,8 +604,31 @@ func TestTick_IssueAndPRSimultaneous(t *testing.T) {
 	}
 }
 
-// TestTick_CapFive: mismo entity pasa por 5 rondas; el 6to tick no dispatcha.
-func TestTick_CapFive(t *testing.T) {
+func TestTick_KindPRRunningOccupiesPRSlot(t *testing.T) {
+	ents := []Entity{
+		{Kind: KindPR, PRNumber: 301, Status: "validated", PRVerdict: "changes-requested", RunningFlow: "validate"},
+		{Kind: KindFused, IssueNumber: 2, PRNumber: 22, Status: "executed"},
+		{Kind: KindIssue, IssueNumber: 1, Status: "plan"},
+	}
+	s, fr := newLoopServer(t, ents)
+	s.loop.rules[RuleValidatePlan] = true
+	s.loop.rules[RuleValidatePR] = true
+
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick dispatches: got %d want 1 (KindPR running ocupa slot PR, issue slot queda libre)", n)
+	}
+	if fr.count() != 1 {
+		t.Fatalf("runner calls: got %d want 1", fr.count())
+	}
+	got := fr.last()
+	if got.Flow != "validate" || got.TargetRef != 1 || got.EntityKey != 1 {
+		t.Errorf("dispatch: got %+v want issue-side validate target=1 key=1", got)
+	}
+}
+
+// TestTick_LegacyCapTen: mismo entity legacy pasa por LoopCap rondas; el
+// siguiente tick no dispatcha.
+func TestTick_LegacyCapTen(t *testing.T) {
 	ents := []Entity{
 		{Kind: KindIssue, IssueNumber: 42, Status: "plan"},
 	}
@@ -499,6 +651,31 @@ func TestTick_CapFive(t *testing.T) {
 	}
 	if fr.count() != LoopCap {
 		t.Errorf("runner calls tras cap: got %d want %d", fr.count(), LoopCap)
+	}
+}
+
+func TestTick_DynamicPipelineCapThree(t *testing.T) {
+	s, fr := newLoopServer(t, []Entity{{Kind: KindIssue, IssueNumber: 42, Status: "idea", StateStep: "idea"}})
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{
+		{Name: "idea", Agents: []string{"claude-opus"}},
+		{Name: "explore", Agents: []string{"claude-opus"}},
+	}}
+	s.loop.rules[RuleExploreIdea] = true
+
+	for i := 1; i <= DynamicLoopCap; i++ {
+		if n := s.runTick(); n != 1 {
+			t.Fatalf("tick #%d dispatches: got %d want 1", i, n)
+		}
+		s.clearRunning(42)
+	}
+	if fr.count() != DynamicLoopCap {
+		t.Fatalf("runner calls tras %d ticks: got %d want %d", DynamicLoopCap, fr.count(), DynamicLoopCap)
+	}
+	if n := s.runTick(); n != 0 {
+		t.Errorf("tick #%d (post-cap dinámico) dispatches: got %d want 0", DynamicLoopCap+1, n)
+	}
+	if fr.count() != DynamicLoopCap {
+		t.Errorf("runner calls tras cap dinámico: got %d want %d", fr.count(), DynamicLoopCap)
 	}
 }
 
@@ -588,7 +765,7 @@ func TestTick_ManualDispatchCountsForCap(t *testing.T) {
 		s.clearRunning(42)
 	}
 	if fr.count() != LoopCap {
-		t.Fatalf("calls tras 5 manuales: got %d want %d", fr.count(), LoopCap)
+		t.Fatalf("calls tras %d manuales: got %d want %d", LoopCap, fr.count(), LoopCap)
 	}
 	// Ahora el counter debería estar en cap.
 	if r := s.loop.roundsFor(42); r != LoopCap {
@@ -1330,6 +1507,9 @@ func TestEntitySide(t *testing.T) {
 	}
 	if got := entitySide(Entity{Kind: KindFused}); got != "pr" {
 		t.Errorf("KindFused: got %q want 'pr'", got)
+	}
+	if got := entitySide(Entity{Kind: KindPR}); got != "pr" {
+		t.Errorf("KindPR: got %q want 'pr'", got)
 	}
 }
 

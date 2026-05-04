@@ -31,11 +31,14 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/chichex/che/internal/pipeline"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
@@ -100,6 +103,20 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	srv := NewServer(source, repoName, opts.Poll)
 	srv.repoPath = opts.Repo
 	srv.version = opts.Version
+	root, err := dashPipelineRoot(opts.Repo)
+	if err != nil {
+		return err
+	}
+	srv.pipelineRoot = root
+	mgr, err := pipeline.NewManager(root)
+	if err != nil {
+		return fmt.Errorf("init pipeline manager: %w", err)
+	}
+	resolved, err := mgr.Resolve("")
+	if err != nil {
+		return fmt.Errorf("resolve dashboard pipeline: %w", err)
+	}
+	srv.pipeline = resolved.Pipeline
 
 	ln, err := listenWithFallback(opts.Port, !opts.PortExplicit)
 	if err != nil {
@@ -162,6 +179,13 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 }
 
+func dashPipelineRoot(repo string) (string, error) {
+	if repo == "" {
+		return os.Getwd()
+	}
+	return filepath.Abs(repo)
+}
+
 // Server es el handler HTTP del dashboard. Mantiene una referencia a la
 // Source para poder leer snapshots actualizados en cada request, y los
 // datos estáticos del page (repo, poll interval).
@@ -182,9 +206,9 @@ type Server struct {
 	//
 	// targetRef = número que recibe el subcomando como argumento (PRNumber
 	// para fused validate/iterate, IssueNumber para el resto — ver
-	// resolveTargetRef). entityKey = IssueNumber de la entidad; se usa como
-	// clave del overlay de running y del LogStore para que el modal y el
-	// stream SSE la encuentren.
+	// resolveTargetRef). entityKey = EntityKey de la entidad; se usa como clave
+	// del overlay de running y del LogStore para que el modal y el stream SSE la
+	// encuentren.
 	runAction func(flow string, targetRef, entityKey int, repo string) error
 
 	// mu protege running y autoRunning. El map running trackea flows
@@ -194,8 +218,8 @@ type Server struct {
 	// paralelo que distingue "disparado por el auto-loop engine" de
 	// "disparado por el humano" para pintar un chip extra en el drawer.
 	mu          sync.Mutex
-	running     map[int]string // IssueNumber → flow corriendo
-	autoRunning map[int]bool   // IssueNumber → disparado por auto-loop (step 6)
+	running     map[int]string // EntityKey → flow corriendo
+	autoRunning map[int]bool   // EntityKey → disparado por auto-loop (step 6)
 
 	// loop es el estado del auto-loop engine (step 6): master switch +
 	// flags por regla + contador de rounds. Protegido por su propio
@@ -209,6 +233,15 @@ type Server struct {
 	// Separado del lock `mu` porque el dominio es distinto y el RWMutex
 	// interno del LogStore admite múltiples readers (Snapshot) en paralelo.
 	logs *LogStore
+
+	// pipeline es el pipeline activo del repo para gates/auto-loop dinámicos.
+	// NewServer usa pipeline.Default() para tests y mock mode. Run setea
+	// pipelineRoot y activePipeline() lo re-resuelve por tick para no quedar con
+	// un snapshot stale si el usuario edita `.che/pipelines/` mientras el dash
+	// sigue abierto.
+	pipelineMu   sync.RWMutex
+	pipeline     pipeline.Pipeline
+	pipelineRoot string
 }
 
 // allowedFlows es la allowlist de flows disparables desde el dashboard. Se
@@ -261,6 +294,7 @@ func NewServer(source Source, repoName string, pollInterval int) *Server {
 		autoRunning:  map[int]bool{},
 		loop:         newLoopState(),
 		logs:         NewLogStore(),
+		pipeline:     pipeline.Default(),
 	}
 	s.runAction = s.spawnChe
 	tmpl := template.New("dash").Funcs(s.templateFuncs())
@@ -273,6 +307,53 @@ func NewServer(source Source, repoName string, pollInterval int) *Server {
 	s.tmpl = tmpl
 	s.mux = s.buildMux()
 	return s
+}
+
+func (s *Server) activePipeline() pipeline.Pipeline {
+	s.pipelineMu.RLock()
+	root := s.pipelineRoot
+	if s.pipelineRoot == "" {
+		p := clonePipeline(s.pipeline)
+		s.pipelineMu.RUnlock()
+		return p
+	}
+	s.pipelineMu.RUnlock()
+
+	mgr, err := pipeline.NewManager(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dash auto-loop: init pipeline manager failed: %v — using last pipeline snapshot\n", err)
+		s.pipelineMu.RLock()
+		p := clonePipeline(s.pipeline)
+		s.pipelineMu.RUnlock()
+		return p
+	}
+	resolved, err := mgr.Resolve("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dash auto-loop: resolve pipeline failed: %v — using last pipeline snapshot\n", err)
+		s.pipelineMu.RLock()
+		p := clonePipeline(s.pipeline)
+		s.pipelineMu.RUnlock()
+		return p
+	}
+	s.pipelineMu.Lock()
+	s.pipeline = resolved.Pipeline
+	p := clonePipeline(s.pipeline)
+	s.pipelineMu.Unlock()
+	return p
+}
+
+func clonePipeline(p pipeline.Pipeline) pipeline.Pipeline {
+	out := p
+	if p.Entry != nil {
+		entry := *p.Entry
+		entry.Agents = append([]string(nil), p.Entry.Agents...)
+		out.Entry = &entry
+	}
+	out.Steps = append([]pipeline.Step(nil), p.Steps...)
+	for i := range out.Steps {
+		out.Steps[i].Agents = append([]string(nil), out.Steps[i].Agents...)
+	}
+	return out
 }
 
 // ServeHTTP delega al mux interno; lo implementamos explícito para poder
@@ -494,8 +575,8 @@ func (s *Server) templateFuncs() template.FuncMap {
 		// Step 6 — auto-loop pill label helpers. Se exponen acá para
 		// que el partial "auto-loop-toggle" los use tanto en render
 		// inicial como en OOB swap. Ambos reciben loopPopoverData.
-		"pillLabel":            pillLabel,
-		"pillLabelHasSpinner":  pillLabelHasSpinner,
+		"pillLabel":           pillLabel,
+		"pillLabelHasSpinner": pillLabelHasSpinner,
 		// Preflight gates (PR de gates UI, abril 2026): resolución del
 		// estado de un botón hx-post a partir de RunningFlow + Gates.
 		// flowBtnState centraliza la prioridad: RunningFlow gana sobre
@@ -772,23 +853,24 @@ func (s *Server) overlayRunning(in []Entity) []Entity {
 			e.RunningFlow = flow
 		}
 		// Inyectar counter de rounds al chip magenta del card. RunMax es
-		// el cap compartido; si nunca se disparó un flow para este id,
-		// rounds[id]=0 → RunIter=0, lo cual es el estado correcto (el cap
-		// va al renderer igual, para que se vea "⟳ execute 0/5").
+		// el cap efectivo (dinámico=3, legacy=10); si nunca se disparó un
+		// flow para este id, rounds[id]=0 → RunIter=0, lo cual es correcto (el cap
+		// va al renderer igual, para que se vea "⟳ execute 0/N").
+		cap := loopCapForEntity(e)
 		if e.RunningFlow != "" {
 			e.RunIter = rounds[key]
-			e.RunMax = LoopCap
+			e.RunMax = cap
 		}
-		// Cap-reached chip: rounds >= LoopCap + entity en status loopable.
+		// Cap-reached chip: rounds >= cap efectivo + entity en status loopable.
 		// Gate por status para que cards en closed/closing/idea no prendan
 		// el chip (ahí el cap no tiene sentido — el auto-loop no iba a
 		// dispatchar igual). Sí aplica durante un run (RunningFlow != "")
 		// para cubrir el caso "este run es el #5 y el próximo tick corta".
-		if rounds[e.IssueNumber] >= LoopCap {
+		if rounds[key] >= cap {
 			switch e.Status {
 			case "plan", "validated", "executed":
 				e.CapReached = true
-				e.RunMax = LoopCap
+				e.RunMax = cap
 			}
 		}
 		// Computamos gates sobre el estado YA mutado (con RunningFlow del
@@ -815,7 +897,7 @@ func (s *Server) markRunning(id int, flow string) (string, bool) {
 	// fuera de lock sería ok (Snapshot() es concurrency-safe), pero
 	// mantenerlo bajo lock simplifica razonar sobre ordenamientos.
 	for _, e := range s.source.Snapshot().Entities {
-		if e.IssueNumber == id && e.RunningFlow != "" {
+		if e.EntityKey() == id && e.RunningFlow != "" {
 			return e.RunningFlow, false
 		}
 	}
@@ -879,11 +961,24 @@ func (s *Server) spawnChe(flow string, targetRef, entityKey int, repo string) er
 			return fmt.Errorf("no se pudo resolver el binario che: %w", err)
 		}
 	}
-	cmd := exec.Command(bin, flow, strconv.Itoa(targetRef))
+	var cmd *exec.Cmd
+	if run, ok := decodeDynamicRunFlow(flow); ok {
+		ref := "#" + strconv.Itoa(targetRef)
+		if run.PR {
+			ref = "!" + strconv.Itoa(targetRef)
+		}
+		cmd = exec.Command(bin, "run", "--auto", "--from", run.Step, "--input", ref)
+	} else {
+		cmd = exec.Command(bin, flow, strconv.Itoa(targetRef))
+	}
 	if repo != "" {
 		cmd.Dir = repo
 	}
-	return s.runCmdWithLogs(cmd, entityKey, fmt.Sprintf("che %s %d (en %s)", flow, targetRef, repo))
+	banner := fmt.Sprintf("che %s %d (en %s)", flow, targetRef, repo)
+	if _, ok := decodeDynamicRunFlow(flow); ok {
+		banner = fmt.Sprintf("che %s (en %s)", strings.Join(cmd.Args[1:], " "), repo)
+	}
+	return s.runCmdWithLogs(cmd, entityKey, banner)
 }
 
 // runCmdWithLogs setea pipes en cmd, arranca el proceso, tee-ea stdout/

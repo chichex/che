@@ -6,30 +6,30 @@
 // cerrando el ciclo humano → IA sin intervención manual.
 //
 // Reglas (7), enumeradas en orden didáctico (issue-side primero, después PR-side):
-//   1. Status=idea (o "")                          → che explore  <IssueNumber>
-//      (idea→plan: arranca el ciclo desde un issue con `ct:plan` aplicado.)
-//   2. Status=plan sin PlanVerdict                 → che validate <IssueNumber>
-//   3. Status=validated + PlanVerdict=changes-req  → che iterate  <IssueNumber>
-//      (post-v0.0.49: validate transiciona plan→validated; el verdict
-//       "changes-requested" queda como label plan-validated:* sobre un
-//       issue en che:validated.)
-//   4. Status=validated + PlanVerdict=approve      → che execute  <IssueNumber>
-//      (issue-only; sin PR previo. Cierra el gap post-validate plan:
-//       un plan aprobado automáticamente pasa a ejecución.)
-//   5. Status=plan sin PlanVerdict                 → che execute  <IssueNumber>
-//      (fast-lane "plan→executed" sin pasar por validate. Mutuamente
-//       excluyente con regla 2 a nivel de UI: si ambas están ON, validate
-//       gana — preferimos validar antes de ejecutar cuando hay duda.)
-//   6. Status=executed sin PRVerdict               → che validate <PRNumber>
-//   7. Status=executed + PRVerdict=changes-req     → che iterate  <PRNumber>
-//      (también matchea Status=validated cuando validate-pr ya transicionó.)
+//  1. Status=idea (o "")                          → che explore  <IssueNumber>
+//     (idea→plan: arranca el ciclo desde un issue con `ct:plan` aplicado.)
+//  2. Status=plan sin PlanVerdict                 → che validate <IssueNumber>
+//  3. Status=validated + PlanVerdict=changes-req  → che iterate  <IssueNumber>
+//     (post-v0.0.49: validate transiciona plan→validated; el verdict
+//     "changes-requested" queda como label plan-validated:* sobre un
+//     issue en che:validated.)
+//  4. Status=validated + PlanVerdict=approve      → che execute  <IssueNumber>
+//     (issue-only; sin PR previo. Cierra el gap post-validate plan:
+//     un plan aprobado automáticamente pasa a ejecución.)
+//  5. Status=plan sin PlanVerdict                 → che execute  <IssueNumber>
+//     (fast-lane "plan→executed" sin pasar por validate. Mutuamente
+//     excluyente con regla 2 a nivel de UI: si ambas están ON, validate
+//     gana — preferimos validar antes de ejecutar cuando hay duda.)
+//  6. Status=executed sin PRVerdict               → che validate <PRNumber>
+//  7. Status=executed + PRVerdict=changes-req     → che iterate  <PRNumber>
+//     (también matchea Status=validated cuando validate-pr ya transicionó.)
 //
 // Stop conditions por entity:
 //   - verdict=approve        → done (feliz), no dispatch.
 //   - verdict=needs-human    → done (requiere ojo humano), no dispatch.
 //   - Locked=true            → skip este tick (no terminal; el próximo
-//                              intenta de vuelta cuando se destrabe).
-//   - rounds[id] >= LoopCap  → cap alcanzado, no dispatch.
+//     intenta de vuelta cuando se destrabe).
+//   - rounds[id] >= cap efectivo → cap alcanzado, no dispatch.
 //
 // Concurrency: a lo sumo 1 flow issue-side + 1 PR-side simultáneos en todo
 // el board. La clasificación es por Kind (KindIssue=issue-side, KindFused
@@ -52,9 +52,10 @@
 //     diseño del flow.
 //   - execute:  1x opus  — `che execute` default de `--agent` es opus.
 //     El loop dispatcha execute via dos reglas: RuleExecutePlan (validated
-//     + approve = luz verde explícita del validador) o RuleExecuteRaw
+//   - approve = luz verde explícita del validador) o RuleExecuteRaw
 //     (plan sin verdict = fast-lane, opt-in para usuarios que confían en
 //     el plan sin validarlo).
+//
 // El loop invoca los subcomandos sin flags de agent — heredan estos
 // defaults. Mantener esto sincronizado si los defaults cambien en cmd/.
 package dash
@@ -66,17 +67,29 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/chichex/che/internal/pipelinelabels"
 )
 
-// LoopCap es el número máximo de dispatches automáticos + manuales que el
-// loop engine permite para una misma entidad desde que arrancó el server.
+// LoopCap es el número máximo legacy de dispatches automáticos + manuales que
+// el loop engine permite para una misma entidad desde que arrancó el server.
 // El contador se resetea al reiniciar (in-memory). 10 cubre ~5 rondas
-// iterate↔validate — suficiente para un feature que necesita varios pulidos
-// antes de aprobarse, sin entrar en loops infinitos si el validador nunca
-// converge. El handler manual de /action NO consulta este cap (solo gatea
-// el auto-loop engine), así que el humano puede seguir disparando a mano
-// desde el modal después de que el cap se alcance.
+// iterate↔validate en el motor legacy, sin entrar en loops infinitos si el
+// validador nunca converge. El motor dinámico usa DynamicLoopCap para mitigar
+// loops de pipeline más temprano.
 const LoopCap = 10
+
+// DynamicLoopCap es el cap efectivo para dispatches dinámicos `che run --auto`.
+// Mantiene LoopCap=10 para entidades legacy, pero corta pipelines dinámicos a
+// 3 intentos sobre la misma entity antes de requerir intervención humana.
+const DynamicLoopCap = 3
+
+func loopCapForEntity(e Entity) int {
+	if e.StateStep != "" {
+		return DynamicLoopCap
+	}
+	return LoopCap
+}
 
 // LoopRule es el identificador de una de las 4 reglas loopeables. Usado
 // como clave del map del state y en la URL del endpoint POST /loop/rule/...
@@ -426,10 +439,10 @@ type loopFromGroup struct {
 // puro y vive en el tick.
 //
 // Reglas de corte (en orden de chequeo):
-//   1. Locked=true → skip (motivo: "locked").
-//   2. Cap hit (rounds >= LoopCap) → stop (motivo: "cap-reached").
-//   3. Verdict terminal (approve / needs-human) → stop.
-//   4. Match de reglas ON → dispatch.
+//  1. Locked=true → skip (motivo: "locked").
+//  2. Cap hit (rounds >= LoopCap legacy) → stop (motivo: "cap-reached").
+//  3. Verdict terminal (approve / needs-human) → stop.
+//  4. Match de reglas ON → dispatch.
 //
 // Devuelve flow="" si nada dispatcha; reason siempre describe por qué.
 func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, targetRef int, reason string) {
@@ -547,11 +560,123 @@ func nextDispatch(e Entity, rules map[LoopRule]bool, rounds int) (flow string, t
 	return "", 0, "status-not-loopable"
 }
 
+func usesPipeline(e Entity, steps []string) bool {
+	// FALLBACK v1/v2: entities without che:state:<step> stay on the legacy
+	// matcher. An empty pipeline snapshot also falls back so migrated entities do
+	// not get stranded if pipeline resolution is temporarily unavailable.
+	return e.StateStep != "" && len(steps) > 0
+}
+
+const (
+	dynamicRunIssuePrefix = "run#:"
+	dynamicRunPRPrefix    = "run!:"
+)
+
+type dynamicRunFlow struct {
+	Step string
+	PR   bool
+}
+
+func encodeDynamicRunFlow(run dynamicRunFlow) string {
+	if run.PR {
+		return dynamicRunPRPrefix + run.Step
+	}
+	return dynamicRunIssuePrefix + run.Step
+}
+
+func decodeDynamicRunFlow(flow string) (dynamicRunFlow, bool) {
+	switch {
+	case len(flow) > len(dynamicRunIssuePrefix) && flow[:len(dynamicRunIssuePrefix)] == dynamicRunIssuePrefix:
+		return dynamicRunFlow{Step: flow[len(dynamicRunIssuePrefix):]}, true
+	case len(flow) > len(dynamicRunPRPrefix) && flow[:len(dynamicRunPRPrefix)] == dynamicRunPRPrefix:
+		return dynamicRunFlow{Step: flow[len(dynamicRunPRPrefix):], PR: true}, true
+	default:
+		return dynamicRunFlow{}, false
+	}
+}
+
+func dynamicRulesForStateStep(e Entity) []LoopRule {
+	switch e.StateStep {
+	case pipelinelabels.StepIdea:
+		if e.Kind == KindIssue {
+			return []LoopRule{RuleExploreIdea}
+		}
+	case pipelinelabels.StepExplore:
+		if e.Kind == KindIssue {
+			return []LoopRule{RuleValidatePlan, RuleExecuteRaw}
+		}
+	case pipelinelabels.StepExecute:
+		if e.PRNumber > 0 {
+			return []LoopRule{RuleValidatePR}
+		}
+	case pipelinelabels.StepValidatePR:
+		if e.Kind == KindFused || e.Kind == KindPR {
+			return []LoopRule{RuleIteratePR}
+		}
+		if e.Kind == KindIssue {
+			return []LoopRule{RuleIteratePlan, RuleExecutePlan}
+		}
+	}
+	return nil
+}
+
+func dynamicRuleEnabled(e Entity, rules map[LoopRule]bool) (bool, string) {
+	dynamicRules := dynamicRulesForStateStep(e)
+	if len(dynamicRules) == 0 {
+		return false, "no-dynamic-rule-for-step"
+	}
+	for _, rule := range dynamicRules {
+		if rules[rule] {
+			return true, "rule:" + string(rule)
+		}
+	}
+	return false, "dynamic-rule-disabled"
+}
+
+func nextPipelineDispatch(e Entity, steps []string, rules map[LoopRule]bool, rounds int) (flow string, targetRef int, reason string) {
+	if e.StateStep == "" {
+		return "", 0, "no-pipeline-state"
+	}
+	if len(steps) == 0 {
+		return "", 0, "no-pipeline-steps"
+	}
+	if e.Locked {
+		return "", 0, "locked"
+	}
+	if e.StateApplying {
+		return "", 0, "applying"
+	}
+	if rounds >= DynamicLoopCap {
+		return "", 0, "cap-reached"
+	}
+	for i, step := range steps {
+		if step != e.StateStep {
+			continue
+		}
+		if i+1 >= len(steps) {
+			return "", 0, "pipeline-complete"
+		}
+		if ok, reason := dynamicRuleEnabled(e, rules); !ok {
+			return "", 0, reason
+		}
+		// Dynamic verdict handling lives in the pipeline agents/markers: the dash
+		// only resumes from the current StateStep and lets `che run --auto` decide
+		// advance, goto markers and skips. Legacy verdict rules are fallback only.
+		run := dynamicRunFlow{Step: e.StateStep, PR: e.Kind == KindPR || (e.Kind == KindFused && e.PRNumber > 0)}
+		targetRef := e.EntityKey()
+		if run.PR {
+			targetRef = e.PRNumber
+		}
+		return encodeDynamicRunFlow(run), targetRef, "step:" + e.StateStep
+	}
+	return "", 0, "step-not-in-pipeline"
+}
+
 // entitySide clasifica la entity en issue-side o PR-side para el slot de
-// concurrencia. Por Kind: KindIssue=issue, KindFused=pr. Simple y
-// determinístico.
+// concurrencia. KindFused y KindPR ocupan el slot PR-side: ambos dispatchan
+// sobre un PR cuando viven en el motor dinámico post-adopt.
 func entitySide(e Entity) string {
-	if e.Kind == KindFused {
+	if e.Kind == KindFused || e.Kind == KindPR {
 		return "pr"
 	}
 	return "issue"
@@ -604,6 +729,11 @@ func (s *Server) runTick() int {
 	if !anyOn {
 		return 0
 	}
+	activePipeline := s.activePipeline()
+	steps := make([]string, 0, len(activePipeline.Steps))
+	for _, step := range activePipeline.Steps {
+		steps = append(steps, step.Name)
+	}
 
 	snap := s.source.Snapshot()
 	// Priorizar más viejo → más nuevo. Con concurrency 1 issue-side + 1
@@ -632,7 +762,7 @@ func (s *Server) runTick() int {
 	}
 	s.mu.Unlock()
 	for _, e := range ents {
-		running := e.RunningFlow != "" || localRunning[e.IssueNumber] != ""
+		running := e.RunningFlow != "" || localRunning[e.EntityKey()] != ""
 		if !running {
 			continue
 		}
@@ -662,12 +792,44 @@ func (s *Server) runTick() int {
 		// que esto es defensa para cuando se sumen reglas adopt-side.
 		key := e.EntityKey()
 		rounds := s.loop.roundsFor(key)
-		flow, targetRef, reason := nextDispatch(e, rules, rounds)
+		if e.StateStep != "" && len(steps) == 0 {
+			if !s.loop.markGateNotified(key, "pipeline", "no-pipeline-steps:"+e.StateStep) {
+				fmt.Fprintf(os.Stderr, "dash auto-loop: dynamic fallback for %s — no-pipeline-steps (step=%s)\n", entityRef(e), e.StateStep)
+			}
+		}
+		var flow string
+		var targetRef int
+		var reason string
+		usedPipeline := usesPipeline(e, steps)
+		cap := LoopCap
+		if usedPipeline {
+			cap = DynamicLoopCap
+			flow, targetRef, reason = nextPipelineDispatch(e, steps, rules, rounds)
+		} else {
+			flow, targetRef, reason = nextDispatch(e, rules, rounds)
+		}
+		if usedPipeline && flow == "" {
+			switch reason {
+			case "step-not-in-pipeline", "no-pipeline-steps":
+				if !s.loop.markGateNotified(key, "pipeline", reason+":"+e.StateStep) {
+					fmt.Fprintf(os.Stderr, "dash auto-loop: dynamic fallback for %s — %s (step=%s)\n", entityRef(e), reason, e.StateStep)
+				}
+				flow, targetRef, reason = nextDispatch(e, rules, rounds)
+			case "pipeline-complete":
+				if !s.loop.markGateNotified(key, "pipeline", reason+":"+e.StateStep) {
+					fmt.Fprintf(os.Stderr, "dash auto-loop: pipeline complete for %s at step %s — stop\n", entityRef(e), e.StateStep)
+				}
+			case "no-dynamic-rule-for-step", "dynamic-rule-disabled":
+				if !s.loop.markGateNotified(key, "pipeline", reason+":"+e.StateStep) {
+					fmt.Fprintf(os.Stderr, "dash auto-loop: dynamic skip for %s — %s (step=%s)\n", entityRef(e), reason, e.StateStep)
+				}
+			}
+		}
 		if flow == "" {
 			// Cap hit: log una vez a stderr.
 			if reason == "cap-reached" {
 				if !s.loop.markCapNotified(key) {
-					fmt.Fprintf(os.Stderr, "dash auto-loop: cap %d reached for %s — stop\n", LoopCap, entityRef(e))
+					fmt.Fprintf(os.Stderr, "dash auto-loop: cap %d reached for %s — stop\n", cap, entityRef(e))
 				}
 			}
 			continue
@@ -686,7 +848,7 @@ func (s *Server) runTick() int {
 		// (Gates ya viene poblado por overlayRunning, pero acá usamos el
 		// snapshot crudo del Source — overlayRunning no corre en el tick).
 		// computeGates es pura, sin IO; el costo es despreciable.
-		gate := computeGates(e)[flow]
+		gate := computeDispatchGates(e, activePipeline, flow)[flow]
 		if !gate.Available {
 			if !s.loop.markGateNotified(key, flow, gate.Reason) {
 				fmt.Fprintf(os.Stderr, "dash auto-loop: skip %s %s — %s\n", flow, entityRef(e), gate.Reason)
@@ -950,4 +1112,3 @@ func pillLabel(data loopPopoverData) string {
 func pillLabelHasSpinner(data loopPopoverData) bool {
 	return data.ActiveRules > 0 && data.AutoLoops > 0
 }
-
