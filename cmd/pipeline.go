@@ -19,7 +19,7 @@ import (
 // en sus respectivos init().
 var pipelineCmd = &cobra.Command{
 	Use:   "pipeline",
-	Short: "gestiona los pipelines del repo (list, show, use, new, clone, validate, simulate, init-labels, migrate-labels, reset)",
+	Short: "gestiona los pipelines del repo (list, show, use, new, create, clone, validate, simulate, init-labels, migrate-labels, reset)",
 	Long: `pipeline agrupa los subcomandos para inspeccionar y operar sobre los
 pipelines configurables de che (PRD §7).
 
@@ -32,6 +32,7 @@ Subcomandos:
   show       imprime un pipeline por nombre (JSON o resumen)
   use        marca un pipeline como default
   new        materializa un pipeline desde el built-in (template)
+  create     crea un pipeline con wizard interactivo
   clone      copia un pipeline aplicando sustituciones de strings
   validate   chequea sintaxis + referencias a agentes (registry)
   simulate   dry-run: muestra cómo se resolvería una corrida sin invocar LLM
