@@ -1,0 +1,52 @@
+{{/* pipeline_editor.html.tmpl — modal HTMX para editar el pipeline activo. */}}
+<div class="modal-backdrop">
+<div class="modal pipeline-editor" data-pipeline-editor="1">
+  <div class="drawer-hdr">
+    <div class="drawer-hdr-top">
+      <div class="entity-row">
+        pipeline <b>{{.Name}}</b> · {{.Source}}{{if .Path}} · <code>{{.Path}}</code>{{else}} · built-in se materializa como <code>.che/pipelines/default.json</code>{{end}}
+      </div>
+      <button class="drawer-close"
+              hx-get="/drawer/close"
+              hx-target="#modal-slot"
+              hx-swap="innerHTML"
+              title="cerrar (Esc)">×</button>
+    </div>
+    <h3>editor visual de pipeline</h3>
+    <div class="sub">editá orden, step, agentes, aggregator y comentario; guardar valida el JSON antes de escribir.</div>
+    {{if .Saved}}<div class="pipeline-editor-ok">guardado · el board recarga en el próximo poll</div>{{end}}
+    {{if .Error}}<div class="pipeline-editor-error">{{.Error}}</div>{{end}}
+  </div>
+
+  <form class="pipeline-editor-form"
+        hx-post="/pipeline/editor"
+        hx-target="#modal-slot"
+        hx-swap="innerHTML">
+    <div class="pipeline-editor-head">
+      <span>step</span>
+      <span>agents (coma)</span>
+      <span>aggregator</span>
+      <span>comment</span>
+      <span></span>
+    </div>
+    <div class="pipeline-editor-rows" data-pipeline-rows>
+      {{range .Pipe.Steps}}
+      {{$agg := .Aggregator}}
+      <div class="pipeline-editor-row">
+        <input name="step_name" value="{{.Name}}" autocomplete="off" spellcheck="false">
+        <input name="step_agents" value="{{splitAgents .Agents}}" autocomplete="off" spellcheck="false">
+        <select name="step_aggregator">
+          {{range aggregators}}<option value="{{.}}" {{if eq . $agg}}selected{{end}}>{{.}}</option>{{end}}
+        </select>
+        <input name="step_comment" value="{{.Comment}}" autocomplete="off" spellcheck="false">
+        <button type="button" class="btn ghost" data-remove-step title="eliminar step">×</button>
+      </div>
+      {{end}}
+    </div>
+    <div class="pipeline-editor-actions">
+      <button type="button" class="btn ghost" data-add-step>+ step</button>
+      <button type="submit" class="btn primary">guardar pipeline</button>
+    </div>
+  </form>
+</div>
+</div>

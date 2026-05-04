@@ -23,6 +23,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -46,7 +47,7 @@ import (
 	"github.com/yuin/goldmark/renderer/html"
 )
 
-//go:embed templates/dashboard.html.tmpl templates/drawer.html.tmpl templates/board.html.tmpl templates/loop.html.tmpl
+//go:embed templates/dashboard.html.tmpl templates/drawer.html.tmpl templates/board.html.tmpl templates/loop.html.tmpl templates/pipeline_editor.html.tmpl
 var templatesFS embed.FS
 
 //go:embed static/htmx.min.js static/dash.js
@@ -118,6 +119,9 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 		return fmt.Errorf("resolve dashboard pipeline: %w", err)
 	}
 	srv.pipeline = resolved.Pipeline
+	srv.pipelineName = resolved.Name
+	srv.pipelinePath = resolved.Path
+	srv.pipelineKind = resolved.Source
 
 	ln, err := listenWithFallback(opts.Port, !opts.PortExplicit)
 	if err != nil {
@@ -242,6 +246,9 @@ type Server struct {
 	// sigue abierto.
 	pipelineMu   sync.RWMutex
 	pipeline     pipeline.Pipeline
+	pipelineName string
+	pipelinePath string
+	pipelineKind pipeline.SourceKind
 	pipelineRoot string
 }
 
@@ -304,6 +311,7 @@ func NewServer(source Source, repoName string, pollInterval int) *Server {
 		"templates/drawer.html.tmpl",
 		"templates/board.html.tmpl",
 		"templates/loop.html.tmpl",
+		"templates/pipeline_editor.html.tmpl",
 	))
 	s.tmpl = tmpl
 	s.mux = s.buildMux()
@@ -338,9 +346,23 @@ func (s *Server) activePipeline() pipeline.Pipeline {
 	}
 	s.pipelineMu.Lock()
 	s.pipeline = resolved.Pipeline
+	s.pipelineName = resolved.Name
+	s.pipelinePath = resolved.Path
+	s.pipelineKind = resolved.Source
 	p := clonePipeline(s.pipeline)
 	s.pipelineMu.Unlock()
 	return p
+}
+
+func (s *Server) activePipelineResolved() pipelineEditorData {
+	s.pipelineMu.RLock()
+	defer s.pipelineMu.RUnlock()
+	return pipelineEditorData{
+		Name:   s.pipelineName,
+		Source: s.pipelineKind,
+		Path:   s.pipelinePath,
+		Pipe:   clonePipeline(s.pipeline),
+	}
 }
 
 func clonePipeline(p pipeline.Pipeline) pipeline.Pipeline {
@@ -395,6 +417,15 @@ type pageData struct {
 	// hx-get de /board y al EventSource de /stream (reconexión sin perder
 	// el estado del toggle).
 	Adopt bool
+}
+
+type pipelineEditorData struct {
+	Name   string
+	Source pipeline.SourceKind
+	Path   string
+	Pipe   pipeline.Pipeline
+	Error  string
+	Saved  bool
 }
 
 // hotPollSec es el intervalo de polling adaptivo cuando hay flows locales
@@ -658,7 +689,25 @@ func (s *Server) templateFuncs() template.FuncMap {
 		"gateOf":      gateOf,
 		"displayFlow": displayFlow,
 		"joinStrings": strings.Join,
+		"aggregators": func() []pipeline.Aggregator { return pipeline.ValidAggregators },
+		"splitAgents": splitPipelineAgents,
 	}
+}
+
+func splitPipelineAgents(agents []string) string {
+	return strings.Join(agents, ", ")
+}
+
+func parsePipelineAgents(raw string) []string {
+	parts := strings.Split(raw, ",")
+	agents := make([]string, 0, len(parts))
+	for _, part := range parts {
+		agent := strings.TrimSpace(part)
+		if agent != "" {
+			agents = append(agents, agent)
+		}
+	}
+	return agents
 }
 
 func displayFlow(flow string) string {
@@ -868,6 +917,119 @@ func (s *Server) buildData(adopt bool) pageData {
 		Loop:         s.buildLoopData(),
 		Adopt:        adopt,
 	}
+}
+
+func (s *Server) pipelineEditorFromRequest(r *http.Request) (pipeline.Pipeline, error) {
+	if err := r.ParseForm(); err != nil {
+		return pipeline.Pipeline{}, err
+	}
+	names := r.PostForm["step_name"]
+	agents := r.PostForm["step_agents"]
+	aggregators := r.PostForm["step_aggregator"]
+	comments := r.PostForm["step_comment"]
+	if len(names) != len(agents) || len(names) != len(aggregators) || len(names) != len(comments) {
+		return pipeline.Pipeline{}, fmt.Errorf("form inválido: filas de steps desalineadas")
+	}
+	out := pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: make([]pipeline.Step, 0, len(names))}
+	for i := range names {
+		name := strings.TrimSpace(names[i])
+		if name == "" && strings.TrimSpace(agents[i]) == "" && strings.TrimSpace(comments[i]) == "" {
+			continue
+		}
+		out.Steps = append(out.Steps, pipeline.Step{
+			Name:       name,
+			Agents:     parsePipelineAgents(agents[i]),
+			Aggregator: pipeline.Aggregator(strings.TrimSpace(aggregators[i])),
+			Comment:    strings.TrimSpace(comments[i]),
+		})
+	}
+	if err := pipeline.Validate(out); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func (s *Server) saveDashboardPipeline(p pipeline.Pipeline) (pipelineEditorData, error) {
+	root := s.pipelineRoot
+	if root == "" {
+		return pipelineEditorData{}, fmt.Errorf("pipelineRoot vacío: el editor requiere repo path")
+	}
+	mgr, err := pipeline.NewManager(root)
+	if err != nil {
+		return pipelineEditorData{}, fmt.Errorf("init pipeline manager: %w", err)
+	}
+	s.pipelineMu.Lock()
+	name := s.pipelineName
+	path := s.pipelinePath
+	source := s.pipelineKind
+	if path == "" {
+		name = "default"
+		path = filepath.Join(mgr.PipelinesDir(), name+".json")
+		source = pipeline.SourceConfig
+	}
+	if err := writePipelineFile(path, p); err != nil {
+		s.pipelineMu.Unlock()
+		return pipelineEditorData{}, fmt.Errorf("escribir %s: %w", path, err)
+	}
+	if s.pipelinePath == "" || mgr.Config.Default == "" {
+		if err := writePipelineConfig(mgr.ConfigPath(), pipeline.Config{Version: pipeline.ConfigVersion, Default: name}); err != nil {
+			s.pipelineMu.Unlock()
+			return pipelineEditorData{}, fmt.Errorf("escribir %s: %w", mgr.ConfigPath(), err)
+		}
+	}
+	s.pipeline = clonePipeline(p)
+	s.pipelineName = name
+	s.pipelinePath = path
+	s.pipelineKind = source
+	out := pipelineEditorData{Name: name, Source: source, Path: path, Pipe: clonePipeline(p), Saved: true}
+	s.pipelineMu.Unlock()
+	s.bumpSource()
+	return out, nil
+}
+
+func writePipelineFile(path string, p pipeline.Pipeline) error {
+	return writeJSONFileAtomic(path, p)
+}
+
+func writePipelineConfig(path string, cfg pipeline.Config) error {
+	return writeJSONFileAtomic(path, cfg)
+}
+
+func writeJSONFileAtomic(path string, v any) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("rechazado symlink en destino %s", path)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // findEntity busca por EntityKey en el snapshot actual. Usado por el
@@ -1367,6 +1529,44 @@ func (s *Server) buildMux() *http.ServeMux {
 	mux.HandleFunc("GET /drawer/close", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
+	})
+
+	mux.HandleFunc("GET /pipeline/editor", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = s.activePipeline()
+		if err := s.tmpl.ExecuteTemplate(w, "pipeline_editor.html.tmpl", s.activePipelineResolved()); err != nil {
+			http.Error(w, "template error: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+
+	mux.HandleFunc("POST /pipeline/editor", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("HX-Request") != "true" {
+			http.Error(w, "HX-Request header required", http.StatusForbidden)
+			return
+		}
+		p, err := s.pipelineEditorFromRequest(r)
+		data := s.activePipelineResolved()
+		status := http.StatusOK
+		if err != nil {
+			if p.Version != 0 || len(p.Steps) > 0 {
+				data.Pipe = p
+			}
+			data.Error = err.Error()
+		} else if saved, err := s.saveDashboardPipeline(p); err != nil {
+			data.Pipe = p
+			data.Error = err.Error()
+			status = http.StatusInternalServerError
+		} else {
+			data = saved
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(status)
+		if err := s.tmpl.ExecuteTemplate(w, "pipeline_editor.html.tmpl", data); err != nil {
+			return
+		}
 	})
 
 	// POST /action/{flow}/{id} — dispara un subcomando che en background.

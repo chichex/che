@@ -144,6 +144,41 @@
     }
   });
 
+  // Editor visual de pipelines: add/remove rows client-side; el server valida
+  // todo en POST antes de escribir el JSON.
+  document.body.addEventListener("click", function (e) {
+    var t = e.target;
+    if (!(t instanceof Element)) return;
+    var add = t.closest("[data-add-step]");
+    if (add) {
+      e.preventDefault();
+      var modal = add.closest(".pipeline-editor");
+      var rows = modal && modal.querySelector("[data-pipeline-rows]");
+      if (!rows) return;
+      var row = document.createElement("div");
+      row.className = "pipeline-editor-row";
+      row.innerHTML = '<input name="step_name" value="" autocomplete="off" spellcheck="false">' +
+        '<input name="step_agents" value="claude-sonnet" autocomplete="off" spellcheck="false">' +
+        '<select name="step_aggregator">' +
+        '<option value="majority">majority</option>' +
+        '<option value="unanimous">unanimous</option>' +
+        '<option value="first_blocker">first_blocker</option>' +
+        '</select>' +
+        '<input name="step_comment" value="" autocomplete="off" spellcheck="false">' +
+        '<button type="button" class="btn ghost" data-remove-step title="eliminar step">×</button>';
+      rows.appendChild(row);
+      var first = row.querySelector('input[name="step_name"]');
+      if (first) first.focus();
+      return;
+    }
+    var remove = t.closest("[data-remove-step]");
+    if (remove) {
+      e.preventDefault();
+      var r = remove.closest(".pipeline-editor-row");
+      if (r) r.remove();
+    }
+  });
+
   // Countdown al próximo poll en el status-chip. El chip tiene
   // data-poll-interval (segundos) que usamos como baseline.
   //
