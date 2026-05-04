@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/chichex/che/internal/pipeline"
 )
 
 // ================== Matcher puro ==================
@@ -18,12 +20,12 @@ import (
 // alguien cambió la semántica y conviene discutirla antes de mergear.
 func TestNextDispatch_RuleTable(t *testing.T) {
 	tests := []struct {
-		name      string
-		e         Entity
-		rules     map[LoopRule]bool
-		rounds    int
-		wantFlow  string
-		wantRef   int
+		name       string
+		e          Entity
+		rules      map[LoopRule]bool
+		rounds     int
+		wantFlow   string
+		wantRef    int
 		wantSubstr string // substring que debe aparecer en reason
 	}{
 		{
@@ -350,6 +352,27 @@ func TestNextDispatch_RuleTable(t *testing.T) {
 	}
 }
 
+func TestNextPipelineDispatch_UsesStepOrder(t *testing.T) {
+	steps := []string{"triage", "spec", "build", "ship"}
+	flow, ref, reason := nextPipelineDispatch(Entity{
+		Kind:        KindIssue,
+		IssueNumber: 42,
+		StateStep:   "spec",
+		Status:      "spec",
+	}, steps, 0)
+	if flow != "run#:build" {
+		t.Fatalf("flow: got %q want run#:build (reason=%s)", flow, reason)
+	}
+	if ref != 42 {
+		t.Fatalf("ref: got %d want 42", ref)
+	}
+
+	flow, _, reason = nextPipelineDispatch(Entity{Kind: KindIssue, IssueNumber: 42, StateStep: "spec", StateApplying: true}, steps, 0)
+	if flow != "" || reason != "applying" {
+		t.Fatalf("applying: flow=%q reason=%q, want no flow/applying", flow, reason)
+	}
+}
+
 // ================== Tick & concurrency ==================
 
 // newLoopServer arma un Server con fixedSource mutable + fakeRunner. El
@@ -439,6 +462,34 @@ func TestTick_ConcurrencyIssueSide(t *testing.T) {
 	}
 	if got := fr.last().EntityKey; got != 2 {
 		t.Errorf("tick #3 key: got %d want 2 (#1 approved → stop; #2 primero disponible)", got)
+	}
+}
+
+func TestTick_DynamicPipelineDispatchesNextStep(t *testing.T) {
+	s, fr := newLoopServer(t, []Entity{{
+		Kind:        KindIssue,
+		IssueNumber: 42,
+		Status:      "spec",
+		StateStep:   "spec",
+	}})
+	s.pipeline = pipeline.Pipeline{Version: pipeline.CurrentVersion, Steps: []pipeline.Step{
+		{Name: "triage", Agents: []string{"claude-opus"}},
+		{Name: "spec", Agents: []string{"claude-opus"}},
+		{Name: "build", Agents: []string{"claude-opus"}},
+	}}
+	// En el motor dinámico las reglas existentes funcionan como switch del
+	// auto-loop; el step concreto sale del pipeline activo, no del enum legacy.
+	s.loop.rules[RuleValidatePlan] = true
+
+	if n := s.runTick(); n != 1 {
+		t.Fatalf("tick dispatches: got %d want 1", n)
+	}
+	call := fr.last()
+	if call.Flow != "run#:build" {
+		t.Fatalf("flow: got %q want run#:build", call.Flow)
+	}
+	if call.TargetRef != 42 || call.EntityKey != 42 {
+		t.Fatalf("refs: target=%d key=%d, want 42/42", call.TargetRef, call.EntityKey)
 	}
 }
 

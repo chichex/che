@@ -31,11 +31,14 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/chichex/che/internal/pipeline"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 	"github.com/yuin/goldmark/parser"
@@ -100,6 +103,19 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	srv := NewServer(source, repoName, opts.Poll)
 	srv.repoPath = opts.Repo
 	srv.version = opts.Version
+	root, err := dashPipelineRoot(opts.Repo)
+	if err != nil {
+		return err
+	}
+	mgr, err := pipeline.NewManager(root)
+	if err != nil {
+		return fmt.Errorf("init pipeline manager: %w", err)
+	}
+	resolved, err := mgr.Resolve("")
+	if err != nil {
+		return fmt.Errorf("resolve dashboard pipeline: %w", err)
+	}
+	srv.pipeline = resolved.Pipeline
 
 	ln, err := listenWithFallback(opts.Port, !opts.PortExplicit)
 	if err != nil {
@@ -162,6 +178,13 @@ func Run(ctx context.Context, opts Options, stdout, stderr io.Writer) error {
 	}
 }
 
+func dashPipelineRoot(repo string) (string, error) {
+	if repo == "" {
+		return os.Getwd()
+	}
+	return filepath.Abs(repo)
+}
+
 // Server es el handler HTTP del dashboard. Mantiene una referencia a la
 // Source para poder leer snapshots actualizados en cada request, y los
 // datos estáticos del page (repo, poll interval).
@@ -209,6 +232,11 @@ type Server struct {
 	// Separado del lock `mu` porque el dominio es distinto y el RWMutex
 	// interno del LogStore admite múltiples readers (Snapshot) en paralelo.
 	logs *LogStore
+
+	// pipeline es el pipeline activo del repo para gates/auto-loop dinámicos.
+	// NewServer usa pipeline.Default() para tests y mock mode; Run lo reemplaza
+	// por el default resuelto desde `.che/pipelines.config.json` cuando existe.
+	pipeline pipeline.Pipeline
 }
 
 // allowedFlows es la allowlist de flows disparables desde el dashboard. Se
@@ -261,6 +289,7 @@ func NewServer(source Source, repoName string, pollInterval int) *Server {
 		autoRunning:  map[int]bool{},
 		loop:         newLoopState(),
 		logs:         NewLogStore(),
+		pipeline:     pipeline.Default(),
 	}
 	s.runAction = s.spawnChe
 	tmpl := template.New("dash").Funcs(s.templateFuncs())
@@ -494,8 +523,8 @@ func (s *Server) templateFuncs() template.FuncMap {
 		// Step 6 — auto-loop pill label helpers. Se exponen acá para
 		// que el partial "auto-loop-toggle" los use tanto en render
 		// inicial como en OOB swap. Ambos reciben loopPopoverData.
-		"pillLabel":            pillLabel,
-		"pillLabelHasSpinner":  pillLabelHasSpinner,
+		"pillLabel":           pillLabel,
+		"pillLabelHasSpinner": pillLabelHasSpinner,
 		// Preflight gates (PR de gates UI, abril 2026): resolución del
 		// estado de un botón hx-post a partir de RunningFlow + Gates.
 		// flowBtnState centraliza la prioridad: RunningFlow gana sobre
@@ -879,11 +908,24 @@ func (s *Server) spawnChe(flow string, targetRef, entityKey int, repo string) er
 			return fmt.Errorf("no se pudo resolver el binario che: %w", err)
 		}
 	}
-	cmd := exec.Command(bin, flow, strconv.Itoa(targetRef))
+	var cmd *exec.Cmd
+	if step, prRef, ok := runStepFromFlow(flow); ok {
+		ref := "#" + strconv.Itoa(targetRef)
+		if prRef {
+			ref = "!" + strconv.Itoa(targetRef)
+		}
+		cmd = exec.Command(bin, "run", "--auto", "--from", step, "--input", ref)
+	} else {
+		cmd = exec.Command(bin, flow, strconv.Itoa(targetRef))
+	}
 	if repo != "" {
 		cmd.Dir = repo
 	}
-	return s.runCmdWithLogs(cmd, entityKey, fmt.Sprintf("che %s %d (en %s)", flow, targetRef, repo))
+	banner := fmt.Sprintf("che %s %d (en %s)", flow, targetRef, repo)
+	if strings.HasPrefix(flow, "run") {
+		banner = fmt.Sprintf("che %s (en %s)", strings.Join(cmd.Args[1:], " "), repo)
+	}
+	return s.runCmdWithLogs(cmd, entityKey, banner)
 }
 
 // runCmdWithLogs setea pipes en cmd, arranca el proceso, tee-ea stdout/

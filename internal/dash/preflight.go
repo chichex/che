@@ -29,6 +29,7 @@ package dash
 import (
 	"fmt"
 
+	"github.com/chichex/che/internal/pipeline"
 	planpkg "github.com/chichex/che/internal/plan"
 )
 
@@ -94,6 +95,36 @@ func computeGates(e Entity) FlowGates {
 		flowExecute:  gateExecute(e),
 		flowClose:    gateClose(e),
 	}
+}
+
+func gatePipelineStep(e Entity, p pipeline.Pipeline, step string) FlowGate {
+	if e.Locked {
+		return FlowGate{false, lockedReason(e)}
+	}
+	if e.StateApplying {
+		return FlowGate{false, fmt.Sprintf("step %s en curso — esperá que termine", e.StateStep)}
+	}
+	if step == "" {
+		return FlowGate{false, "step vacío"}
+	}
+	current := e.StateStep
+	if current == "" {
+		current = e.Status
+	}
+	for i, s := range p.Steps {
+		if s.Name != current {
+			continue
+		}
+		if i+1 >= len(p.Steps) {
+			return FlowGate{false, fmt.Sprintf("%s es el último step del pipeline", current)}
+		}
+		next := p.Steps[i+1].Name
+		if next != step {
+			return FlowGate{false, fmt.Sprintf("el próximo step desde %s es %s", current, next)}
+		}
+		return FlowGate{true, ""}
+	}
+	return FlowGate{false, fmt.Sprintf("step actual %s no existe en el pipeline activo", emptyAsIdea(current))}
 }
 
 // adoptGates devuelve el set fijo por kind para entities en columna "adopt".

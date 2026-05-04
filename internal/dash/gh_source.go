@@ -718,6 +718,10 @@ func applyLabels(e *Entity, ls []ghLabel) {
 			// Mapeamos via v2StatusByLabel; si el label no está en el
 			// mapa (por ej. step nuevo no registrado), preservamos
 			// best-effort el sufijo TrimPrefix.
+			if parsed, err := pipelinelabels.Parse(name); err == nil {
+				e.StateStep = parsed.Step
+				e.StateApplying = parsed.Kind == pipelinelabels.KindApplying
+			}
 			if s, ok := v2StatusByLabel[name]; ok {
 				e.Status = s
 			} else if strings.HasPrefix(name, pipelinelabels.PrefixApplying) {

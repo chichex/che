@@ -56,10 +56,12 @@ type Entity struct {
 	// "idea", "planning", "plan", "executing", "executed", "validating",
 	// "validated", "closing", "closed". Vacío o desconocido cae a "idea"
 	// (default defensivo en Column()).
-	Status      string
-	PlanVerdict string // "approve" | "changes-requested" | "needs-human" — vacío = no validado
-	PRVerdict   string // idem, solo aplica si KindFused
-	Locked      bool   // che:locked
+	Status        string
+	StateStep     string // step real de che:state:<step> / che:state:applying:<step>
+	StateApplying bool   // true si el label activo es che:state:applying:<step>
+	PlanVerdict   string // "approve" | "changes-requested" | "needs-human" — vacío = no validado
+	PRVerdict     string // idem, solo aplica si KindFused
+	Locked        bool   // che:locked
 
 	RunningFlow string // "explore" | "execute" | "iterate" | "validate" | "close" — vacío = idle
 	RunIter     int    // iteración actual (1-based)
