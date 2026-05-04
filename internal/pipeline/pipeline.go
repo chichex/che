@@ -122,3 +122,17 @@ func (a Aggregator) IsValid() bool {
 	}
 	return false
 }
+
+// Description devuelve la descripción corta canónica para UI/prompts.
+func (a Aggregator) Description() string {
+	switch a {
+	case AggregatorMajority:
+		return "gana el marker más votado; empates paran"
+	case AggregatorUnanimous:
+		return "todos deben coincidir; divergencias paran"
+	case AggregatorFirstBlocker:
+		return "cualquier stop bloquea; goto único avanza"
+	default:
+		return ""
+	}
+}

@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -66,8 +65,11 @@ func init() {
 // parsea las reglas --replace, aplica sustituciones, valida el resultado
 // y lo escribe en .che/pipelines/<dst>.json.
 func runPipelineClone(out io.Writer, mgr *pipeline.Manager, src, dst string, rawReplace []string, force bool) error {
-	if src == "" || dst == "" {
-		return fmt.Errorf("src y dst son obligatorios")
+	if err := pipeline.ValidateName(src); err != nil {
+		return fmt.Errorf("src inválido: %w", err)
+	}
+	if err := pipeline.ValidateName(dst); err != nil {
+		return fmt.Errorf("dst inválido: %w", err)
 	}
 	if src == dst {
 		return fmt.Errorf("src y dst no pueden ser iguales (%q)", src)
@@ -94,7 +96,7 @@ func runPipelineClone(out io.Writer, mgr *pipeline.Manager, src, dst string, raw
 			return fmt.Errorf("%s ya existe — pasá --force para sobrescribir", dest)
 		}
 	}
-	if err := writeClonedPipeline(dest, cloned); err != nil {
+	if err := savePipelineFile(dest, cloned); err != nil {
 		return fmt.Errorf("escribir %s: %w", dest, err)
 	}
 	fmt.Fprintf(out, "creado %s (clonado de %q)\n", dest, src)
@@ -163,16 +165,4 @@ func replaceAll(agents []string, rules map[string]string) []string {
 		out[i] = a
 	}
 	return out
-}
-
-func writeClonedPipeline(path string, p pipeline.Pipeline) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(p, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
 }

@@ -88,42 +88,56 @@ func runPipelineSimulate(out io.Writer, mgr *pipeline.Manager, lookup func(strin
 	if src == "" {
 		src = "<built-in>"
 	}
-	fmt.Fprintf(out, "pipeline: %s\n", r.Name)
-	fmt.Fprintf(out, "source:   %s (%s)\n", r.Source, src)
+	return renderPipelinePreview(out, pipelinePreviewHeader{
+		Name:   r.Name,
+		Source: fmt.Sprintf("%s (%s)", r.Source, src),
+	}, r.Pipeline, lookup)
+}
+
+type pipelinePreviewHeader struct {
+	Name         string
+	Source       string
+	ShowComments bool
+}
+
+func renderPipelinePreview(out io.Writer, header pipelinePreviewHeader, p pipeline.Pipeline, lookup func(string) (agentInfo, bool)) error {
+	fmt.Fprintf(out, "pipeline: %s\n", header.Name)
+	fmt.Fprintf(out, "source:   %s\n", header.Source)
 	fmt.Fprintln(out, "")
 
-	if r.Pipeline.Entry != nil {
+	if p.Entry != nil {
 		fmt.Fprintln(out, "entry:")
-		if err := writeAgentsTable(out, r.Pipeline.Entry.Agents, lookup); err != nil {
+		if err := writeAgentsTable(out, p.Entry.Agents, lookup); err != nil {
 			return err
 		}
-		agg := string(r.Pipeline.Entry.Aggregator)
-		if agg == "" {
-			agg = "majority (default)"
-		}
-		fmt.Fprintf(out, "  aggregator: %s\n", agg)
+		fmt.Fprintf(out, "  aggregator: %s\n", previewAggregator(p.Entry.Aggregator, len(p.Entry.Agents)))
 		fmt.Fprintln(out, "")
 	}
 
-	for i, step := range r.Pipeline.Steps {
+	for i, step := range p.Steps {
 		fmt.Fprintf(out, "step[%d]: %s\n", i, step.Name)
 		if err := writeAgentsTable(out, step.Agents, lookup); err != nil {
 			return err
 		}
-		agg := string(step.Aggregator)
-		if agg == "" {
-			if len(step.Agents) > 1 {
-				agg = "majority (default)"
-			} else {
-				agg = "- (1 agente)"
-			}
+		fmt.Fprintf(out, "  aggregator: %s\n", previewAggregator(step.Aggregator, len(step.Agents)))
+		if header.ShowComments && step.Comment != "" {
+			fmt.Fprintf(out, "  comment: %s\n", step.Comment)
 		}
-		fmt.Fprintf(out, "  aggregator: %s\n", agg)
 		fmt.Fprintln(out, "")
 	}
 
 	fmt.Fprintln(out, "(dry-run: no se invocó ningún agente)")
 	return nil
+}
+
+func previewAggregator(agg pipeline.Aggregator, agents int) string {
+	if agg != "" {
+		return string(agg)
+	}
+	if agents > 1 {
+		return "majority (default)"
+	}
+	return "- (1 agente)"
 }
 
 // writeAgentsTable imprime una tabla indentada con los agentes del step

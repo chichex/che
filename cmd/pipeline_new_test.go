@@ -80,3 +80,15 @@ func TestPipelineNew_ForceOverwrites(t *testing.T) {
 		t.Errorf("contenido tras --force no es Default()")
 	}
 }
+
+func TestPipelineNew_RejectsTraversalName(t *testing.T) {
+	mgr, root := pipelineFixture(t, nil, "")
+	var out bytes.Buffer
+	err := runPipelineNew(&out, mgr, "../evil", false)
+	if err == nil {
+		t.Fatalf("esperaba error, got nil")
+	}
+	if _, statErr := os.Stat(filepath.Join(root, ".che", "evil.json")); statErr == nil {
+		t.Fatalf("new escribió fuera de .che/pipelines")
+	}
+}

@@ -15,6 +15,43 @@ func TestValidate_Default(t *testing.T) {
 	}
 }
 
+func TestValidateName(t *testing.T) {
+	cases := []struct {
+		name string
+		ok   bool
+	}{
+		{"fast", true},
+		{"My.Pipeline", true},
+		{"with-dash_123", true},
+		{"", false},
+		{".", false},
+		{"..", false},
+		{"../evil", false},
+		{`..\evil`, false},
+		{"evil/name", false},
+		{`evil\name`, false},
+		{"bad:name", false},
+		{"bad*name", false},
+		{"CON", false},
+		{"con.txt", false},
+		{"LPT1", false},
+		{"trailing.", false},
+		{" leading", false},
+		{"null\x00byte", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateName(tc.name)
+			if tc.ok && err != nil {
+				t.Errorf("ValidateName(%q) = %v, want nil", tc.name, err)
+			}
+			if !tc.ok && err == nil {
+				t.Errorf("ValidateName(%q) = nil, want error", tc.name)
+			}
+		})
+	}
+}
+
 // TestValidate_StepNameRules cubre la matriz de nombres permitidos:
 // el regex tiene que matchear lo mismo que el parser de markers
 // (`[goto: <name>]`). Si esto desincroniza, el wizard podría aceptar
@@ -28,10 +65,10 @@ func TestValidate_StepNameRules(t *testing.T) {
 		{"with_underscore", true},
 		{"_leading_underscore", true},
 		{"with123numbers", true},
-		{"", false},                  // vacío
-		{"With-Dash", false},         // dash no permitido
-		{"WithUpper", false},         // mayúsculas no
-		{"123leading_digit", false},  // empieza con dígito
+		{"", false},                 // vacío
+		{"With-Dash", false},        // dash no permitido
+		{"WithUpper", false},        // mayúsculas no
+		{"123leading_digit", false}, // empieza con dígito
 		{"with space", false},
 		{"with.dot", false},
 	}

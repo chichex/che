@@ -148,6 +148,9 @@ func TestAggregator_Validity(t *testing.T) {
 		if !a.IsValid() {
 			t.Errorf("%q should be valid", a)
 		}
+		if a.Description() == "" {
+			t.Errorf("%q should have UI description", a)
+		}
 	}
 	if Aggregator("").IsValid() {
 		t.Errorf("empty aggregator should NOT be valid")
