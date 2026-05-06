@@ -27,9 +27,10 @@ Para probar features en desarrollo antes del release estable:
 
 ```sh
 brew install --cask chichex/tap/che-beta
+che-beta
 ```
 
-> Si tenés instalado el cask estable (`che`), el instalador lo reemplaza automáticamente con un aviso. Para volver al estable: `brew install --cask chichex/tap/che`.
+El cask beta instala el comando `che-beta`, así puede convivir con el estable (`che`).
 
 Las versiones beta se publican con tags `vX.Y.Z-rc.N`. No se garantiza estabilidad de API ni backward compatibility.
 
