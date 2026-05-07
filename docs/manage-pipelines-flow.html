@@ -1,0 +1,1510 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>che — gestión de pipelines · flow diagram</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --bg-alt: #f4f4f2;
+    --surface: #ffffff;
+    --ink: #18181b;
+    --ink-soft: #52525b;
+    --ink-mute: #71717a;
+    --line: #e4e4e7;
+    --line-strong: #d4d4d8;
+    --accent: #4338ca;
+    --accent-soft: #eef2ff;
+    --ok: #15803d;
+    --ok-soft: #ecfdf5;
+    --warn: #b45309;
+    --warn-soft: #fef3c7;
+    --fail: #b91c1c;
+    --fail-soft: #fef2f2;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 80px 32px 120px; }
+  section + section { margin-top: 64px; }
+  h1 { font-size: 40px; line-height: 1.15; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 16px; }
+  h2 { font-size: 24px; line-height: 1.25; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 16px; }
+  h3 { font-size: 17px; font-weight: 600; margin: 28px 0 8px; letter-spacing: -0.005em; }
+  p { margin: 0 0 14px; color: var(--ink-soft); }
+  p strong, li strong { color: var(--ink); font-weight: 600; }
+  .eyebrow { font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--accent); font-weight: 600; margin-bottom: 16px; }
+  .lede { font-size: 18px; color: var(--ink-soft); max-width: 760px; }
+  .rule { height: 1px; background: var(--line); margin: 0; border: 0; }
+  ul, ol { margin: 0 0 14px; padding-left: 22px; color: var(--ink-soft); }
+  ul li, ol li { margin-bottom: 6px; }
+  code { font-family: var(--mono); font-size: 13px; background: var(--bg-alt); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; color: var(--ink); }
+
+  table { width: 100%; border-collapse: collapse; margin: 12px 0 18px; font-size: 14.5px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--ink); }
+  th { font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-mute); background: var(--bg-alt); }
+  td code { font-size: 12.5px; }
+
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; }
+  .card.accent { background: var(--accent-soft); border-color: #c7d2fe; color: var(--ink); }
+  .card.warn { background: var(--warn-soft); border-color: #fde68a; }
+  .card.fail { background: var(--fail-soft); border-color: #fecaca; }
+
+  .diagram-wrap {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 30px 24px;
+    overflow-x: auto;
+  }
+  .diagram-wrap svg { display: block; margin: 0 auto; }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    margin-top: 16px;
+    font-size: 13px;
+    color: var(--ink-mute);
+    font-family: var(--mono);
+  }
+  .legend .swatch {
+    display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: middle; margin-right: 6px; border: 1px solid var(--line-strong);
+  }
+
+  .state-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin-bottom: 16px;
+  }
+  .state-card .state-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+  }
+  .state-card .state-id {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid #c7d2fe;
+    border-radius: 4px;
+    padding: 2px 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .state-card h3 { margin: 0; font-size: 18px; font-weight: 600; color: var(--ink); }
+  .state-card .state-sub { font-size: 13px; color: var(--ink-mute); margin-left: auto; font-family: var(--mono); }
+  .state-card .grid { display: grid; grid-template-columns: 160px 1fr; gap: 10px 16px; margin-top: 8px; font-size: 14.5px; }
+  .state-card .grid dt { color: var(--ink-mute); font-family: var(--mono); font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .state-card .grid dd { margin: 0; color: var(--ink); }
+  .state-card .grid dd code { background: var(--bg-alt); }
+  .state-card ul.tight { margin: 4px 0 0; padding-left: 20px; }
+  .state-card ul.tight li { margin-bottom: 4px; }
+
+  .branch {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 12px 16px;
+    margin: 12px 0;
+    border-radius: 0 6px 6px 0;
+    font-size: 14px;
+    color: var(--ink);
+  }
+  .branch .lbl {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-right: 8px;
+  }
+
+  .chip {
+    display: inline-block; background: var(--bg-alt); border: 1px solid var(--line);
+    border-radius: 4px; padding: 1px 8px; font-family: var(--mono); font-size: 12px;
+    margin: 0 2px; color: var(--ink);
+  }
+  .chip.accent { background: var(--accent-soft); color: var(--accent); border-color: #c7d2fe; }
+  .chip.warn { background: var(--warn-soft); color: var(--warn); border-color: #fde68a; }
+  .chip.ok { background: var(--ok-soft); color: var(--ok); border-color: #bbf7d0; }
+  .chip.fail { background: var(--fail-soft); color: var(--fail); border-color: #fecaca; }
+  .chip.muted { background: var(--bg-alt); color: var(--ink-mute); border-color: var(--line); }
+
+  pre.code {
+    background: #1e1e2e; color: #cdd6f4; padding: 20px 22px; border-radius: 10px;
+    overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
+    margin: 14px 0;
+  }
+  pre.code .k { color: #cba6f7; }
+  pre.code .s { color: #a6e3a1; }
+  pre.code .c { color: #6c7086; font-style: italic; }
+  pre.code .t { color: #f9e2af; }
+  pre.code .n { color: #fab387; }
+
+  footer { margin-top: 100px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--ink-mute); font-size: 13px; font-family: var(--mono); }
+
+  .story {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 22px 24px;
+    margin-bottom: 18px;
+  }
+  .story .story-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .story .story-id {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid #c7d2fe;
+    border-radius: 4px;
+    padding: 3px 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+  }
+  .story h3 { margin: 0; font-size: 18px; font-weight: 600; color: var(--ink); }
+  .story .deps {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-mute);
+  }
+  .story .deps .chip { font-size: 11px; }
+  .story .as-a {
+    background: var(--bg-alt);
+    border-left: 3px solid var(--accent);
+    padding: 12px 16px;
+    border-radius: 0 6px 6px 0;
+    font-size: 14.5px;
+    color: var(--ink);
+    margin: 4px 0 16px;
+    line-height: 1.7;
+  }
+  .story .as-a strong { color: var(--accent); font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; margin-right: 6px; }
+  .story h4 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-mute);
+    font-family: var(--mono);
+    font-weight: 600;
+    margin: 18px 0 6px;
+  }
+  .story ul, .story ol { margin: 0 0 0 0; padding-left: 22px; }
+  .story ul li, .story ol li { margin-bottom: 4px; font-size: 14.5px; }
+  .story .oos { color: var(--ink-mute); font-size: 13.5px; font-style: italic; }
+
+</style>
+</head>
+<body>
+<main>
+
+  <section>
+    <div class="eyebrow">che / gestión de pipelines · flow</div>
+    <h1>Flujo de gestión de pipelines</h1>
+    <p class="lede">
+      Diagrama de estados, transiciones, bifurcaciones y validaciones de todo
+      lo que es <strong>gestión de pipelines</strong>: crear, persistir
+      incremental, listar, reanudar drafts, editar pipelines ready, borrar.
+      <strong>No cubre la ejecución</strong> (subprocess, stream-json,
+      validators en loop, capture de output) — eso vive en su propio doc cuando
+      llegue su turno.
+    </p>
+    <p>
+      Compañero de <code>design.html</code> (que cubre los mockups del wizard)
+      — éste cubre la <strong>navegación</strong>: cómo se entra, cómo se sale,
+      qué pasa en cada bifurcación, qué se persiste en cada paso.
+    </p>
+    <p>
+      Puntos de entrada del menu principal:
+      <code>1. My pipelines</code> (listar + accionar) ·
+      <code>2. Create pipeline</code> (wizard de creación nueva).
+      La etiqueta original <code>See pipelines</code> se reemplaza por
+      <code>Create pipeline</code>; el placeholder de ítem 1 (<code>My pipelines</code>)
+      se reemplaza por <code>My pipelines</code>.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== MAPA GENERAL ========== -->
+  <section>
+    <div class="eyebrow">mapa</div>
+    <h2>State diagram</h2>
+    <p>
+      Flujo lineal con dos loops: "+ agregar step" sobre <code>StepEditor</code>
+      y "editar step" desde <code>Summary</code>. Cancel y "atrás" no se
+      dibujan — viven en las state-cards y en <code>SC</code>. Para reanudar
+      un pipeline incompleto, el usuario entra por <code>My pipelines</code>
+      (ítem 1 del menu) — ver sección dedicada.
+    </p>
+
+    <div class="diagram-wrap">
+      <svg width="1020" height="280" viewBox="0 0 1020 280" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#52525b"/>
+          </marker>
+          <marker id="arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#4338ca"/>
+          </marker>
+          <marker id="arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#15803d"/>
+          </marker>
+        </defs>
+
+        <!-- ===== Main lane (boxes en y=80, h=60) ===== -->
+
+        <!-- Menu -->
+        <rect x="20" y="80" width="130" height="60" rx="8" fill="#f4f4f2" stroke="#d4d4d8"/>
+        <text x="85" y="108" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#18181b" font-weight="600">Menu</text>
+        <text x="85" y="126" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#71717a">tui.go</text>
+
+        <!-- S1 Info -->
+        <rect x="220" y="80" width="140" height="60" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+        <text x="290" y="104" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#4338ca" font-weight="600">PipelineInfo</text>
+        <text x="290" y="122" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">S1 · screen 1/3</text>
+
+        <!-- S2 StepEditor -->
+        <rect x="420" y="80" width="140" height="60" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+        <text x="490" y="104" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#4338ca" font-weight="600">StepEditor</text>
+        <text x="490" y="122" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">S2 · screen 2/3</text>
+
+        <!-- S3 Summary -->
+        <rect x="620" y="80" width="140" height="60" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+        <text x="690" y="104" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#4338ca" font-weight="600">Summary</text>
+        <text x="690" y="122" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">S3 · screen 3/3</text>
+
+        <!-- S4 Saved -->
+        <rect x="820" y="80" width="140" height="60" rx="8" fill="#ecfdf5" stroke="#bbf7d0"/>
+        <text x="890" y="104" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#15803d" font-weight="600">Saved</text>
+        <text x="890" y="122" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#15803d">S4 · YAML completo</text>
+
+        <!-- ===== Main flow arrows (y=110) — labels arriba (y=66) ===== -->
+        <line x1="150" y1="110" x2="216" y2="110" stroke="#4338ca" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+        <text x="183" y="66" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">"Create pipeline"</text>
+
+        <line x1="360" y1="110" x2="416" y2="110" stroke="#4338ca" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+        <text x="388" y="66" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">siguiente</text>
+
+        <line x1="560" y1="110" x2="616" y2="110" stroke="#4338ca" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+        <text x="588" y="66" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">guardar y ver resumen</text>
+
+        <line x1="760" y1="110" x2="816" y2="110" stroke="#15803d" stroke-width="1.6" marker-end="url(#arrow-ok)"/>
+        <text x="788" y="66" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#15803d">guardar pipeline</text>
+
+        <!-- ===== Loop "+ agregar step" — arc arriba de S2 ===== -->
+        <path d="M 450 80 C 450 38, 530 38, 530 80" fill="none" stroke="#52525b" stroke-width="1.4" marker-end="url(#arrow)"/>
+        <text x="490" y="32" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#52525b">+ agregar step</text>
+
+        <!-- ===== Edit "editar step" — arc abajo de S3 → S2 ===== -->
+        <path d="M 660 140 L 660 178 L 460 178 L 460 140" fill="none" stroke="#52525b" stroke-width="1.4" marker-end="url(#arrow)"/>
+        <text x="560" y="196" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#52525b">editar step (S3 → S2 mode=edit)</text>
+
+        <!-- ===== Return S4 → Menu — abajo de todo ===== -->
+        <path d="M 890 140 L 890 232 L 85 232 L 85 140" fill="none" stroke="#15803d" stroke-width="1.4" marker-end="url(#arrow-ok)"/>
+        <text x="487" y="248" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#15803d">enter / esc → vuelve al menu</text>
+
+        <!-- ===== Notas al pie ===== -->
+        <text x="20" y="270" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#71717a">↩ "atrás" entre estados (no dibujado): vuelve al estado previo conservando el modelo. ⊗ Cancel (SC) desde S1/S2/S3 con esc/ctrl+c → modal keep / discard / back.</text>
+      </svg>
+    </div>
+
+    <div class="legend">
+      <span><span class="swatch" style="background:#eef2ff;border-color:#c7d2fe;"></span>screen del wizard</span>
+      <span><span class="swatch" style="background:#f4f4f2;"></span>fuera del wizard</span>
+      <span><span class="swatch" style="background:#ecfdf5;border-color:#bbf7d0;"></span>terminal exitoso</span>
+      <span><span style="display:inline-block;width:24px;height:0;border-top:2px solid #4338ca;vertical-align:middle;margin-right:6px;"></span>flujo principal</span>
+      <span><span style="display:inline-block;width:24px;height:0;border-top:1.4px solid #52525b;vertical-align:middle;margin-right:6px;"></span>loops &amp; jumps</span>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== PERSISTENCIA INCREMENTAL ========== -->
+  <section>
+    <div class="eyebrow">autosave</div>
+    <h2>Persistencia incremental</h2>
+    <p>
+      El wizard persiste el pipeline a disco a medida que el usuario lo llena,
+      así una salida abrupta (terminal cerrado, ssh disconnect, <kbd>ctrl+c</kbd>
+      sin confirm, crash, kernel panic) no pierde progreso. El archivo es
+      <strong>el mismo YAML que un pipeline final</strong>, con la única
+      diferencia de un bloque <code>status</code> opcional que indica dónde
+      quedó el wizard. Cuando el pipeline está completo, el bloque
+      <code>status</code> se omite y el archivo queda 100% limpio.
+    </p>
+
+    <div class="card accent">
+      <strong>Un solo schema, un solo directorio.</strong> Mismo struct
+      <code>Pipeline</code>, mismo path. La diferencia entre draft y final
+      es la presencia (o ausencia) del bloque <code>status</code>.
+    </div>
+
+    <h3>Cuándo se guarda</h3>
+    <ul>
+      <li><strong>Sincrónico — en cada transición de estado.</strong> S1→S2, S2→S2 al "+ agregar step", S2→S3, S3→S2 al editar, S2→S3 al guardar el step editado, S3 al borrar/reordenar step. Bloquea el render hasta confirmar el write.</li>
+      <li><strong>Asincrónico — debounced 800ms en cada field change</strong> dentro de S1 y S2 (texto, toggle de validator, selección de skill, etc.). No bloquea input.</li>
+      <li><strong>Nunca</strong> en cada keystroke crudo — eso lo cubre el debounce.</li>
+    </ul>
+
+    <h3>Dónde vive el archivo y desde cuándo</h3>
+    <ul>
+      <li><code>~/.che/pipelines/&lt;slug&gt;.yaml</code> · el mismo lugar y formato que un pipeline final.</li>
+      <li>Mientras el usuario <strong>no completó <code>name</code> en S1</strong>, el archivo no existe todavía — el wizard mantiene el modelo en RAM. La pérdida posible es lo tipeado en S1 (típicamente &lt; 30s).</li>
+      <li>Apenas <code>name</code> tiene un valor derivable a slug, se crea el archivo en el path final. De ahí en adelante, todos los cambios persisten.</li>
+      <li>Permisos <code>0700</code> en el dir, <code>0600</code> en los archivos. Write atómico: escribir a <code>&lt;path&gt;.tmp</code> + <code>os.Rename</code>.</li>
+    </ul>
+
+    <h3>Cómo se determina draft vs ready — bloque <code>status</code></h3>
+    <p>
+      Mientras el wizard tiene el pipeline abierto y todavía no se "Guardó
+      pipeline" en S3, el archivo lleva un bloque <code>status</code> con la
+      ubicación exacta dentro del wizard. Apenas el usuario confirma "guardar
+      pipeline" (S3 → S4) y el pipeline pasa <code>IsValid()</code>, el bloque
+      <code>status</code> se elimina del archivo. Esto significa:
+    </p>
+    <ul>
+      <li><strong>Si el archivo tiene <code>status</code></strong> → es un draft. <code>My pipelines</code> lo lista con chip <span class="chip warn">draft</span>. Al seleccionarlo, el wizard arranca en <code>status.stage</code>.</li>
+      <li><strong>Si el archivo no tiene <code>status</code></strong> → es ready. Chip <span class="chip ok">ready</span>. Al seleccionarlo, ejecuta.</li>
+    </ul>
+    <p>
+      No hay validación implícita por contenido para clasificar. El bloque
+      <code>status</code> es la única señal — explícito y fiable, sin
+      ambigüedad si una skill se borró o un CLI se desinstaló (esos casos
+      siguen siendo <em>ready pero ejecutable solo si las deps están</em>).
+    </p>
+
+    <h3>Schema del bloque <code>status</code></h3>
+<pre class="code"><span class="k">status</span>:
+  <span class="k">stage</span>: <span class="s">step</span>          <span class="c"># info | step | summary</span>
+  <span class="k">step_idx</span>: <span class="n">1</span>           <span class="c"># solo si stage=step</span>
+  <span class="k">step_mode</span>: <span class="s">create</span>    <span class="c"># solo si stage=step — create | edit</span>
+  <span class="k">last_saved_at</span>: <span class="s">2026-05-07T14:32:11-03:00</span>
+
+<span class="k">name</span>: <span class="s">triage-checkout-flow</span>
+<span class="k">description</span>: <span class="s">Toma una métrica anómala...</span>
+<span class="k">steps</span>:
+  - <span class="k">name</span>: <span class="s">collect-signals</span>          <span class="c"># step completo</span>
+    <span class="k">cli</span>: <span class="n">claude</span>
+    <span class="k">kind</span>: <span class="n">skill</span>
+    <span class="k">content</span>: <span class="s">collect-signals</span>
+    <span class="k">input</span>: <span class="n">text</span>
+  - <span class="k">name</span>: <span class="s"></span>                           <span class="c"># step en construcción, faltan campos</span>
+    <span class="k">cli</span>: <span class="n">claude</span>
+    <span class="k">kind</span>: <span class="n">skill</span>
+    <span class="k">content</span>: <span class="s"></span>
+    <span class="k">input</span>: <span class="s"></span></pre>
+
+    <p>
+      <strong>Pipeline final (sin <code>status</code>):</strong>
+    </p>
+<pre class="code"><span class="k">name</span>: <span class="s">triage-checkout-flow</span>
+<span class="k">description</span>: <span class="s">...</span>
+<span class="k">steps</span>:
+  - <span class="k">name</span>: <span class="s">collect-signals</span>
+    ...</pre>
+
+    <h3>Lifecycle del archivo</h3>
+    <table>
+      <thead><tr><th>Evento</th><th>Acción</th></tr></thead>
+      <tbody>
+        <tr><td>Entrar al wizard desde "Create pipeline"</td><td>Modelo vacío en RAM. No se escribe nada todavía.</td></tr>
+        <tr><td>Setear <code>name</code> en S1 (primera vez)</td><td>Crear <code>~/.che/pipelines/&lt;slug&gt;.yaml</code> con <code>status</code> + <code>name</code>. Si el slug colisiona → modal sobreescribir/cancelar (Q3).</td></tr>
+        <tr><td>Cambiar de screen</td><td>Save sincrónico antes del render. Actualiza <code>status.stage</code> + <code>last_saved_at</code>.</td></tr>
+        <tr><td>Cambiar un campo dentro de la screen</td><td>Save asincrónico (debounce 800ms). Actualiza <code>last_saved_at</code>.</td></tr>
+        <tr><td>"guardar pipeline" en S3 → S4</td><td>Validar <code>IsValid()</code>. Si pasa → escribir el archivo final <strong>sin bloque <code>status</code></strong>. Si falla → mostrar errores y quedarse en S3.</td></tr>
+        <tr><td>Cancelar con "discard"</td><td><code>os.Remove</code> del archivo (si ya existía).</td></tr>
+        <tr><td>Cancelar con "keep"</td><td>Mantener el archivo con <code>status</code>; aparece en <code>My pipelines</code> marcado como draft.</td></tr>
+        <tr><td>Salida abrupta (no pasa por SC)</td><td>El archivo queda con la última versión que persistió autosave (con <code>status</code> apuntando donde quedó).</td></tr>
+        <tr><td>Editar un pipeline ready desde My pipelines (Q16)</td><td>Re-introducir <code>status</code> al cargar (stage = summary, no step_idx). Al guardar de nuevo en S3 lo vuelve a remover.</td></tr>
+      </tbody>
+    </table>
+
+    <p>
+      <strong>Concurrencia</strong> (dos wizards abiertos al mismo pipeline):
+      out of scope v1. Last-write-wins de facto, sin lock, sin warning. Documentado.
+    </p>
+
+    <h3>Pérdida máxima posible</h3>
+    <p>
+      Con esta estrategia, en el peor caso (kill abrupto entre dos debounces
+      con cambios in-flight), el usuario pierde <strong>≤ 800ms de tipeo
+      dentro de un campo</strong>. Toda transición de estado y todo cambio
+      &gt; 800ms tras el último cambio están persistidos. Si el crash sucede
+      antes de que haya nombre (S1 sin completar), se pierde todo lo tipeado
+      en S1 — pero eso es típicamente &lt; 30s de progreso.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== RESUME VIA RUN PIPELINES ========== -->
+  <section>
+    <div class="eyebrow">resume</div>
+    <h2>Reanudar un pipeline incompleto — vía My pipelines</h2>
+    <p>
+      <code>My pipelines</code> (ítem 1 del menu) lista todos los archivos en
+      <code>~/.che/pipelines/</code>, distinguiendo visualmente cuáles están
+      completos y cuáles incompletos. La acción al seleccionar depende del
+      estado:
+    </p>
+
+    <table>
+      <thead><tr><th>Estado</th><th>Marca visual</th><th>Acción al seleccionar</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Completo</strong></td>
+          <td><span class="chip ok">ready</span> · sin marca extra</td>
+          <td>Pide el input del step 1 → ejecuta el pipeline.</td>
+        </tr>
+        <tr>
+          <td><strong>Incompleto</strong></td>
+          <td><span class="chip warn">draft</span> · sub-label "<em>last edited 12 min ago — paso 2 de 3</em>"</td>
+          <td>Abre el wizard en la screen donde más conviene continuar (ver "Screen target del resume" abajo).</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Render del listado</h3>
+    <p>
+      Mezclados en una sola lista, ordenados por <code>last_saved_at</code>
+      desc. Cada row muestra su chip de estado, el nombre, una línea con
+      timestamp relativo ("12 min ago") y, si es draft, el stage donde quedó
+      ("paso 2 de 3").
+    </p>
+
+    <h3>Screen target del resume</h3>
+    <p>
+      Cuando el usuario selecciona un draft, el wizard <strong>lee
+      directamente el bloque <code>status</code></strong> del YAML y arranca
+      en la screen indicada por <code>status.stage</code>:
+    </p>
+    <ul>
+      <li><code>stage: info</code> → S1 con name + description pre-cargados.</li>
+      <li><code>stage: step</code> → S2 con <code>step_idx</code> y <code>step_mode</code> (<code>create</code> o <code>edit</code>) del bloque.</li>
+      <li><code>stage: summary</code> → S3 con todo el pipeline pre-cargado.</li>
+    </ul>
+    <p>
+      No hay inferencia de "donde estaba" por contenido — el wizard lo
+      escribió y el wizard lo lee. Si <code>status</code> está corrupto o
+      apunta fuera de range, fallback a <code>S1</code> con warning visible.
+    </p>
+
+    <h3>Acciones secundarias en My pipelines</h3>
+    <ul>
+      <li><kbd>enter</kbd> sobre un draft · abre el wizard en la screen de <code>status.stage</code>.</li>
+      <li><kbd>enter</kbd> sobre un ready · pide input del step 1 → ejecuta.</li>
+      <li><kbd>e</kbd> sobre un ready · re-abre el wizard en mode=edit; el wizard re-introduce <code>status: { stage: summary }</code> al cargar. Al "guardar pipeline" en S3 lo vuelve a remover.</li>
+      <li><kbd>d</kbd> sobre cualquiera + confirm · borra el archivo. Sirve para drafts huérfanos también.</li>
+      <li><kbd>y</kbd> sobre cualquiera · abre el YAML en <code>$EDITOR</code>. Re-parsea al cerrar.</li>
+    </ul>
+
+    <h3>Diagrama del flujo de resume</h3>
+    <div class="diagram-wrap">
+      <svg width="900" height="220" viewBox="0 0 900 220" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arrow-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#52525b"/>
+          </marker>
+          <marker id="arrow-r-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#4338ca"/>
+          </marker>
+          <marker id="arrow-r-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#15803d"/>
+          </marker>
+        </defs>
+
+        <!-- Menu -->
+        <rect x="20" y="80" width="120" height="56" rx="8" fill="#f4f4f2" stroke="#d4d4d8"/>
+        <text x="80" y="105" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#18181b" font-weight="600">Menu</text>
+        <text x="80" y="122" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#71717a">item 1</text>
+
+        <!-- My pipelines (lista) -->
+        <rect x="200" y="80" width="200" height="56" rx="8" fill="#fef3c7" stroke="#fde68a"/>
+        <text x="300" y="105" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#b45309" font-weight="600">RunPipelines</text>
+        <text x="300" y="122" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#b45309">lista (completos + incompletos)</text>
+
+        <!-- Decisión: estado del pipeline -->
+        <polygon points="460,108 510,80 560,108 510,136" fill="#fff" stroke="#d4d4d8"/>
+        <text x="510" y="105" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#18181b">¿completo?</text>
+
+        <!-- Branch sí: ejecutar -->
+        <rect x="640" y="30" width="220" height="56" rx="8" fill="#ecfdf5" stroke="#bbf7d0"/>
+        <text x="750" y="55" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#15803d" font-weight="600">Ejecutar pipeline</text>
+        <text x="750" y="72" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#15803d">pide input step 1 → run</text>
+
+        <!-- Branch no: wizard resume -->
+        <rect x="640" y="130" width="220" height="56" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+        <text x="750" y="155" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#4338ca" font-weight="600">Wizard (S1 / S2 / S3)</text>
+        <text x="750" y="172" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">screen según Q15</text>
+
+        <!-- Arrows -->
+        <line x1="140" y1="108" x2="196" y2="108" stroke="#4338ca" stroke-width="1.6" marker-end="url(#arrow-r-accent)"/>
+        <text x="168" y="100" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">"My pipelines"</text>
+
+        <line x1="400" y1="108" x2="456" y2="108" stroke="#4338ca" stroke-width="1.6" marker-end="url(#arrow-r-accent)"/>
+        <text x="428" y="100" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">elegir uno</text>
+
+        <line x1="540" y1="92" x2="636" y2="58" stroke="#15803d" stroke-width="1.4" marker-end="url(#arrow-r-ok)"/>
+        <text x="600" y="80" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#15803d">sí</text>
+
+        <line x1="540" y1="124" x2="636" y2="158" stroke="#52525b" stroke-width="1.4" marker-end="url(#arrow-r)"/>
+        <text x="600" y="148" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#52525b">no (incompleto)</text>
+      </svg>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== ESTADOS DETALLADOS ========== -->
+  <section>
+    <div class="eyebrow">estados</div>
+    <h2>Detalle por estado</h2>
+    <p>
+      Cada estado describe: trigger de entrada, campos del modelo que se
+      capturan/leen, validaciones que se evalúan, transiciones disponibles, y
+      qué tecla dispara cada una.
+    </p>
+
+    <!-- Menu -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">S0</span>
+        <h3>Menu (fuera del wizard)</h3>
+        <span class="state-sub">internal/tui/tui.go</span>
+      </div>
+      <dl class="grid">
+        <dt>Entrada</dt><dd>Invocación de <code>che</code> sin args.</dd>
+        <dt>Items (post-rename)</dt><dd>
+          <code>1. My pipelines</code> ⬅ era <code>Run pipelines</code> ·
+          <code>2. Create pipeline</code> ⬅ era <code>See pipelines</code> ·
+          <code>3. See skills</code> · <code>0. Exit</code>
+        </dd>
+        <dt>Salida</dt><dd>
+          Constantes de Action: <code>ActionRunPipelines</code> → <code>ActionMyPipelines</code> y <code>ActionSeePipelines</code> → <code>ActionCreatePipeline</code>.
+          <code>cmd/root.go</code> rutea <code>ActionCreatePipeline</code> al wizard, y <code>ActionMyPipelines</code> al lister de pipelines (H9).
+        </dd>
+      </dl>
+    </div>
+
+    <!-- PipelineInfo -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">S1</span>
+        <h3>PipelineInfo — nombre + descripción</h3>
+        <span class="state-sub">screen 1 / 3</span>
+      </div>
+      <dl class="grid">
+        <dt>Trigger</dt><dd>Menu emite <code>ActionCreatePipeline</code>.</dd>
+        <dt>Campos</dt><dd>
+          <ul class="tight">
+            <li><code>name</code> · string · <strong>requerido</strong> · text input single-line</li>
+            <li><code>description</code> · string · opcional · multiline</li>
+          </ul>
+        </dd>
+        <dt>Validaciones</dt><dd>
+          <ul class="tight">
+            <li><code>name</code> no vacío (trim).</li>
+            <li><code>name</code> derivable a slug válido (<code>[a-z0-9-]+</code> tras lowercase + replace de espacios y acentos).</li>
+            <li><code>~/.che/pipelines/&lt;slug&gt;.yaml</code> no existe. Si existe → modal "el nombre ya existe" con opciones <strong>sobreescribir</strong> / <strong>cancelar</strong>. Si elige cancelar, queda en S1 cambiando el nombre.</li>
+          </ul>
+        </dd>
+        <dt>Transiciones</dt><dd>
+          <ul class="tight">
+            <li><kbd>tab</kbd> / <kbd>shift+tab</kbd> · cycle entre los 2 inputs.</li>
+            <li><kbd>enter</kbd> en <code>name</code> · saltar a <code>description</code>.</li>
+            <li><kbd>ctrl+s</kbd> o botón <em>siguiente</em> · validar + ir a <code>S2</code>.</li>
+            <li><kbd>esc</kbd> · ir a <code>SC</code> (cancel confirm).</li>
+          </ul>
+        </dd>
+        <dt>Estado del modelo</dt><dd>
+          Tras transición exitosa: <code>model.Pipeline.Name</code> y <code>model.Pipeline.Description</code> seteados.
+          <code>model.CurrentStepIdx = 0</code> (nuevo step en blanco para S2).
+        </dd>
+      </dl>
+    </div>
+
+    <!-- StepEditor -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">S2</span>
+        <h3>StepEditor — definir un step</h3>
+        <span class="state-sub">screen 2 / 3 · loopable</span>
+      </div>
+      <dl class="grid">
+        <dt>Modos</dt><dd>
+          <ul class="tight">
+            <li><strong>create</strong>: estás definiendo un step nuevo (último de la lista).</li>
+            <li><strong>edit</strong>: viniste desde Summary a editar un step existente — al guardar se vuelve a Summary, no se loopa.</li>
+          </ul>
+        </dd>
+        <dt>Campos</dt><dd>
+          <ul class="tight">
+            <li><code>name</code> · string · requerido</li>
+            <li><code>cli</code> · enum <code>claude|codex|gemini|opencode</code> · requerido · sugerido solo entre los CLIs <strong>installed</strong> (reusar <code>internal/skills.Detect</code>)</li>
+            <li><code>kind</code> · enum <code>prompt|skill</code> · requerido</li>
+            <li><code>content</code> · string · requerido · si <code>kind=skill</code> es el nombre, si <code>kind=prompt</code> es el texto</li>
+            <li><code>input</code> · enum dependiente de la posición del step (ver bifurcación B1)</li>
+            <li><code>validator</code> · bloque opcional (ver bifurcación B2)</li>
+            <li><code>max_loops</code> · int · solo visible si validator activo · default <code>3</code></li>
+            <li><code>on_max_loops</code> · enum <code>fail|continue|pause</code> · solo visible si validator activo · default <code>fail</code></li>
+          </ul>
+        </dd>
+        <dt>Validaciones</dt><dd>
+          <ul class="tight">
+            <li><code>name</code> no vacío y único dentro del pipeline.</li>
+            <li>Si <code>kind=skill</code>: la skill debe existir en el CLI elegido (chequear con <code>internal/skills</code>) — si no, marcar el row en rojo y bloquear avance.</li>
+            <li>Si <code>kind=prompt</code>: <code>content</code> trimmed no vacío.</li>
+            <li>Si validator activo: todos los campos del validator validados con las mismas reglas.</li>
+            <li><code>max_loops</code> entero ≥ 1.</li>
+          </ul>
+        </dd>
+        <dt>Transiciones</dt><dd>
+          <ul class="tight">
+            <li><strong>+ agregar step</strong> (<kbd>ctrl+n</kbd>): valida → push step a <code>model.Pipeline.Steps</code> → reabre <code>S2</code> en blanco para step N+1. <span class="chip muted">solo en mode=create</span></li>
+            <li><strong>guardar y ver resumen</strong> (<kbd>ctrl+s</kbd>): valida → push si create / replace si edit → ir a <code>S3</code>.</li>
+            <li><strong>atrás</strong> (<kbd>esc</kbd> en mode=create):
+              <ul>
+                <li>si es step 1 → vuelve a <code>S1</code> descartando lo tipeado en este step.</li>
+                <li>si es step 2+ → vuelve al step previo en <code>S2 mode=edit</code>.</li>
+              </ul>
+            </li>
+            <li><strong>atrás</strong> (<kbd>esc</kbd> en mode=edit): vuelve a <code>S3</code> sin guardar cambios del step.</li>
+          </ul>
+        </dd>
+      </dl>
+    </div>
+
+    <!-- Summary -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">S3</span>
+        <h3>Summary — revisión y persistencia</h3>
+        <span class="state-sub">screen 3 / 3</span>
+      </div>
+      <dl class="grid">
+        <dt>Trigger</dt><dd>Desde S2 con "guardar y ver resumen".</dd>
+        <dt>Render</dt><dd>
+          <ul class="tight">
+            <li>Header: <code>name</code> + <code>description</code> + chip con el input que el step 1 va a pedir al disparar.</li>
+            <li>Lista de steps con: posición, nombre, CLI, kind+content, input, presencia de validator (con CLI + max_loops + on_max_loops si aplica).</li>
+            <li>Footer: path donde se va a guardar (<code>~/.che/pipelines/&lt;slug&gt;.yaml</code>).</li>
+          </ul>
+        </dd>
+        <dt>Selección</dt><dd>
+          <kbd>↑/↓</kbd> mueve el cursor entre steps. El step apuntado es el target de "editar step" / "borrar step".
+        </dd>
+        <dt>Transiciones</dt><dd>
+          <ul class="tight">
+            <li><strong>guardar pipeline</strong> (<kbd>ctrl+s</kbd>): correr <code>IsValid()</code>; si pasa → serializar sin <code>status</code>, escribir, ir a <code>S4</code>. Si falla → mostrar errores inline, quedarse en S3.</li>
+            <li><strong>editar step</strong> (<kbd>e</kbd> sobre el step apuntado): ir a <code>S2</code> en mode=edit con los campos del step pre-cargados.</li>
+            <li><strong>+ agregar step</strong> (<kbd>+</kbd>): ir a <code>S2</code> en mode=create al final de la lista.</li>
+            <li><strong>borrar step</strong> (<kbd>d</kbd> sobre el step apuntado, con confirmación): remover step + reindexar. Si rompe alguna referencia a <code>previous_output</code>, marcar el step afectado en rojo en el summary.</li>
+            <li><strong>reordenar step</strong> (<kbd>shift+↑</kbd> / <kbd>shift+↓</kbd> sobre el step apuntado): mueve la posición del step en la lista. Re-evaluar dependencias <code>previous_output</code>.</li>
+            <li><strong>abrir YAML en $EDITOR</strong> (<kbd>y</kbd>): suspende la TUI, abre <code>$EDITOR</code> sobre el archivo del pipeline (con bloque <code>status</code> incluido). Al cerrar el editor, re-parsea desde disco. Si el YAML quedó inválido → mostrar el error y mantener el modelo previo en RAM.</li>
+            <li><strong>atrás</strong> (<kbd>esc</kbd>): ir al último step en mode=edit.</li>
+          </ul>
+        </dd>
+        <dt>Validaciones pre-save</dt><dd>
+          <ul class="tight">
+            <li>Pipeline tiene al menos 1 step.</li>
+            <li>Path destino libre (o usuario confirmó overwrite).</li>
+            <li>Cada step pasa el validador del modelo (ya validado en S2, doble check defensivo).</li>
+          </ul>
+        </dd>
+      </dl>
+    </div>
+
+    <!-- Saved -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">S4</span>
+        <h3>Saved — confirmación final</h3>
+        <span class="state-sub">terminal</span>
+      </div>
+      <dl class="grid">
+        <dt>Render</dt><dd>
+          Mensaje verde con el path absoluto del archivo escrito y un hint de
+          cómo correrlo (<code>che pipeline run &lt;name&gt;</code> · cuando exista
+          el ítem 1 del menu).
+        </dd>
+        <dt>Transiciones</dt><dd>
+          <kbd>enter</kbd> · <kbd>esc</kbd> · <kbd>q</kbd> → vuelve a <code>S0</code>.
+        </dd>
+      </dl>
+    </div>
+
+    <!-- Cancelled -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">SC</span>
+        <h3>Cancelled — confirm de salida</h3>
+        <span class="state-sub">desde S1, S2 o S3</span>
+      </div>
+      <dl class="grid">
+        <dt>Trigger</dt><dd><kbd>esc</kbd> en S1, o <kbd>ctrl+c</kbd> / <kbd>q</kbd> en cualquiera. Siempre dispara el modal — incluso con modelo vacío, para evitar salidas accidentales.</dd>
+        <dt>Render</dt><dd>
+          Modal con 3 opciones:
+          <ul class="tight">
+            <li><strong>keep &amp; exit</strong> — el archivo queda guardado tal como está; aparecerá en <code>My pipelines</code> marcado como incompleto.</li>
+            <li><strong>discard &amp; exit</strong> — borra el archivo (si ya existía). Irreversible, con confirmación.</li>
+            <li><strong>back</strong> — vuelve al estado anterior, modelo intacto.</li>
+          </ul>
+        </dd>
+        <dt>Transiciones</dt><dd>
+          <ul class="tight">
+            <li>"keep" → autosave sincrónico final → <code>S0</code>, descarta el modelo en RAM (vive en disco).</li>
+            <li>"discard" → <code>os.Remove</code> del archivo si existe → <code>S0</code>, modelo descartado.</li>
+            <li>"back" → vuelve al estado anterior.</li>
+          </ul>
+        </dd>
+      </dl>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== BIFURCACIONES ========== -->
+  <section>
+    <div class="eyebrow">bifurcaciones</div>
+    <h2>Decisiones que cambian la UI dentro de un estado</h2>
+
+    <h3>B1 — Posición del step modifica el set de inputs disponibles</h3>
+    <div class="branch">
+      <span class="lbl">step idx == 0</span>
+      Opciones <code>input</code>: <span class="chip">text</span> <span class="chip">pr</span> <span class="chip">issue</span> <span class="chip">file</span> <span class="chip">url</span> <span class="chip">none</span>.
+      <code>previous_output</code> oculto.
+    </div>
+    <div class="branch">
+      <span class="lbl">step idx ≥ 1</span>
+      Mismos 6 + <span class="chip accent">previous_output</span>. Si el usuario elige <code>previous_output</code>, los demás quedan disabled (mutex visual).
+    </div>
+
+    <h3>B2 — Validator on/off colapsa el bloque entero</h3>
+    <div class="branch">
+      <span class="lbl">validator: off</span>
+      Step se guarda con <code>max_loops: 1</code> implícito y sin clave <code>validator</code> en el YAML. Los campos <code>cli/kind/content/max_loops/on_max_loops</code> del validator no se renderizan.
+    </div>
+    <div class="branch">
+      <span class="lbl">validator: on</span>
+      Aparecen los 5 campos. <code>cli</code> arranca <strong>con el mismo CLI que el step</strong> por default (más conservador, menos sorpresas). El usuario lo puede cambiar para habilitar cross-review. <code>max_loops</code> default <code>3</code>, <code>on_max_loops</code> default <code>fail</code>.
+    </div>
+
+    <h3>B3 — Kind del step / validator alterna textarea ↔ skill picker</h3>
+    <div class="branch">
+      <span class="lbl">kind: prompt</span>
+      Render: <code>textarea</code> multiline (autosize). El YAML guarda el texto crudo en <code>content</code>.
+    </div>
+    <div class="branch">
+      <span class="lbl">kind: skill</span>
+      Render: <code>SkillPicker</code> filtrado por el CLI elegido. Lista <code>~/&lt;cli-config&gt;/skills/*</code> + <code>&lt;cwd&gt;/.&lt;cli&gt;/skills/*</code> (alias para gemini → <code>commands/*.toml</code>). Si la lista viene vacía, mensaje "no hay skills instaladas para <code>&lt;cli&gt;</code>" + sugerencia de cambiar a <code>kind: prompt</code> o instalar una skill. El YAML guarda <strong>solo el nombre</strong> de la skill en <code>content</code>.
+    </div>
+
+    <h3>B4 — CLI no instalado al elegir cli del step</h3>
+    <div class="branch">
+      <span class="lbl">cli installed</span>
+      Pill habilitada normal.
+    </div>
+    <div class="branch">
+      <span class="lbl">cli no instalado</span>
+      Pill disabled con tooltip "no instalado · ver doctor". El pipeline asume que todos los CLIs elegidos están instalados; no se permite guardar un step apuntando a un CLI ausente.
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== MODELO ========== -->
+  <section>
+    <div class="eyebrow">modelo</div>
+    <h2>Modelo interno acumulativo</h2>
+    <p>
+      Una sola struct vive en el bubbletea program raíz. Cada estado lee/escribe
+      sobre la misma instancia. Al salir por SC se descarta; al salir por S4 se
+      serializa.
+    </p>
+
+<pre class="code"><span class="c">// internal/wizard/model.go</span>
+<span class="k">type</span> <span class="t">Model</span> <span class="k">struct</span> {
+    Screen   <span class="t">Screen</span>            <span class="c">// S1 | S2 | S3 | S4 | SC</span>
+    Pipeline <span class="t">Pipeline</span>          <span class="c">// el draft entero</span>
+
+    <span class="c">// estado UI específico de S2</span>
+    StepEdit <span class="t">StepEditState</span>     <span class="c">// idx, mode, focus, errores</span>
+
+    <span class="c">// estado UI de S3</span>
+    SummaryCursor <span class="t">int</span>          <span class="c">// step apuntado</span>
+
+    <span class="c">// detección de entorno (lazy, cacheada)</span>
+    Skills <span class="t">[]skills.CLI</span>        <span class="c">// reusa internal/skills.Detect</span>
+
+    <span class="c">// persistencia incremental</span>
+    Path        <span class="t">string</span>        <span class="c">// ~/.che/pipelines/&lt;slug&gt;.yaml; "" hasta que S1 setee name</span>
+    SaveDirty   <span class="t">bool</span>          <span class="c">// hay cambios pendientes de flush</span>
+    saveTimer   *<span class="t">time.Timer</span>   <span class="c">// debounce del autosave async</span>
+}
+
+<span class="k">type</span> <span class="t">Pipeline</span> <span class="k">struct</span> {
+    Status      *<span class="t">Status</span>          <span class="c">// nil cuando es ready; presente cuando es draft</span>
+    Name        <span class="t">string</span>
+    Description <span class="t">string</span>
+    Steps       []<span class="t">Step</span>
+}
+
+<span class="k">type</span> <span class="t">Status</span> <span class="k">struct</span> {
+    Stage       <span class="t">string</span>            <span class="c">// info | step | summary</span>
+    StepIdx     <span class="t">int</span>               <span class="c">// solo si Stage=step</span>
+    StepMode    <span class="t">string</span>            <span class="c">// solo si Stage=step — create | edit</span>
+    LastSavedAt <span class="t">time.Time</span>
+}
+
+<span class="k">type</span> <span class="t">Step</span> <span class="k">struct</span> {
+    Name        <span class="t">string</span>
+    CLI         <span class="t">string</span>            <span class="c">// claude|codex|gemini|opencode</span>
+    Kind        <span class="t">string</span>            <span class="c">// prompt|skill</span>
+    Content     <span class="t">string</span>
+    Input       <span class="t">string</span>            <span class="c">// text|pr|issue|file|url|none|previous_output</span>
+    Validator   *<span class="t">Validator</span>        <span class="c">// nil si off</span>
+    MaxLoops    <span class="t">int</span>               <span class="c">// 1 si validator nil</span>
+    OnMaxLoops  <span class="t">string</span>            <span class="c">// fail|continue|pause; "" si validator nil</span>
+}
+
+<span class="k">type</span> <span class="t">Validator</span> <span class="k">struct</span> {
+    CLI     <span class="t">string</span>
+    Kind    <span class="t">string</span>
+    Content <span class="t">string</span>
+}</pre>
+
+    <p>
+      El YAML resultante (formato canónico, ya cerrado en <code>design.html</code>)
+      se obtiene serializando <code>Pipeline</code> con <code>gopkg.in/yaml.v3</code>
+      en modo estricto. Campos <code>nil</code> / <code>""</code> / <code>0</code>
+      se omiten para mantener el archivo limpio.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== PERSISTENCIA ========== -->
+  <section>
+    <div class="eyebrow">persistencia</div>
+    <h2>Naming, path y conflictos</h2>
+    <table>
+      <thead>
+        <tr><th>Aspecto</th><th>Decisión propuesta</th><th>Notas</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Slug</td>
+          <td><code>strings.ToLower</code> + replace acentos + <code>[^a-z0-9]+</code> → <code>-</code> + trim <code>-</code></td>
+          <td>Implementar en <code>internal/wizard/slug.go</code>. Tests unitarios con casos UTF-8.</td>
+        </tr>
+        <tr>
+          <td>Path</td>
+          <td><code>~/.che/pipelines/&lt;slug&gt;.yaml</code></td>
+          <td>Único path para incompletos y completos. Crear el dir si no existe. Permisos <code>0700</code> en el dir, <code>0600</code> en el archivo.</td>
+        </tr>
+        <tr>
+          <td>Conflicto de nombre</td>
+          <td>Detectar en S1 al avanzar. Modal: <code>sobreescribir</code> / <code>elegir otro</code>.</td>
+          <td>Modal con sobreescribir / cancelar (Q3 cerrado).</td>
+        </tr>
+        <tr>
+          <td>Atomicidad</td>
+          <td>Escribir a <code>&lt;path&gt;.tmp</code> → <code>os.Rename</code>.</td>
+          <td>Evita corromper el archivo si el wizard crashea entre write y close.</td>
+        </tr>
+        <tr>
+          <td>Encoding</td>
+          <td>UTF-8 sin BOM. <code>yaml.v3</code> default.</td>
+          <td>—</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== ERRORES ========== -->
+  <section>
+    <div class="eyebrow">errores y edge cases</div>
+    <h2>Tabla de errores</h2>
+    <table>
+      <thead>
+        <tr><th>Caso</th><th>Estado donde se detecta</th><th>Comportamiento</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Nombre vacío</td><td>S1</td>
+          <td>Botón "siguiente" disabled. Hint inline en rojo bajo el campo.</td>
+        </tr>
+        <tr>
+          <td>Nombre con caracteres que dan slug vacío (todo emoji)</td><td>S1</td>
+          <td>Mismo tratamiento que vacío. Hint: "el nombre debe contener al menos una letra o número".</td>
+        </tr>
+        <tr>
+          <td>Pipeline name colisiona con archivo existente</td><td>S1 → modal</td>
+          <td>Modal sobreescribir/cancelar. Si elige cancelar, queda en S1.</td>
+        </tr>
+        <tr>
+          <td>Step sin name</td><td>S2</td>
+          <td>Botón "guardar y ver resumen" / "+ agregar step" disabled.</td>
+        </tr>
+        <tr>
+          <td>Step name duplicado dentro del pipeline</td><td>S2</td>
+          <td>Hint inline. Solo se valida al intentar avanzar.</td>
+        </tr>
+        <tr>
+          <td>Skill referenciada no existe en el CLI elegido</td><td>S2</td>
+          <td>Picker marca el ítem en rojo (si está pre-cargado en mode=edit) o muestra "no se encontró skill <code>X</code>".</td>
+        </tr>
+        <tr>
+          <td>0 skills disponibles para el CLI elegido</td><td>S2</td>
+          <td>Picker vacío con mensaje de fallback. El usuario puede cambiar a <code>kind: prompt</code>.</td>
+        </tr>
+        <tr>
+          <td>Pipeline sin steps al llegar a S3</td><td>S3</td>
+          <td>Imposible por construcción (S2 obliga a guardar al menos 1 step para llegar a S3). Defensive: si pasa, redirigir a S2 mode=create.</td>
+        </tr>
+        <tr>
+          <td>Borrar el último step desde S3</td><td>S3</td>
+          <td>Confirm + warning "el pipeline quedaría vacío" → si confirma, transición a S2 mode=create.</td>
+        </tr>
+        <tr>
+          <td>Borrar step 1 cuando step 2 usa <code>previous_output</code></td><td>S3</td>
+          <td>Warning explícito antes de confirmar. Si confirma, el step 2 queda en estado inválido (input <code>previous_output</code> sin step previo válido) y se marca rojo en el summary; no se puede guardar hasta corregir.</td>
+        </tr>
+        <tr>
+          <td>Falla de escritura en S4 (disco lleno, permisos)</td><td>S4</td>
+          <td>Mostrar error en rojo con el mensaje de <code>os.WriteFile</code>. Botón "reintentar" / "cancelar". Cancelar → S3 (no descarta el modelo).</td>
+        </tr>
+        <tr>
+          <td>Resize del terminal</td><td>todos</td>
+          <td>Capturar <code>tea.WindowSizeMsg</code> y re-layoutear (mismo patrón que <code>internal/tui/skills.go</code>).</td>
+        </tr>
+        <tr>
+          <td>YAML del pipeline malformado al cargar (resume)</td><td>My pipelines → wizard</td>
+          <td>Si <code>yaml.Unmarshal</code> falla: <code>My pipelines</code> marca el row como "corrupto" con opción <em>borrar</em>. No se intenta resume.</td>
+        </tr>
+        <tr>
+          <td>Pipeline con skill que ya no existe (resume)</td><td>S2 (al llegar al step)</td>
+          <td>Cargar igual; en S2 el campo aparece marcado en rojo con hint "skill <code>X</code> no existe en <code>&lt;cli&gt;</code>". No bloquea navegación, sí bloquea pasar el pipeline a "completo".</td>
+        </tr>
+        <tr>
+          <td>Pipeline con CLI desinstalado (resume)</td><td>My pipelines + S2</td>
+          <td>En el listado, warning amarillo "requiere <code>&lt;cli&gt;</code>". En el wizard, el step queda inválido hasta cambiar el CLI o reinstalarlo.</td>
+        </tr>
+        <tr>
+          <td>Falla del autosave async (disco lleno)</td><td>cualquiera</td>
+          <td>Mostrar un chip rojo "autosave failed" en la topbar, no interrumpir el wizard. Al próximo intento sincrónico (transición), si falla de nuevo, modal "no se puede guardar — reintentar / continuar sin autosave / salir".</td>
+        </tr>
+        <tr>
+          <td>Falla del autosave sincrónico en transición</td><td>cualquiera</td>
+          <td>Bloquear la transición y mostrar el modal del caso anterior.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== IMPLEMENTACIÓN ========== -->
+  <section>
+    <div class="eyebrow">implementación</div>
+    <h2>Plan de archivos</h2>
+    <table>
+      <thead><tr><th>Archivo</th><th>Responsabilidad</th></tr></thead>
+      <tbody>
+        <tr><td><code>internal/tui/tui.go</code></td><td>Renombrar <code>ActionRunPipelines</code> → <code>ActionMyPipelines</code> (label "My pipelines") y <code>ActionSeePipelines</code> → <code>ActionCreatePipeline</code> (label "Create pipeline").</td></tr>
+        <tr><td><code>cmd/root.go</code></td><td>Rutear <code>ActionCreatePipeline</code> a <code>wizard.Run</code>; <code>ActionMyPipelines</code> al lister (H9).</td></tr>
+        <tr><td><code>internal/wizard/model.go</code></td><td>Struct <code>Model</code>, <code>Pipeline</code>, <code>Step</code>, <code>Validator</code> + enums.</td></tr>
+        <tr><td><code>internal/wizard/wizard.go</code></td><td>Bubbletea program raíz que despacha a la screen actual y mantiene el modelo.</td></tr>
+        <tr><td><code>internal/wizard/info.go</code></td><td>Screen S1.</td></tr>
+        <tr><td><code>internal/wizard/step.go</code></td><td>Screen S2 (con sub-componentes para validator block + skill picker).</td></tr>
+        <tr><td><code>internal/wizard/summary.go</code></td><td>Screen S3.</td></tr>
+        <tr><td><code>internal/wizard/saved.go</code></td><td>Screen S4 (terminal).</td></tr>
+        <tr><td><code>internal/wizard/cancel.go</code></td><td>Modal SC.</td></tr>
+        <tr><td><code>internal/wizard/slug.go</code></td><td>Slug del nombre + tests.</td></tr>
+        <tr><td><code>internal/wizard/yaml.go</code></td><td>Serialización + write atómico + tests con golden YAML (incompleto y completo — mismo schema).</td></tr>
+        <tr><td><code>internal/wizard/validate.go</code></td><td>Validaciones del modelo. Define <code>IsComplete(p Pipeline) bool</code>, reutilizable por wizard y por <code>My pipelines</code> para clasificar.</td></tr>
+        <tr><td><code>internal/wizard/persist.go</code></td><td>Persistencia incremental: <code>Save(model)</code>, <code>Load(path)</code>, <code>Delete(path)</code>, debounce timer del autosave.</td></tr>
+        <tr><td><code>internal/pipelines/list.go</code></td><td>Listar archivos en <code>~/.che/pipelines/</code>, parsear cada uno y clasificar via <code>IsComplete</code>. Usado por <code>My pipelines</code>.</td></tr>
+        <tr><td><code>cmd/run.go</code> / <code>internal/runner/...</code></td><td>Item 1 del menu: lista pipelines (vía <code>internal/pipelines</code>), rutea a ejecutar (completo) o al wizard en mode=edit (incompleto).</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Reúso</h3>
+    <ul>
+      <li><code>internal/skills</code> — <code>Detect()</code> y la API de listado, ya implementadas. El skill picker del wizard es un wrapper de la lista filtrada por CLI.</li>
+      <li><code>internal/output</code> — para logs no-TUI (errores fatales antes de levantar bubbletea).</li>
+      <li>Estilos lipgloss — copiar paleta de <code>internal/tui/tui.go</code> y <code>internal/tui/skills.go</code> para mantener look.</li>
+    </ul>
+
+    <h3>Dependencias nuevas</h3>
+    <ul>
+      <li><code>gopkg.in/yaml.v3</code> — para serializar pipeline + draft. <strong>No estaba</strong> tras la limpieza; agregar a <code>go.mod</code>.</li>
+      <li><strong>UUID corto</strong> para draft-id temporal: usar 6 bytes random hex (<code>crypto/rand</code> + <code>encoding/hex</code>), <strong>sin</strong> dep externa.</li>
+    </ul>
+
+    <h3>Tests</h3>
+    <ul>
+      <li><strong>Unitarios</strong>: slug, validate (<code>IsComplete</code> con cada combinación de campos vacíos), yaml golden (pipeline incompleto, mínimo completo, completo con validator).</li>
+      <li><strong>Persist lifecycle</strong>: save → reload → assertEqual(model). Save → kill → reload → assertEqual(model excepto último debounce).</li>
+      <li><strong>Integración (e2e)</strong>: invocar wizard, matar a la mitad, abrir <code>My pipelines</code>, verificar que aparece marcado como incompleto, seleccionarlo, resume hasta completar y ejecutar. Reusar harness existente.</li>
+      <li><strong>No tests</strong> de bubbletea View(); confiar en smoke manual.</li>
+    </ul>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== ROADMAP / USER STORIES ========== -->
+  <section>
+    <div class="eyebrow">roadmap</div>
+    <h2>Plan de desarrollo — historias de usuario</h2>
+    <p>
+      Diez historias incrementales. Cada una entrega valor visible al usuario
+      final, deja el wizard funcional al cierre, y se valida con un test e2e
+      automatizado <strong>y</strong> un smoke manual reproducible. El orden
+      es de dependencia: cada historia se construye sobre la anterior.
+    </p>
+    <p>
+      <strong>Cancel modal (Q4 keep/discard/back)</strong> entra transversal
+      en H2 — la primera historia donde el wizard ya tiene algo que persistir.
+    </p>
+
+    <!-- H1 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H1</span>
+        <h3>Rename de menu items + wizard skeleton</h3>
+        <span class="deps">deps: <span class="chip muted">ninguna</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> dev de che, <strong>quiero</strong> que los items 1 y 2 del menu queden con sus nombres definitivos (<code>My pipelines</code> y <code>Create pipeline</code>) y que el item 2 dispare un wizard placeholder, <strong>para</strong> validar el routing antes de implementar funcionalidad real.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>Item 1 del menu renombrado de <code>Run pipelines</code> a <code>My pipelines</code>; constante <code>ActionRunPipelines</code> → <code>ActionMyPipelines</code> en <code>internal/tui/tui.go</code>. Sigue mostrando el placeholder "not implemented" + exit 1 (la implementación real es H9).</li>
+        <li>Item 2 del menu renombrado de <code>See pipelines</code> a <code>Create pipeline</code>; constante <code>ActionSeePipelines</code> → <code>ActionCreatePipeline</code>.</li>
+        <li><code>cmd/root.go</code> rutea <code>ActionCreatePipeline</code> a <code>internal/wizard.Run()</code>.</li>
+        <li><code>wizard.Run()</code> muestra una pantalla con título "Create pipeline" + mensaje "wizard pendiente"; <kbd>esc</kbd> vuelve al menu, <kbd>q</kbd> sale.</li>
+        <li>Sin tocar disco, sin lógica de pipeline.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li><code>go build -o .bin/che . &amp;&amp; ./.bin/che</code></li>
+        <li>Ver item 1 = <code>My pipelines</code>, item 2 = <code>Create pipeline</code>.</li>
+        <li>Item 1 → placeholder "not implemented", exit 1 (igual que antes).</li>
+        <li>Item 2 → wizard skeleton; <kbd>esc</kbd> vuelve al menu; <kbd>0</kbd> / <kbd>q</kbd> salen.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Stdin secuencial: <code>"2\n"</code>, <code>"esc"</code>, <code>"q"</code>.</li>
+        <li>Asserts: stdout contiene "Create pipeline" + "My pipelines" en el menu; tras esc vuelve al menu; exit 0.</li>
+        <li>Run separado para item 1: <code>"1\n"</code> → asserts: stdout contiene "My pipelines" como label, "not implemented" como mensaje, exit 1.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Cualquier funcionalidad real del wizard. Item 1 sigue como placeholder hasta H9.</p>
+    </div>
+
+    <!-- H2 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H2</span>
+        <h3>S1 PipelineInfo + persistencia inicial + Cancel modal</h3>
+        <span class="deps">deps: <span class="chip">H1</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> crear el "esqueleto" de un pipeline (nombre + descripción) y que se guarde a disco al avanzar, <strong>para</strong> poder continuarlo después si me interrumpen.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>Pantalla S1 con dos inputs: <code>name</code> (single-line) y <code>description</code> (multiline). <kbd>tab</kbd> / <kbd>shift+tab</kbd> alterna.</li>
+        <li>"siguiente" (<kbd>ctrl+s</kbd>) valida: name no vacío, slug derivable a <code>[a-z0-9-]+</code>, no colisiona con archivo existente.</li>
+        <li>Si colisiona: modal "el nombre ya existe" con <strong>sobreescribir</strong> / <strong>cancelar</strong>.</li>
+        <li>Al confirmar: crear <code>~/.che/pipelines/&lt;slug&gt;.yaml</code> con <code>status: { stage: info, last_saved_at }</code> + <code>name</code> + <code>description</code>. Write atómico (<code>.tmp</code> + rename).</li>
+        <li>Tras "siguiente", el wizard cierra y vuelve al menu (S2 todavía no existe — placeholder de "S2 pendiente").</li>
+        <li>Cancel modal con <strong>keep</strong> / <strong>discard</strong> / <strong>back</strong> trigger por <kbd>esc</kbd> / <kbd>ctrl+c</kbd> / <kbd>q</kbd>. <em>discard</em> borra el archivo si existe.</li>
+        <li>Implementación incluye: struct <code>Pipeline</code> + <code>Status</code>, serialización YAML con <code>gopkg.in/yaml.v3</code>, helper de slug.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Ir a "Create pipeline".</li>
+        <li>Tipear nombre y descripción, <kbd>ctrl+s</kbd>.</li>
+        <li><code>cat ~/.che/pipelines/&lt;slug&gt;.yaml</code> → ver bloque <code>status</code> con stage=info, name, description.</li>
+        <li>Repetir con mismo nombre → ver modal de colisión, cancelar.</li>
+        <li>Reentrar wizard, <kbd>esc</kbd> → modal keep/discard/back. Probar las 3.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>HOME apuntando a tmp dir.</li>
+        <li>Stdin secuencial: ir a item 2, tipear name, tab, tipear description, <kbd>ctrl+s</kbd>.</li>
+        <li>Asserts: archivo existe, contenido YAML válido con <code>status.stage == "info"</code>, <code>name</code>, <code>description</code>.</li>
+        <li>Segundo run colisión: nombre repetido → modal → cancelar → archivo no cambia.</li>
+        <li>Tercer run discard: nombre, esc, "discard" → archivo borrado.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">S2 (H3), S3 (H6), <code>status.stage</code> distinto a "info".</p>
+    </div>
+
+    <!-- H3 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H3</span>
+        <h3>S2 StepEditor mode=create — primer step (sin validator)</h3>
+        <span class="deps">deps: <span class="chip">H2</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> definir el primer step del pipeline (CLI, kind, content, input), <strong>para</strong> que mi pipeline tenga una unidad de trabajo concreta.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>"siguiente" en S1 ahora lleva a S2 (no más placeholder); <code>status.stage</code> pasa a <code>step</code> con <code>step_idx=0</code>, <code>step_mode=create</code>.</li>
+        <li>Campos: <code>name</code>, <code>cli</code> (4 pills, disabled si CLI no instalado vía <code>internal/skills.Detect</code>), <code>kind</code> (prompt | skill), <code>content</code> (textarea o skill picker filtrado por CLI), <code>input</code> (text | pr | issue | file | url | none — sin <code>previous_output</code> en step 1).</li>
+        <li>Validaciones: name no vacío, content no vacío, skill existe si kind=skill, input seleccionado.</li>
+        <li>"guardar y ver resumen" (<kbd>ctrl+s</kbd>): valida + persiste step → cierra wizard (S3 todavía no existe — placeholder).</li>
+        <li>Atrás (<kbd>esc</kbd>) en step 1 mode=create: vuelve a S1 descartando lo tipeado en este step. <code>status.stage</code> revierte a info.</li>
+        <li>Persist sincrónico en S1→S2 + asincrónico debounce 800ms en field changes.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>S1 + ctrl+s → llegar a S2.</li>
+        <li>Llenar step (claude / prompt / "hola" / text), <kbd>ctrl+s</kbd>.</li>
+        <li><code>cat &lt;file&gt;</code> → 1 step + <code>status.stage=step, step_idx=0</code>.</li>
+        <li>Repetir, en S2 esc → vuelve a S1; el archivo persiste pero <code>status.stage=info</code> de nuevo.</li>
+        <li>CLI desinstalado: pill aparece disabled.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Tmp HOME, completar S1+S2, salir.</li>
+        <li>Asserts: archivo tiene <code>steps[0]</code> con todos los campos, <code>status.stage="step"</code>, <code>status.step_idx=0</code>, <code>status.step_mode="create"</code>.</li>
+        <li>Test atrás: en S2 esc → archivo refleja <code>status.stage="info"</code> y <code>steps</code> vacío o ausente.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Validator (H4), múltiples steps (H5), S3 (H6), <code>previous_output</code> (H5).</p>
+    </div>
+
+    <!-- H4 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H4</span>
+        <h3>S2 con validator opcional</h3>
+        <span class="deps">deps: <span class="chip">H3</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> opcionalmente añadir un validator al step (CLI, kind, content, max_loops, on_max_loops), <strong>para</strong> que el output del step pase un cross-review en loop antes de avanzar.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>Toggle "¿validar este step?" sí / no.</li>
+        <li><strong>off</strong>: no se serializa <code>validator</code> en el YAML; <code>max_loops</code> implícito 1, no aparece en el YAML.</li>
+        <li><strong>on</strong>: aparecen 5 campos (<code>cli</code>, <code>kind</code>, <code>content</code>, <code>max_loops</code>, <code>on_max_loops</code>).</li>
+        <li>Default: <code>cli</code> = mismo CLI que el step (Q7), <code>max_loops</code> = 3, <code>on_max_loops</code> = fail.</li>
+        <li>Validaciones del bloque validator: mismas reglas que el step para sus campos análogos.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>S2, completar step, toggle validator on, llenar bloque, <kbd>ctrl+s</kbd>.</li>
+        <li><code>cat &lt;file&gt;</code> → step con <code>validator</code> + <code>max_loops: 3</code> + <code>on_max_loops: fail</code>.</li>
+        <li>Repetir con validator off → no aparece <code>validator</code> ni <code>max_loops</code>.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Pipeline con validator on → asserts: <code>steps[0].validator.cli</code>, <code>.kind</code>, <code>.content</code>, <code>steps[0].max_loops==3</code>, <code>on_max_loops=="fail"</code>.</li>
+        <li>Otro pipeline con validator off → asserts: no hay claves <code>validator</code> ni <code>max_loops</code> en el YAML.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Default cross-CLI (Q7 cerrado: mismo CLI).</p>
+    </div>
+
+    <!-- H5 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H5</span>
+        <h3>S2 loop "+ agregar step" + atrás Q1 + previous_output</h3>
+        <span class="deps">deps: <span class="chip">H4</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> agregar múltiples steps al pipeline encadenados con <code>previous_output</code>, <strong>para</strong> que la salida de uno alimente al siguiente.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>"+ agregar step" (<kbd>ctrl+n</kbd>): valida step actual, push al modelo, abre S2 vacío para step N+1. <code>status.step_idx</code> avanza.</li>
+        <li>En step idx ≥ 1, el selector de input incluye <code>previous_output</code>; si se elige, los demás quedan disabled (mutex visual).</li>
+        <li>Atrás (<kbd>esc</kbd>) en mode=create:
+          <ul>
+            <li>step 1 → S1 descartando lo tipeado en este step.</li>
+            <li>step 2+ → S2 prev en <code>mode=edit</code>.</li>
+          </ul>
+        </li>
+        <li>"guardar y ver resumen" sigue cerrando el wizard (placeholder de S3).</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>S1 + S2 step 1 con input=text, <kbd>ctrl+n</kbd>.</li>
+        <li>S2 step 2: ver <code>previous_output</code>, elegirlo, completar, <kbd>ctrl+s</kbd>.</li>
+        <li><code>cat &lt;file&gt;</code> → 2 steps, <code>steps[1].input == "previous_output"</code>.</li>
+        <li>Repetir, en step 2 mode=create esc → debe estar en S2 step 1 mode=edit.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Pipeline con 2 steps, segundo con <code>previous_output</code>: asserts sobre el YAML.</li>
+        <li>Test atrás: stdin que entra a step 2 mode=create, presiona esc, completa modificación en step 1 → archivo muestra el nuevo contenido del step 1.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">S3 (H6), editar/borrar/reordenar (H7).</p>
+    </div>
+
+    <!-- H6 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H6</span>
+        <h3>S3 Summary + guardar pipeline final (sin status)</h3>
+        <span class="deps">deps: <span class="chip">H5</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> ver un resumen del pipeline antes de finalizarlo y al confirmar guardar el archivo final sin metadata de wizard, <strong>para</strong> tener un pipeline "ready" listo para ejecutar.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>Tras "guardar y ver resumen" en S2, llegar a S3 (no más cierre temprano).</li>
+        <li>S3 renderiza: name + description + lista de steps con metadata (CLI, kind+content excerpt, input, chip de validator si tiene).</li>
+        <li>Cursor con <kbd>↑/↓</kbd> entre steps (sin acción todavía — viene en H7).</li>
+        <li>"guardar pipeline" (<kbd>ctrl+s</kbd>): corre <code>IsValid(p)</code>; si pasa, serializa <strong>sin bloque <code>status</code></strong>, sobreescribe el archivo, va a S4.</li>
+        <li>Si <code>IsValid</code> falla: muestra errores inline en S3, queda en S3.</li>
+        <li>S4 muestra path del archivo guardado; <kbd>enter</kbd>/<kbd>esc</kbd> vuelven al menu.</li>
+        <li><code>status.stage</code> en el archivo intermedio (mientras está en S3) es <code>summary</code>.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Pipeline con 1+ step válido → S3.</li>
+        <li>Ver resumen.</li>
+        <li><kbd>ctrl+s</kbd> → S4 con path.</li>
+        <li>esc → menu.</li>
+        <li><code>cat &lt;file&gt;</code> → archivo final <strong>sin</strong> bloque <code>status</code>.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Pipeline completo, llegar a S3, guardar.</li>
+        <li>Asserts: archivo no contiene la clave <code>status</code> a top-level; tiene <code>name</code> + <code>steps</code>.</li>
+        <li>Test failure: pipeline con campo inválido (forzar) → <code>ctrl+s</code> en S3 no avanza, error visible.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Editar/borrar/reordenar desde S3 (H7), $EDITOR (H8).</p>
+    </div>
+
+    <!-- H7 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H7</span>
+        <h3>S3 editar / borrar / reordenar steps</h3>
+        <span class="deps">deps: <span class="chip">H6</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> modificar el pipeline desde el resumen (editar un step, borrarlo, reordenarlos), <strong>para</strong> corregir errores sin tener que recrear todo.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li><kbd>e</kbd> sobre el step apuntado: ir a S2 mode=edit con campos pre-cargados. Atrás vuelve a S3 sin guardar cambios; <kbd>ctrl+s</kbd> guarda y vuelve a S3.</li>
+        <li><kbd>d</kbd> sobre el step apuntado: confirm + remover step + reindexar.</li>
+        <li><kbd>shift+↑</kbd> / <kbd>shift+↓</kbd>: reordenar el step apuntado. Re-evalúa dependencias <code>previous_output</code> (si rompe alguna, marcar el step afectado en rojo).</li>
+        <li><kbd>+</kbd>: agregar nuevo step al final → S2 mode=create.</li>
+        <li>Tras editar/borrar/reordenar, el archivo vuelve a tener <code>status.stage=summary</code> (volvió a draft).</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Pipeline con 3 steps en S3.</li>
+        <li><kbd>e</kbd> sobre step 2 → editar → <kbd>ctrl+s</kbd> → de vuelta en S3 con cambio.</li>
+        <li><kbd>d</kbd> sobre step 2 → confirm → desaparece, reindexa.</li>
+        <li><kbd>shift+↓</kbd> sobre step 1 → mueve a posición 2.</li>
+        <li><code>cat</code> refleja todos los cambios.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Pipeline con 3 steps; editar step 2 (cambiar content); asserts sobre cambio.</li>
+        <li>Borrar step 2; asserts sobre 2 steps remanentes con orden correcto.</li>
+        <li>Reordenar; asserts sobre orden cambiado.</li>
+        <li>Borrar step 1 cuando step 2 usa <code>previous_output</code>: asserts sobre warning visible y step 2 marcado inválido.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">$EDITOR integration (H8).</p>
+    </div>
+
+    <!-- H8 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H8</span>
+        <h3>S3 abrir YAML en $EDITOR (Q6)</h3>
+        <span class="deps">deps: <span class="chip">H7</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario power, <strong>quiero</strong> abrir el YAML del pipeline en mi editor preferido desde S3, <strong>para</strong> hacer cambios manuales que no son cómodos por la UI (mover orden, edit masivo, etc.).
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li><kbd>y</kbd> en S3 suspende la TUI, abre <code>$EDITOR</code> (fallback <code>vi</code>) sobre el archivo del pipeline (con bloque <code>status</code> presente).</li>
+        <li>Al cerrar el editor, re-parse desde disco.</li>
+        <li>Parse OK: actualizar modelo en RAM, volver a S3 con el contenido editado.</li>
+        <li>Parse falla: mostrar error visible, mantener modelo previo en RAM (el archivo en disco queda con el contenido inválido — ofrecer "reabrir editor" o "descartar cambios").</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li><code>EDITOR=nano che</code></li>
+        <li>Pipeline en S3, <kbd>y</kbd> → editor abre.</li>
+        <li>Cambiar algo, guardar, salir → S3 refleja cambio.</li>
+        <li>Repetir con cambio que rompe el YAML (sintaxis inválida) → ver error, modelo previo intacto.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li><code>EDITOR</code> = script fake que muta el archivo (ej: agregar un step via <code>sed</code>).</li>
+        <li>Pipeline en S3, dispara <kbd>y</kbd>; tras volver, el modelo en RAM refleja la mutación. Asserts sobre el archivo final tras un siguiente save.</li>
+        <li>Segundo caso: fake escribe YAML inválido → asserts sobre error visible y modelo previo intacto.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Edición YAML fuera del wizard, en S2 o desde My pipelines (H10).</p>
+    </div>
+
+    <!-- H9 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H9</span>
+        <h3>My pipelines — listado mezclado con chips ready/draft</h3>
+        <span class="deps">deps: <span class="chip">H6</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> ver una lista de mis pipelines (ready + drafts) desde el item 1 del menu, <strong>para</strong> identificar qué tengo, en qué estado, y elegir uno (la acción al elegir viene en H10).
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>Item 1 ("My pipelines") implementado (reemplaza placeholder).</li>
+        <li>Lista archivos de <code>~/.che/pipelines/*.yaml</code>: parsea cada uno, clasifica por presencia de <code>status</code> (draft) o ausencia (ready).</li>
+        <li>Render: una lista mezclada ordenada por <code>status.last_saved_at</code> desc para drafts y file mtime para ready.</li>
+        <li>Cada row: nombre, chip <span class="chip ok">ready</span> o <span class="chip warn">draft</span>, "12 min ago", para drafts: sub-label "<em>en paso N de M</em>" leyendo <code>status.stage</code> y <code>status.step_idx</code>.</li>
+        <li><kbd>esc</kbd> vuelve al menu.</li>
+        <li>Sin acción al seleccionar (eso viene en H10) — el cursor solo se mueve.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Crear varios pipelines: algunos ready (vía H6), algunos draft (cancelando con keep).</li>
+        <li>Item 1 → ver lista con chips correctos y orden por fecha.</li>
+        <li>Sub-labels de drafts indican el stage exacto.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Tmp HOME con pipelines pre-armados (escribir YAMLs directamente al fixture dir): 2 ready, 2 drafts en distintos stages.</li>
+        <li>Asserts: lista contiene los 4, chips correctos, orden por <code>last_saved_at</code> desc.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Ejecución, resume, edit, delete (H10).</p>
+    </div>
+
+    <!-- H10 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H10</span>
+        <h3>My pipelines — acciones (resume, edit ready, delete, $EDITOR)</h3>
+        <span class="deps">deps: <span class="chip">H9</span> + <span class="chip">H8</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> accionar sobre cada pipeline desde la lista (reanudar drafts, editar ready, borrar, ver YAML), <strong>para</strong> no tener que escribir comandos extra ni manipular archivos a mano.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li><kbd>enter</kbd> sobre <strong>draft</strong>: lee <code>status.stage</code>, <code>step_idx</code>, <code>step_mode</code>; abre wizard en esa screen exacta.</li>
+        <li><kbd>enter</kbd> sobre <strong>ready</strong>: muestra mensaje "ejecución no implementada" + <kbd>esc</kbd>. La ejecución es historia aparte (post v0.1).</li>
+        <li><kbd>e</kbd> sobre <strong>ready</strong>: re-introduce <code>status: { stage: summary }</code> en el archivo, abre wizard en S3 mode=edit. Al hacer "guardar pipeline", se vuelve a remover <code>status</code>.</li>
+        <li><kbd>d</kbd> sobre cualquier: confirm + <code>os.Remove</code>.</li>
+        <li><kbd>y</kbd> sobre cualquier: abre <code>$EDITOR</code> sobre el archivo (reusa el código de H8), re-parse al cerrar.</li>
+        <li>Si <code>status</code> está corrupto al cargar (campos faltantes / valores inválidos): fallback a S1 con warning visible "couldn't restore state — starting from S1".</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Lista con draft (status.stage=step, step_idx=1) y ready.</li>
+        <li><kbd>enter</kbd> sobre draft → wizard arranca en S2 step 1.</li>
+        <li><kbd>esc</kbd> → keep, vuelvo a la lista.</li>
+        <li><kbd>e</kbd> sobre ready → S3 con todo cargado. Cambiar algo + ctrl+s → archivo final actualizado, sin status.</li>
+        <li><kbd>d</kbd> sobre cualquiera → confirm → desaparece de la lista.</li>
+        <li><kbd>y</kbd> sobre cualquiera → editor abre.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Pre-armar fixtures: draft con <code>status.stage=step, step_idx=1, step_mode=create</code>; ready completo.</li>
+        <li><strong>Resume</strong>: enter sobre draft → asserts (vía estado del wizard o stdin sequence) que arranca en S2 step idx 1.</li>
+        <li><strong>Edit ready</strong>: <kbd>e</kbd> + modificar + ctrl+s en S3 → asserts: archivo final no tiene <code>status</code>, contiene los cambios.</li>
+        <li><strong>Delete</strong>: <kbd>d</kbd> + confirm → asserts: archivo no existe.</li>
+        <li><strong>Status corrupto</strong>: fixture con <code>status.step_idx=999</code> (out of range) → enter → asserts: warning visible, wizard arranca en S1.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Ejecutar pipeline ready (es una historia aparte — sale del wizard).</p>
+    </div>
+
+  </section>
+
+  <footer>
+    che / parametrizable revamp · manage pipelines flow · 2026-05-07
+  </footer>
+
+</main>
+</body>
+</html>
