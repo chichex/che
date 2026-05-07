@@ -12,7 +12,7 @@ var Version = "dev"
 var rootCmd = &cobra.Command{
 	Use:     "che",
 	Short:   "che - CLI en revamp",
-	Long:    `che — CLI en revamp. Subcomandos disponibles: dash, doctor, upgrade.`,
+	Long:    `che — CLI en revamp. Subcomandos disponibles: doctor, upgrade.`,
 	Version: Version,
 }
 

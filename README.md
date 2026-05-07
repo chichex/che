@@ -54,7 +54,6 @@ La TUI y los subcomandos comparten el mismo motor; los subcomandos siguen existi
 
 | Comando | Qué hace |
 |---------|----------|
-| `che dash` | Dashboard web local (Kanban por status, drawer con metadata + logs, auto-loop opcional). |
 | `che doctor` | Chequea entorno (gh auth, CLIs de agentes en PATH, etc.). |
 | `che upgrade` | Actualiza che a la última versión publicada. |
 
@@ -69,7 +68,6 @@ La TUI interactiva (`che` sin args) permite además gestionar locks colgados (`c
 ## Observabilidad
 
 1. Labels `che:*`, `plan-validated:*`, `validated:*` reflejan el estado de la máquina sobre el issue / PR.
-2. `che dash` agrega Kanban + drawer + auto-loop como vista en vivo del workflow.
 
 ## Desarrollo
 
@@ -83,8 +81,5 @@ make release    # goreleaser release --clean
 El árbol de paquetes:
 
 - `cmd/` — entrypoints cobra de cada subcomando.
-- `internal/labels/` — máquina de estados `che:*` y mutex `che:locked`.
-- `internal/dash/` — server + handlers + auto-loop del dashboard local.
-- `internal/tui/` — TUI bubbletea (entry point por defecto).
 - `internal/output/` — logger unificado (stdout=payload, stderr=logs).
 - `e2e/` — harness e2e con fakes polimórficos.
