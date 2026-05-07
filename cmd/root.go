@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/chichex/che/internal/tui"
+	"github.com/chichex/che/internal/wizard"
 	"github.com/spf13/cobra"
 )
 
@@ -42,8 +43,16 @@ var rootCmd = &cobra.Command{
 				if exit {
 					return nil
 				}
+			case tui.ActionCreatePipeline:
+				exit, err := wizard.Run()
+				if err != nil {
+					return err
+				}
+				if exit {
+					return nil
+				}
 			default:
-				fmt.Fprintln(cmd.ErrOrStderr(), "not implemented")
+				fmt.Fprintln(cmd.ErrOrStderr(), "My pipelines: not implemented")
 				os.Exit(1)
 				return nil
 			}

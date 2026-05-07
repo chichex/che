@@ -17,10 +17,10 @@ import (
 type Action string
 
 const (
-	ActionRunPipelines Action = "run-pipelines"
-	ActionSeePipelines Action = "see-pipelines"
-	ActionSeeSkills    Action = "see-skills"
-	ActionExit         Action = "exit"
+	ActionMyPipelines    Action = "my-pipelines"
+	ActionCreatePipeline Action = "create-pipeline"
+	ActionSeeSkills      Action = "see-skills"
+	ActionExit           Action = "exit"
 )
 
 type item struct {
@@ -30,8 +30,8 @@ type item struct {
 }
 
 var menu = []item{
-	{digit: "1", label: "Run pipelines", action: ActionRunPipelines},
-	{digit: "2", label: "See pipelines", action: ActionSeePipelines},
+	{digit: "1", label: "My pipelines", action: ActionMyPipelines},
+	{digit: "2", label: "Create pipeline", action: ActionCreatePipeline},
 	{digit: "3", label: "See skills", action: ActionSeeSkills},
 	{digit: "0", label: "Exit", action: ActionExit},
 }
