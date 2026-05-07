@@ -1098,6 +1098,7 @@
       <div class="story-head">
         <span class="story-id">H1</span>
         <h3>Rename de menu items + wizard skeleton</h3>
+        <span class="chip ok">done</span>
         <span class="deps">deps: <span class="chip muted">ninguna</span></span>
       </div>
       <div class="as-a">
@@ -1137,11 +1138,25 @@
       <div class="story-head">
         <span class="story-id">H2</span>
         <h3>S1 PipelineInfo + persistencia inicial + Cancel modal</h3>
+        <span class="chip ok">done</span>
         <span class="deps">deps: <span class="chip">H1</span></span>
       </div>
       <div class="as-a">
         <strong>Como</strong> usuario, <strong>quiero</strong> crear el "esqueleto" de un pipeline (nombre + descripción) y que se guarde a disco al avanzar, <strong>para</strong> poder continuarlo después si me interrumpen.
       </div>
+
+      <h4>Notas de implementación</h4>
+      <ul>
+        <li>Archivos creados: <code>internal/wizard/{model,slug,yaml,persist,textinput,styles,info,cancel,wizard}.go</code> + tests unitarios.</li>
+        <li>Dep nueva: <code>gopkg.in/yaml.v3</code>. <code>golang.org/x/text</code> ya estaba indirecto y se usa para normalizar acentos en el slug.</li>
+        <li><strong>Divergencias menores vs spec:</strong>
+          <ul>
+            <li><kbd>q</kbd> en S1 es un caracter normal (los nombres pueden contener "q"). SC se dispara solo con <kbd>esc</kbd> o <kbd>ctrl+c</kbd> en S1. En el placeholder de S2 sí dispara SC.</li>
+            <li>El <code>name</code> que se serializa al YAML es el texto crudo del usuario (case + espacios); el slug se usa solo como filename. Ej: <code>name: "Triage Checkout Flow"</code> en <code>triage-checkout-flow.yaml</code>.</li>
+            <li>Placeholders de los inputs usan prefijo <code>ej:</code> + estilo italic+faint y el input lleva borde redondeado (gris/rosa según foco) — para que no se confundan con texto ya tipeado.</li>
+          </ul>
+        </li>
+      </ul>
 
       <h4>Criterios de aceptación</h4>
       <ul>
@@ -1182,6 +1197,7 @@
         <span class="story-id">H3</span>
         <h3>S2 StepEditor mode=create — primer step (sin validator)</h3>
         <span class="deps">deps: <span class="chip">H2</span></span>
+        <span class="chip ok">done</span>
       </div>
       <div class="as-a">
         <strong>Como</strong> usuario, <strong>quiero</strong> definir el primer step del pipeline (CLI, kind, content, input), <strong>para</strong> que mi pipeline tenga una unidad de trabajo concreta.
@@ -1190,31 +1206,45 @@
       <h4>Criterios de aceptación</h4>
       <ul>
         <li>"siguiente" en S1 ahora lleva a S2 (no más placeholder); <code>status.stage</code> pasa a <code>step</code> con <code>step_idx=0</code>, <code>step_mode=create</code>.</li>
-        <li>Campos: <code>name</code>, <code>cli</code> (4 pills, disabled si CLI no instalado vía <code>internal/skills.Detect</code>), <code>kind</code> (prompt | skill), <code>content</code> (textarea o skill picker filtrado por CLI), <code>input</code> (text | pr | issue | file | url | none — sin <code>previous_output</code> en step 1).</li>
-        <li>Validaciones: name no vacío, content no vacío, skill existe si kind=skill, input seleccionado.</li>
-        <li>"guardar y ver resumen" (<kbd>ctrl+s</kbd>): valida + persiste step → cierra wizard (S3 todavía no existe — placeholder).</li>
-        <li>Atrás (<kbd>esc</kbd>) en step 1 mode=create: vuelve a S1 descartando lo tipeado en este step. <code>status.stage</code> revierte a info.</li>
-        <li>Persist sincrónico en S1→S2 + asincrónico debounce 800ms en field changes.</li>
+        <li>Campos: <code>name</code>, <code>cli</code> (4 pills, marcadas <em>·off</em> si el CLI no está instalado vía <code>internal/skills.Detect</code>), <code>kind</code> (prompt | skill), <code>content</code> (textarea o skill picker filtrado por CLI), <code>input</code> (text | pr | issue | file | url | none — sin <code>previous_output</code> en step 1).</li>
+        <li>Validaciones inline: name no vacío + único dentro del pipeline, CLI installed, content no vacío (prompt) o skill seleccionada existente (skill), input válido para la posición del step.</li>
+        <li>"guardar y ver resumen" (<kbd>ctrl+s</kbd> o <kbd>enter</kbd> sobre el campo Input): valida + persiste step → cierra wizard (S3 todavía no existe — placeholder).</li>
+        <li>Atrás (<kbd>esc</kbd>) en step 1 mode=create: vuelve a S1 descartando lo tipeado en este step. <code>status.stage</code> revierte a info, <code>steps</code> vuelve a vacío.</li>
+        <li>Persist sincrónico en cada transición (S1→S2, ctrl+s, esc). <span class="chip muted">Async debounce 800ms diferido — TODO en <code>step.go</code>.</span></li>
+      </ul>
+
+      <h4>Atajos de teclado (shipped)</h4>
+      <ul class="tight">
+        <li><kbd>tab</kbd> / <kbd>↓</kbd> · siguiente campo · <kbd>shift+tab</kbd> / <kbd>↑</kbd> · anterior.</li>
+        <li><kbd>enter</kbd> · cyclea foco en S1 (Name → Description) y en S2 (Name → CLI → Kind → Content → Input). En el último campo "salta a la siguiente pantalla": en S1 enter sobre Description = ctrl+s; en S2 enter sobre Input = ctrl+s.</li>
+        <li><kbd>shift+enter</kbd> / <kbd>alt+enter</kbd> / <kbd>ctrl+j</kbd> · newline literal en multiline (description S1, prompt S2). Los 3 fallbacks porque distintos terminales mandan distinto.</li>
+        <li>Pills CLI / Input: <kbd>←</kbd> / <kbd>→</kbd> alternan. <kbd>1-4</kbd> jump directo en CLI.</li>
+        <li>Toggle Kind: <kbd>←</kbd> / <kbd>→</kbd> / <kbd>↑</kbd> / <kbd>↓</kbd> alternan prompt ↔ skill. <kbd>p</kbd> / <kbd>s</kbd> shortcuts. Para salir: <kbd>tab</kbd> / <kbd>shift+tab</kbd> / <kbd>enter</kbd>.</li>
+        <li>Skill picker (kind=skill con items): <kbd>↑</kbd> / <kbd>↓</kbd> navegan la lista; en el primer item <kbd>↑</kbd> sale a Kind; en el último <kbd>↓</kbd> sale a Input. La selección es la posición del cursor (no requiere "select" explícito).</li>
+        <li>Si el CLI elegido no tiene skills, la pill <code>[skill]</code> del toggle Kind no se renderiza y kind queda fijo en prompt — se snapéa automáticamente al cambiar de CLI.</li>
+        <li><kbd>esc</kbd> · S2 mode=create step 0 → S1 (descarta tipeo, status revierte a info). En cualquier otro foco con tipeo: SC modal sigue accesible vía <kbd>ctrl+c</kbd>.</li>
+        <li><kbd>ctrl+s</kbd> · siempre guarda step + cierra (S3 placeholder).</li>
       </ul>
 
       <h4>Smoke manual</h4>
       <ol>
-        <li>S1 + ctrl+s → llegar a S2.</li>
-        <li>Llenar step (claude / prompt / "hola" / text), <kbd>ctrl+s</kbd>.</li>
-        <li><code>cat &lt;file&gt;</code> → 1 step + <code>status.stage=step, step_idx=0</code>.</li>
-        <li>Repetir, en S2 esc → vuelve a S1; el archivo persiste pero <code>status.stage=info</code> de nuevo.</li>
-        <li>CLI desinstalado: pill aparece disabled.</li>
+        <li>S1 + <kbd>ctrl+s</kbd> (o <kbd>enter</kbd> sobre Description) → llegar a S2.</li>
+        <li>Llenar step (claude / prompt / "hola" / text), <kbd>ctrl+s</kbd> (o <kbd>enter</kbd> sobre Input).</li>
+        <li><code>cat &lt;file&gt;</code> → 1 step + <code>status.stage=step, step_mode=create</code> (step_idx=0 omitido por <code>omitempty</code>).</li>
+        <li>Repetir, en S2 <kbd>esc</kbd> → vuelve a S1; el archivo persiste pero <code>status.stage=info</code> de nuevo y sin steps.</li>
+        <li>CLI desinstalado: pill aparece marcada <em>·off</em>; intentar guardar emite hint inline "X no está instalado — corre <code>che doctor</code>".</li>
+        <li>CLI sin skills (ej: gemini fresh): toggle Kind muestra solo <code>[prompt]</code>; cambiar a un CLI con skills repinta <code>[skill]</code>.</li>
       </ol>
 
       <h4>Test e2e</h4>
       <ul>
-        <li>Tmp HOME, completar S1+S2, salir.</li>
-        <li>Asserts: archivo tiene <code>steps[0]</code> con todos los campos, <code>status.stage="step"</code>, <code>status.step_idx=0</code>, <code>status.step_mode="create"</code>.</li>
-        <li>Test atrás: en S2 esc → archivo refleja <code>status.stage="info"</code> y <code>steps</code> vacío o ausente.</li>
+        <li>Tmp HOME, completar S1+S2 con kind=prompt, <kbd>ctrl+s</kbd>. Asserts: archivo tiene <code>steps[0]</code> con todos los campos, <code>status.stage="step"</code>, <code>status.step_mode="create"</code>.</li>
+        <li>Test atrás: en S2 <kbd>esc</kbd> → archivo refleja <code>status.stage="info"</code> y <code>steps</code> ausente.</li>
+        <li>Tests vivos: <code>TestWizard_S2H3CreateFirstStep</code>, <code>TestWizard_S2H3BackToInfo</code> en <code>e2e/wizard_test.go</code>.</li>
       </ul>
 
       <h4 class="oos-h">Out of scope</h4>
-      <p class="oos">Validator (H4), múltiples steps (H5), S3 (H6), <code>previous_output</code> (H5).</p>
+      <p class="oos">Validator (H4), múltiples steps (H5), S3 (H6), <code>previous_output</code> (H5), debounce async 800ms (TODO).</p>
     </div>
 
     <!-- H4 -->
@@ -1223,6 +1253,7 @@
         <span class="story-id">H4</span>
         <h3>S2 con validator opcional</h3>
         <span class="deps">deps: <span class="chip">H3</span></span>
+        <span class="chip ok">done</span>
       </div>
       <div class="as-a">
         <strong>Como</strong> usuario, <strong>quiero</strong> opcionalmente añadir un validator al step (CLI, kind, content, max_loops, on_max_loops), <strong>para</strong> que el output del step pase un cross-review en loop antes de avanzar.
@@ -1260,19 +1291,29 @@
         <span class="story-id">H5</span>
         <h3>S2 loop "+ agregar step" + atrás Q1 + previous_output</h3>
         <span class="deps">deps: <span class="chip">H4</span></span>
+        <span class="chip ok">done</span>
       </div>
       <div class="as-a">
         <strong>Como</strong> usuario, <strong>quiero</strong> agregar múltiples steps al pipeline encadenados con <code>previous_output</code>, <strong>para</strong> que la salida de uno alimente al siguiente.
       </div>
 
+      <h4>Notas de implementación</h4>
+      <ul>
+        <li>Tres entradas nuevas en <code>internal/wizard/step.go</code>: <code>enterStepEdit(idx)</code> (espejo de <code>enterStepCreate</code> que pre-carga desde <code>m.pipeline.Steps[idx]</code> incluyendo el bloque validator y el cursor del skill picker), <code>stepSaveAndAddAnother</code> (handler de <kbd>ctrl+n</kbd> en <code>mode=create</code>) y la rama nueva de <code>stepBack</code> para <code>mode=create idx≥1</code>.</li>
+        <li><code>ctrl+n</code> ya estaba reservado en <code>internal/wizard/textinput.go</code> desde H3 — no hubo que tocar el textInput.</li>
+        <li>Style nuevo <code>disabledItem</code> (<code>#44475A</code> + faint) en <code>styles.go</code>: distingue "pill no seleccionable" de <code>dimStyle</code> ("no seleccionada todavía").</li>
+        <li><strong>Mutex literal de previous_output:</strong> con el spec "ignora cambios" interpretado al pie de la letra — una vez elegido <code>previous_output</code>, las 6 base quedan disabled visual y funcionalmente; <kbd>tab</kbd> sigue moviendo foco. Trade-off: <code>previous_output</code> es default en step idx≥1, así que la mayoría de usuarios lo aceptan; cambiarlo después requiere editar el step desde S3 (H7).</li>
+        <li>El "step N+1 mode=create se descarta al ir atrás" se concreta en que solo <code>ctrl+n</code> y <code>ctrl+s</code> pushean a <code>pipeline.Steps</code>; <code>esc</code> reinicia <code>stepEdit</code> via <code>enterStepEdit(idx-1)</code> sin tocar la lista.</li>
+      </ul>
+
       <h4>Criterios de aceptación</h4>
       <ul>
         <li>"+ agregar step" (<kbd>ctrl+n</kbd>): valida step actual, push al modelo, abre S2 vacío para step N+1. <code>status.step_idx</code> avanza.</li>
-        <li>En step idx ≥ 1, el selector de input incluye <code>previous_output</code>; si se elige, los demás quedan disabled (mutex visual).</li>
+        <li>En step idx ≥ 1, el selector de input incluye <code>previous_output</code>; si se elige, los demás quedan disabled (mutex visual y funcional).</li>
         <li>Atrás (<kbd>esc</kbd>) en mode=create:
           <ul>
             <li>step 1 → S1 descartando lo tipeado en este step.</li>
-            <li>step 2+ → S2 prev en <code>mode=edit</code>.</li>
+            <li>step 2+ → S2 prev en <code>mode=edit</code> con campos pre-cargados.</li>
           </ul>
         </li>
         <li>"guardar y ver resumen" sigue cerrando el wizard (placeholder de S3).</li>
@@ -1281,19 +1322,20 @@
       <h4>Smoke manual</h4>
       <ol>
         <li>S1 + S2 step 1 con input=text, <kbd>ctrl+n</kbd>.</li>
-        <li>S2 step 2: ver <code>previous_output</code>, elegirlo, completar, <kbd>ctrl+s</kbd>.</li>
+        <li>S2 step 2: ver <code>previous_output</code> seleccionado por default, completar, <kbd>ctrl+s</kbd>.</li>
         <li><code>cat &lt;file&gt;</code> → 2 steps, <code>steps[1].input == "previous_output"</code>.</li>
-        <li>Repetir, en step 2 mode=create esc → debe estar en S2 step 1 mode=edit.</li>
+        <li>Repetir, en step 2 mode=create <kbd>esc</kbd> → debe estar en S2 step 1 mode=edit con campos pre-cargados.</li>
       </ol>
 
       <h4>Test e2e</h4>
       <ul>
         <li>Pipeline con 2 steps, segundo con <code>previous_output</code>: asserts sobre el YAML.</li>
-        <li>Test atrás: stdin que entra a step 2 mode=create, presiona esc, completa modificación en step 1 → archivo muestra el nuevo contenido del step 1.</li>
+        <li>Test atrás: stdin que entra a step 2 mode=create, presiona esc, completa modificación en step 1 → archivo muestra el nuevo contenido del step 1 y no contiene rastro del step 2 buffer.</li>
+        <li>Tests vivos: <code>TestWizard_S2H5LoopTwoSteps</code>, <code>TestWizard_S2H5BackFromStep2</code> en <code>e2e/wizard_test.go</code>.</li>
       </ul>
 
       <h4 class="oos-h">Out of scope</h4>
-      <p class="oos">S3 (H6), editar/borrar/reordenar (H7).</p>
+      <p class="oos">S3 (H6), editar/borrar/reordenar (H7), deselect explícito de previous_output (no especificado — la salida es <kbd>tab</kbd> + edición desde S3 cuando H7 entre).</p>
     </div>
 
     <!-- H6 -->

@@ -1,57 +1,72 @@
-// Package wizard renderiza el flujo "Create pipeline" del menu principal.
-// H1 es solo el skeleton: una pantalla placeholder para validar que el
-// routing desde el menu funciona. La logica real (S1 PipelineInfo, persist
-// a ~/.che/pipelines, etc.) llega en H2+.
 package wizard
 
 import (
-	"strings"
-
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
-type model struct {
-	exitApp bool
-}
-
+// Init es no-op: el wizard arranca renderizando con el modelo inicial.
 func (m model) Init() tea.Cmd { return nil }
 
+// Update dispatchea al handler de la screen actual. Las transiciones
+// entre screens se hacen en cada handler escribiendo m.screen.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
 	}
-	switch key.String() {
-	case "ctrl+c", "q":
-		m.exitApp = true
-		return m, tea.Quit
-	case "esc":
-		return m, tea.Quit
+
+	switch m.screen {
+	case ScreenInfo:
+		return m.updateInfo(key)
+	case ScreenStep:
+		return m.updateStep(key)
+	case ScreenCancel:
+		return m.updateCancel(key)
+	case ScreenCollision:
+		return m.updateCollision(key)
 	}
 	return m, nil
 }
 
-var (
-	titleStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00D7FF"))
-	pendingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB86C"))
-	hintStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4")).Italic(true)
-)
-
+// View dispatchea al renderer de la screen actual.
 func (m model) View() string {
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("Create pipeline") + "\n\n")
-	b.WriteString(pendingStyle.Render("wizard pendiente") + "\n")
-	b.WriteString("\n" + hintStyle.Render("esc back · q quit") + "\n")
-	return b.String()
+	switch m.screen {
+	case ScreenInfo:
+		return m.viewInfo()
+	case ScreenStep:
+		return m.viewStep()
+	case ScreenCancel:
+		return m.viewCancel()
+	case ScreenCollision:
+		return m.viewCollision()
+	}
+	return ""
 }
 
-// Run levanta el skeleton del wizard. Devuelve exitApp=true si el usuario
-// pidio salida total (q / ctrl+c); false si solo volvio "atras" (esc) y el
-// caller deberia re-mostrar el menu principal. El error solo aparece si
-// bubbletea no pudo arrancar (p.ej. stdout no es TTY).
+// newModel construye el modelo inicial con el HOME indicado. home=""
+// significa "usar $HOME real"; los tests inyectan tmp dir.
+func newModel(home string) model {
+	return model{
+		screen:    ScreenInfo,
+		focus:     FocusName,
+		nameInput: newSingleLine("ej: Triage checkout flow"),
+		descInput: newMultiLine("ej: toma una metrica anomala y dispara un triage"),
+		homeDir:   home,
+	}
+}
+
+// Run levanta el wizard. Devuelve exitApp=true si el usuario pidio salida
+// total (q / ctrl+c en placeholder, o "discard"/"keep" + ctrl+c en SC);
+// false si el flujo termino "volviendo al menu". El error solo aparece
+// si bubbletea no pudo arrancar (p.ej. stdout no es TTY).
 func Run() (bool, error) {
-	final, err := tea.NewProgram(model{}).Run()
+	return runWithHome("")
+}
+
+// runWithHome es el entrypoint testeable: permite forzar HomeDir desde
+// los tests sin tocar $HOME del proceso.
+func runWithHome(home string) (bool, error) {
+	final, err := tea.NewProgram(newModel(home)).Run()
 	if err != nil {
 		return false, err
 	}

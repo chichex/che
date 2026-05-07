@@ -8,8 +8,9 @@ import (
 	"github.com/chichex/che/e2e/harness"
 )
 
-// TestTUI_MenuRoutesItem2ToWizard valida H1: digit 2 abre el wizard
-// skeleton, esc vuelve al menu, q sale con exit 0.
+// TestTUI_MenuRoutesItem2ToWizard valida que digit 2 abra el wizard
+// (S1 PipelineInfo en H2+) y que el modal de cancel devuelva el control
+// al menu sin crashear.
 func TestTUI_MenuRoutesItem2ToWizard(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
@@ -28,19 +29,28 @@ func TestTUI_MenuRoutesItem2ToWizard(t *testing.T) {
 	if err := p.Send("2"); err != nil {
 		t.Fatalf("send 2: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "wizard pendiente", 3*time.Second) {
-		t.Fatalf("wizard skeleton never rendered\nout:\n%s", p.Snapshot())
+	// S1 muestra "paso 1/3" y los labels Nombre/Descripcion.
+	if !p.WaitForOutputSince(t, mark, "paso 1/3", 3*time.Second) {
+		t.Fatalf("S1 PipelineInfo never rendered\nsince mark:\n%s", p.Since(mark))
 	}
 
+	// esc abre el modal SC.
 	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
-	// Tras esc el wizard cierra y el loop de root.go re-muestra el menu.
-	// Si el menu no redibuja "Create pipeline" en este tramo, el routing
-	// "back" esta roto.
-	if !p.WaitForOutputSince(t, mark, "Create pipeline", 3*time.Second) {
-		t.Fatalf("menu never re-rendered after esc\nsince mark:\n%s", p.Since(mark))
+	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
+		t.Fatalf("cancel modal never opened\nsince mark:\n%s", p.Since(mark))
+	}
+
+	// "1" en el modal = keep & exit. Sin path (todavia no escribimos
+	// nombre), keep no toca disco; el wizard cierra y el menu se redibuja.
+	mark = p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered after cancel\nsince mark:\n%s", p.Since(mark))
 	}
 
 	if err := p.Send("q"); err != nil {
