@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>che — orquestador de pipelines IA</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --bg-alt: #f4f4f2;
+    --surface: #ffffff;
+    --ink: #18181b;
+    --ink-soft: #52525b;
+    --ink-mute: #71717a;
+    --line: #e4e4e7;
+    --line-strong: #d4d4d8;
+    --accent: #4338ca;
+    --accent-soft: #eef2ff;
+    --ok: #15803d;
+    --ok-soft: #ecfdf5;
+    --warn: #b45309;
+    --warn-soft: #fef3c7;
+    --fail: #b91c1c;
+    --fail-soft: #fef2f2;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 920px; margin: 0 auto; padding: 80px 32px 120px; }
+  section + section { margin-top: 80px; }
+  h1 {
+    font-size: 44px;
+    line-height: 1.15;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0 0 16px;
+  }
+  h2 {
+    font-size: 26px;
+    line-height: 1.25;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    margin: 0 0 16px;
+  }
+  h3 {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 0 0 6px;
+    letter-spacing: -0.005em;
+  }
+  p { margin: 0 0 14px; color: var(--ink-soft); }
+  p strong { color: var(--ink); font-weight: 600; }
+  .eyebrow {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 18px;
+  }
+  .lede { font-size: 19px; color: var(--ink-soft); max-width: 680px; }
+  .rule { height: 1px; background: var(--line); margin: 0; border: 0; }
+
+  /* Cards */
+  .grid { display: grid; gap: 16px; }
+  .grid.two { grid-template-columns: 1fr 1fr; }
+  .grid.three { grid-template-columns: repeat(3, 1fr); }
+  @media (max-width: 720px) { .grid.two, .grid.three { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 22px;
+  }
+  .card .num {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-mute);
+    margin-bottom: 10px;
+  }
+
+  /* Flow A → B */
+  .flow {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    background: var(--bg-alt);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px 20px;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    color: var(--ink);
+  }
+  .flow .node {
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    padding: 6px 12px;
+  }
+  .flow .arrow { color: var(--ink-mute); }
+  .flow .pipeline {
+    background: var(--accent-soft);
+    border: 1px solid #c7d2fe;
+    color: var(--accent);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-weight: 600;
+  }
+
+  /* Loop list */
+  ol.loop {
+    counter-reset: step;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    border-left: 2px solid var(--line-strong);
+  }
+  ol.loop li {
+    counter-increment: step;
+    padding: 8px 0 8px 20px;
+    margin-left: 6px;
+    position: relative;
+    color: var(--ink-soft);
+    font-size: 15px;
+  }
+  ol.loop li::before {
+    content: counter(step);
+    position: absolute;
+    left: -13px;
+    top: 10px;
+    width: 22px;
+    height: 22px;
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: 50%;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-mute);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  ol.loop li.actor-user::before { background: var(--ink); color: white; border-color: var(--ink); }
+  ol.loop li.actor-loop { color: var(--accent); }
+  ol.loop li .who {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-right: 8px;
+  }
+
+  /* Annotated flag */
+  .flag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    background: var(--warn-soft);
+    color: var(--warn);
+    border: 1px solid #fde68a;
+    border-radius: 4px;
+    padding: 1px 7px;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+  .flag.good { background: var(--ok-soft); color: var(--ok); border-color: #bbf7d0; }
+
+  /* Mockup chrome */
+  .mockup {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 1px 0 rgba(0,0,0,0.02), 0 12px 32px -16px rgba(0,0,0,0.08);
+  }
+  .mockup .topbar {
+    background: var(--bg-alt);
+    border-bottom: 1px solid var(--line);
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-mute);
+  }
+  .mockup .topbar .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--line-strong);
+  }
+  .mockup .topbar .path { margin-left: 6px; color: var(--ink); }
+  .mockup .body { padding: 22px; }
+  .mockup-caption {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-mute);
+    margin: 10px 4px 0;
+  }
+
+  /* Mockup A — pipelines list */
+  .pipeline-list {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  @media (max-width: 720px) { .pipeline-list { grid-template-columns: 1fr; } }
+  .pipeline-card {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 16px;
+    background: var(--surface);
+  }
+  .pipeline-card .label {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    background: var(--bg-alt);
+    color: var(--ink-mute);
+    border: 1px solid var(--line);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom: 10px;
+  }
+  .pipeline-card .label.mine { background: var(--accent-soft); color: var(--accent); border-color: #c7d2fe; }
+  .pipeline-card h4 { margin: 0 0 6px; font-size: 15.5px; font-weight: 600; }
+  .pipeline-card .meta {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-mute);
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--line);
+  }
+  .pipeline-card .meta span + span::before { content: " · "; color: var(--line-strong); }
+
+  /* Mockup B — pipeline editor */
+  .editor {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 0;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    min-height: 360px;
+  }
+  @media (max-width: 720px) { .editor { grid-template-columns: 1fr; } }
+  .editor .steps-rail {
+    background: var(--bg-alt);
+    border-right: 1px solid var(--line);
+    padding: 14px 12px;
+  }
+  .editor .steps-rail .rail-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 10px;
+  }
+  .step-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+    border-radius: 6px;
+    margin-bottom: 4px;
+    color: var(--ink);
+    cursor: default;
+  }
+  .step-pill .idx {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--ink-mute);
+    width: 16px;
+  }
+  .step-pill.active { background: var(--surface); border: 1px solid var(--line-strong); }
+  .step-pill.add { color: var(--ink-mute); font-style: italic; }
+
+  .editor .step-body {
+    padding: 22px 26px;
+  }
+  .field {
+    display: grid;
+    grid-template-columns: 110px 1fr;
+    gap: 14px;
+    align-items: start;
+    padding: 10px 0;
+    border-bottom: 1px dashed var(--line);
+  }
+  .field:last-child { border-bottom: 0; }
+  .field .lbl {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding-top: 4px;
+  }
+  .field .val { font-size: 14.5px; color: var(--ink); }
+  .chip {
+    display: inline-block;
+    background: var(--bg-alt);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 3px 9px;
+    font-family: var(--mono);
+    font-size: 12px;
+    margin: 2px 4px 2px 0;
+    color: var(--ink);
+  }
+  .chip.accent { background: var(--accent-soft); color: var(--accent); border-color: #c7d2fe; }
+
+  /* Mockup C — run timeline */
+  .run-header {
+    background: var(--bg-alt);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+    font-size: 14px;
+  }
+  .run-header .premise {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 10px;
+    margin-top: 8px;
+  }
+  .run-header .premise::before { content: "premisa: "; color: var(--ink-mute); }
+
+  .timeline {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .tl-step {
+    display: grid;
+    grid-template-columns: 32px 1fr auto;
+    gap: 14px;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
+    align-items: center;
+  }
+  .tl-step:last-child { border-bottom: 0; }
+  .tl-step .marker {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    border: 2px solid var(--line-strong);
+    background: var(--surface);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-mute);
+  }
+  .tl-step.done .marker { background: var(--ok); border-color: var(--ok); color: white; }
+  .tl-step.running .marker { background: var(--accent); border-color: var(--accent); color: white; }
+  .tl-step.pending .marker { background: var(--surface); }
+  .tl-step .info h5 { margin: 0; font-size: 14.5px; font-weight: 600; }
+  .tl-step .info .sub {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-mute);
+    margin-top: 2px;
+  }
+  .tl-step .status {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .tl-step.done .status { color: var(--ok); }
+  .tl-step.running .status { color: var(--accent); }
+
+  /* Cross-review block */
+  .cross {
+    margin-top: 18px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .cross .cross-head {
+    background: var(--bg-alt);
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .cross-row {
+    display: grid;
+    grid-template-columns: 110px 1fr 90px;
+    gap: 14px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+    font-size: 13.5px;
+    align-items: start;
+  }
+  .cross-row:last-child { border-bottom: 0; }
+  .cross-row .who {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink);
+  }
+  .cross-row .verdict {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    text-align: right;
+  }
+  .cross-row .verdict.pass { color: var(--ok); }
+  .cross-row .verdict.fail { color: var(--fail); }
+  .cross-row .verdict.note { color: var(--warn); }
+  .cross-row .said { color: var(--ink-soft); }
+
+  /* Decision footer */
+  .decision {
+    margin-top: 14px;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-size: 13.5px;
+    font-family: var(--mono);
+  }
+  .decision strong { color: var(--accent); font-weight: 600; }
+
+  footer {
+    margin-top: 100px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    color: var(--ink-mute);
+    font-size: 13px;
+    font-family: var(--mono);
+  }
+</style>
+</head>
+<body>
+<main>
+
+  <section>
+    <div class="eyebrow">che / visión</div>
+    <h1>Un orquestador de pipelines de IA, definidos por vos.</h1>
+    <p class="lede">
+      Hoy convivís con varias IAs y cada feature, cada bug, cada review, te exige
+      pasarlas a mano por un mismo loop mecánico: promptear, aceptar, copiar comments,
+      pedir otra opinión, accionar, repetir. che convierte ese loop en un pipeline
+      versionado, parametrizable y autovalidado.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <section>
+    <div class="eyebrow">el problema</div>
+    <h2>El loop mecánico que ya estás haciendo</h2>
+    <p>
+      Cuando trabajás con IA todos los días, el mismo patrón se repite con casi todas
+      las tareas. No porque sea complicado, sino porque tenés que pegarlo a mano:
+    </p>
+    <ol class="loop">
+      <li class="actor-user"><span class="who">user</span>"quiero el feature X"</li>
+      <li><span class="who">IA-A</span>propone una implementación</li>
+      <li class="actor-user"><span class="who">user</span>acepta</li>
+      <li><span class="who">IA-A</span>genera el PR</li>
+      <li class="actor-user"><span class="who">user</span>"revisame el PR"</li>
+      <li><span class="who">IA-A</span>se autorevisa, deja comments</li>
+      <li class="actor-user"><span class="who">user</span>"que lo revise IA-B también"</li>
+      <li><span class="who">IA-B</span>deja sus comments</li>
+      <li class="actor-user"><span class="who">user</span>"accionalos todos" <span class="flag">repetir hasta que se vea decente</span></li>
+      <li class="actor-user"><span class="who">user</span>cierra el PR y recién ahí prueba</li>
+    </ol>
+    <p style="margin-top: 22px;">
+      El humano termina siendo el cable que conecta IAs entre sí. La pregunta no es si
+      la IA puede hacer el paso — es por qué seguís siendo vos el que aprieta "next".
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <section>
+    <div class="eyebrow">el modelo</div>
+    <h2>Premisa A → Pipeline → Entregable B</h2>
+    <p>
+      Un pipeline en che es un camino reproducible que va de algo poco definido
+      (una idea suelta, un bug vago, una pregunta) a un entregable concreto que
+      ya pasó por validación cruzada antes de llegarte.
+    </p>
+
+    <div class="flow">
+      <span class="node">premisa A</span>
+      <span class="arrow">→</span>
+      <span class="pipeline">pipeline (steps + IAs + tools + gates)</span>
+      <span class="arrow">→</span>
+      <span class="node">entregable B</span>
+    </div>
+
+    <div class="grid two" style="margin-top: 24px;">
+      <div class="card">
+        <h3>Cada step elige sus piezas</h3>
+        <p>
+          IA, tool, prompt y gate de validación se definen por step. che no
+          impone stack: orquesta lo que vos ya usás (Claude, Codex, gh, MCPs,
+          scripts propios).
+        </p>
+      </div>
+      <div class="card">
+        <h3>La validación es interna</h3>
+        <p>
+          Antes de llegarte el entregable, otro modelo ya lo cuestionó. Si dos
+          IAs no convergen, el pipeline para y te muestra dónde, no te entrega
+          un draft con la confianza de un junior.
+        </p>
+      </div>
+      <div class="card">
+        <h3>El humano decide, no clickea</h3>
+        <p>
+          Aceptar la propuesta inicial, elegir qué pipeline correr, probar el
+          resultado en un browser real. Lo mecánico se va; las decisiones de
+          juicio se quedan.
+        </p>
+      </div>
+      <div class="card">
+        <h3>Honestidad sobre el output</h3>
+        <p>
+          El entregable puede tener errores. Lo que cambia es que ahora es
+          algo concreto y autovalidado para probar, no un primer draft suelto
+          que tenías que refinar a mano.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <section>
+    <div class="eyebrow">el diferenciador</div>
+    <h2>Los pipelines son tuyos</h2>
+    <p>
+      che trae algunos pipelines de ejemplo (idea-a-PR, troubleshooting genérico,
+      review-loop), pero esos son ilustraciones. La pieza fuerte es que cada equipo
+      modela los suyos: con los steps de su realidad, con las IAs y tools que ya tiene,
+      con los gates que tienen sentido en su dominio.
+    </p>
+    <p>
+      El flujo de "approval rate bajó 10%" no se parece a "agregar feature X" — y
+      ninguno de los dos se parece al de "investigar regression de latencia". che
+      es la plataforma; los pipelines son del usuario.
+    </p>
+
+    <div class="grid three" style="margin-top: 24px;">
+      <div class="card">
+        <div class="num">ejemplo · que trae che</div>
+        <h3>Idea → PR validado</h3>
+        <p>
+          Desarrollador en un repo, idea suelta. Pipeline dispara: planificación,
+          implementación, autoreview cruzada IA-vs-IA, iteración hasta convergencia,
+          PR final. El humano acepta la propuesta y prueba el resultado.
+        </p>
+      </div>
+      <div class="card">
+        <div class="num">ejemplo · que trae che</div>
+        <h3>Bug vago → reporte de causa</h3>
+        <p>
+          "El approval rate bajó 10%". Pipeline corre: recopila logs, métricas,
+          deploys recientes; cruza hipótesis con dos modelos; consolida un
+          reporte con la causa probable y evidencia. No te ahorra el fix; te
+          ahorra las primeras 4 horas de búsqueda.
+        </p>
+      </div>
+      <div class="card">
+        <div class="num">ejemplo · propio</div>
+        <h3>Tu pipeline</h3>
+        <p>
+          "Triage de incident en producto X". "Generación de release notes desde
+          Linear". "Análisis pre-feature de impacto en módulos legacy". Lo que
+          tu equipo repite hoy a mano con IAs sueltas, vive como pipeline
+          versionado en che.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <section>
+    <div class="eyebrow">resumen</div>
+    <h2>En una línea</h2>
+    <p style="font-size: 19px; color: var(--ink); max-width: 680px;">
+      che es donde tu equipo define los pipelines de IA que ya están corriendo
+      a mano todos los días — para que el humano vuelva a aparecer solo cuando
+      hay una decisión real que tomar.
+    </p>
+  </section>
+
+  <footer>
+    che / parametrizable revamp · documento de visión · 2026-05-06
+  </footer>
+
+</main>
+</body>
+</html>
