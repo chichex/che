@@ -19,17 +19,34 @@ var rootCmd = &cobra.Command{
 		// SilenceUsage: el menu no es un error de invocacion. Si algo sale
 		// mal, devolvemos el error directo sin imprimir el help completo.
 		cmd.SilenceUsage = true
-		action, err := tui.Run()
-		if err != nil {
-			return err
-		}
-		switch action {
-		case tui.ActionExit:
-			return nil
-		default:
-			fmt.Fprintln(cmd.ErrOrStderr(), "not implemented")
-			os.Exit(1)
-			return nil
+		// Loop: las pantallas que devuelven el control "hacia atras" (p.ej.
+		// esc desde el listado de skills) re-entran al menu principal. Las
+		// que piden exit total (q/ctrl+c) cortan el loop.
+		for {
+			action, err := tui.Run()
+			if err != nil {
+				return err
+			}
+			switch action {
+			case tui.ActionExit:
+				return nil
+			case tui.ActionSeeSkills:
+				cwd, err := os.Getwd()
+				if err != nil {
+					return err
+				}
+				exit, err := tui.RunSkills(cwd)
+				if err != nil {
+					return err
+				}
+				if exit {
+					return nil
+				}
+			default:
+				fmt.Fprintln(cmd.ErrOrStderr(), "not implemented")
+				os.Exit(1)
+				return nil
+			}
 		}
 	},
 }
