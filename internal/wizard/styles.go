@@ -21,13 +21,7 @@ var (
 	// con el pink de "en foco".
 	selectedOff = lipgloss.NewStyle().Foreground(lipgloss.Color("#BD93F9")).Bold(true)
 	mutedItem   = lipgloss.NewStyle().Foreground(lipgloss.Color("#F8F8F2"))
-	// disabledItem es la pill "no seleccionable" — distinta de dimStyle
-	// (que se usa para "no seleccionada todavia, pero clickable"). La
-	// usamos en el mutex de previous_output (B1): cuando previous_output
-	// esta activo, las 6 base se renderizan asi para comunicar "estas
-	// opciones no aplican mientras previous_output este elegido".
-	disabledItem = lipgloss.NewStyle().Foreground(lipgloss.Color("#44475A")).Faint(true)
-	modalBorder  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#BD93F9")).Padding(1, 2)
+	modalBorder = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#BD93F9")).Padding(1, 2)
 
 	// Cajas de input: borde redondo siempre, color fuerte cuando tiene
 	// foco. Asi se ve "esto es un input vacio" vs "esto es texto".

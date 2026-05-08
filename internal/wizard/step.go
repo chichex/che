@@ -228,12 +228,12 @@ func (m model) updateStep(key tea.KeyMsg) (model, tea.Cmd) {
 		m.stepEdit.focus = m.stepPrevFocus()
 		return m, nil
 	case "enter":
-		// enter en el ultimo campo activo avanza al "siguiente paso" —
-		// hoy es S3 placeholder = guardar+cerrar. En los campos previos
-		// solo cyclea foco. La eleccion del skill picker se mantiene
-		// por la posicion del cursor (no requiere "select" explicito).
+		// enter en el ultimo campo activo abre el modal "step listo —
+		// agregar otro / finalizar / volver" para que la decision sea
+		// explicita (sin esto el enter cerraba el wizard de pecho).
+		// ctrl+s y ctrl+n siguen siendo atajos directos sin modal.
 		if m.stepIsLastFocus() {
-			return m.stepSaveAndFinish()
+			return m.openSaveChoice()
 		}
 		m.stepEdit.focus = m.stepNextFocus()
 		return m, nil
@@ -307,21 +307,34 @@ func (m model) stepHandleCLIKey(key tea.KeyMsg) (model, tea.Cmd) {
 // cursor del picker y, si el kind era skill pero el CLI nuevo no tiene
 // skills, revierte a prompt para no dejar la pantalla en un estado donde
 // la toggle muestre algo que ya no se puede elegir.
+//
+// Tambien sincroniza valCLI con el step CLI mientras el validator siga
+// off — coherente con "default conservador = mismo CLI" (B2 del flow
+// doc). Una vez que el usuario prende el toggle, valCLI deja de seguir
+// al step CLI para no pisar elecciones explicitas posteriores.
 func (m *model) afterCLIChange() {
 	m.stepEdit.skillCursor = 0
 	m.stepEdit.errMsg = ""
 	if m.stepEdit.kind == KindSkill && !m.cliHasSkills(m.stepEdit.cli) {
 		m.stepEdit.kind = KindPrompt
 	}
+	if !m.stepEdit.validatorOn {
+		m.stepEdit.valCLI = m.stepEdit.cli
+		if m.stepEdit.valKind == KindSkill && !m.cliHasSkills(m.stepEdit.valCLI) {
+			m.stepEdit.valKind = KindPrompt
+		}
+	}
 }
 
 func (m model) stepHandleKindKey(key tea.KeyMsg) (model, tea.Cmd) {
 	hasSkills := m.cliHasSkills(m.stepEdit.cli)
 	switch key.String() {
-	case "left", "right", "h", "l", " ", "up", "down", "k", "j":
-		// Si el CLI no tiene skills, la toggle queda fija en prompt y
-		// la tecla es no-op — coherente con que la pill "skill" ni
-		// siquiera se renderiza.
+	case "left", "right", "h", "l", " ":
+		// Toggle horizontal: solo ←/→/h/l/space alternan. ↑/↓ se reservan
+		// al ciclo de foco vertical (updateStep) para no chocar con la
+		// expectativa "↑ me lleva al campo de arriba". Si el CLI no tiene
+		// skills, la toggle queda fija en prompt y la tecla es no-op —
+		// coherente con que la pill "skill" ni siquiera se renderiza.
 		if !hasSkills {
 			return m, nil
 		}
@@ -391,17 +404,14 @@ func (m model) stepHandleContentKey(key tea.KeyMsg) (model, tea.Cmd) {
 }
 
 // stepHandleInputKey cyclea entre las opciones del enum input dependiente
-// de la posicion del step (B1). Mutex previous_output: si el input actual
-// es previous_output (solo posible para idx >= 1), las teclas se ignoran —
-// las 6 base se rinden disabled y no son seleccionables. Para "salir" del
-// mutex el flow doc deja al usuario tab-out del campo (no hay deselect
-// dedicado en H5).
+// de la posicion del step (B1). El "mutex visual" (B1) se mantiene como
+// senal — las 6 base se renderizan dim cuando previous_output esta activo
+// para comunicar que esa es la eleccion dominante para steps encadenados —
+// pero todas las opciones siguen siendo seleccionables. La interpretacion
+// literal "ignora cambios" del spec encerraba al usuario en previous_output
+// sin un atajo de salida (la unica via era editar el step desde S3, que
+// todavia no existe).
 func (m model) stepHandleInputKey(key tea.KeyMsg) (model, tea.Cmd) {
-	if m.stepEdit.input == InputPreviousOutput {
-		// las 6 base estan disabled; cualquier left/right/digit es no-op
-		// para no permitir un cambio "fantasma".
-		return m, nil
-	}
 	options := inputsForStepIdx(m.stepEdit.idx)
 	switch key.String() {
 	case "left", "h":
@@ -431,7 +441,8 @@ func (m model) stepHandleInputKey(key tea.KeyMsg) (model, tea.Cmd) {
 // que el toggle es el "ancla" del bloque.
 func (m model) stepHandleValToggleKey(key tea.KeyMsg) (model, tea.Cmd) {
 	switch key.String() {
-	case "left", "right", "h", "l", " ", "up", "down", "k", "j":
+	case "left", "right", "h", "l", " ":
+		// Toggle horizontal: ↑/↓ se reservan a foco vertical.
 		m.stepEdit.validatorOn = !m.stepEdit.validatorOn
 		m.stepEdit.errMsg = ""
 		// si encendimos por primera vez y el CLI default fue cambiando
@@ -482,7 +493,8 @@ func (m *model) afterValCLIChange() {
 func (m model) stepHandleValKindKey(key tea.KeyMsg) (model, tea.Cmd) {
 	hasSkills := m.cliHasSkills(m.stepEdit.valCLI)
 	switch key.String() {
-	case "left", "right", "h", "l", " ", "up", "down", "k", "j":
+	case "left", "right", "h", "l", " ":
+		// Toggle horizontal: ↑/↓ se reservan a foco vertical.
 		if !hasSkills {
 			return m, nil
 		}
@@ -867,18 +879,16 @@ func (m *model) stepInValPicker() bool {
 // stepRowOwnsVerticalKey reporta si la fila bajo el foco actual quiere
 // quedarse las teclas up/down. updateStep usa esto para decidir si
 // up/down se traduce a "mover foco" o se delega al handler de la fila.
+//
+// Solo las filas con semantica vertical NATIVA (skill picker = lista
+// scrolleable) consumen up/down. Los toggles horizontales (Kind / Validator
+// si-no / ValKind) ya NO consumen up/down — la expectativa del usuario es
+// que ↑ lo lleve al campo previo, no que alterne dentro de la fila.
+// Para alternar el toggle quedan ←/→/space/(p/s/y/n shortcuts).
 func (m *model) stepRowOwnsVerticalKey() bool {
 	switch m.stepEdit.focus {
-	case StepFocusKind:
-		// el toggle Kind del step alterna prompt/skill
-		return true
 	case StepFocusContent:
 		return m.stepInPicker()
-	case StepFocusValToggle:
-		// el toggle del validator alterna sí/no
-		return true
-	case StepFocusValKind:
-		return true
 	case StepFocusValContent:
 		return m.stepInValPicker()
 	}
@@ -1001,8 +1011,18 @@ func neighborInt(options []int, current, delta int) int {
 // viewStep renderiza S2.
 func (m model) viewStep() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render(fmt.Sprintf("Create pipeline · paso 2/3 · step %d (%s)", m.stepEdit.idx+1, m.stepEdit.mode)))
-	b.WriteString("\n\n")
+	title := fmt.Sprintf("Create pipeline · paso 2/3 · step %d (%s)", m.stepEdit.idx+1, m.stepEdit.mode)
+	b.WriteString(titleStyle.Render(title))
+	b.WriteString("\n")
+	if name := m.pipeline.Name; name != "" {
+		// Linea de contexto: "Pipeline: <name>" dimmed para que el usuario
+		// no se olvide de cual pipeline esta editando si tiene varios drafts.
+		b.WriteString(dimStyle.Render("Pipeline: " + name))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(renderStepBreadcrumb(m))
+	b.WriteString("\n")
 
 	// nombre
 	b.WriteString(renderLabeledField("Nombre del step", m.stepEdit.nameInput, m.stepEdit.focus == StepFocusName))
@@ -1024,7 +1044,7 @@ func (m model) viewStep() string {
 	b.WriteString(labelStyle.Render("Kind"))
 	if m.stepEdit.focus == StepFocusKind {
 		if hasSkills {
-			b.WriteString(dimStyle.Render("  ← foco · ←/→/↑/↓ alternar · p/s atajo · tab para salir"))
+			b.WriteString(dimStyle.Render("  ← foco · ←/→ alternar · p/s atajo · tab/↑/↓ para salir"))
 		} else {
 			b.WriteString(dimStyle.Render("  ← foco · " + m.stepEdit.cli + " no tiene skills"))
 		}
@@ -1040,7 +1060,7 @@ func (m model) viewStep() string {
 	// input enum
 	b.WriteString(labelStyle.Render("Input"))
 	if m.stepEdit.focus == StepFocusInput {
-		b.WriteString(dimStyle.Render("  ← foco · ←/→ cambiar"))
+		b.WriteString(dimStyle.Render("  ← foco · ←/→ cambiar · 1-7 jump"))
 	}
 	b.WriteString("\n")
 	b.WriteString(renderInputPills(m))
@@ -1049,7 +1069,7 @@ func (m model) viewStep() string {
 	// validator toggle (siempre visible) + bloque (B2: solo si on).
 	b.WriteString(labelStyle.Render("¿Validar este step?"))
 	if m.stepEdit.focus == StepFocusValToggle {
-		b.WriteString(dimStyle.Render("  ← foco · ←/→/↑/↓/space alternar · y/n atajo"))
+		b.WriteString(dimStyle.Render("  ← foco · ←/→/space alternar · y/n atajo"))
 	}
 	b.WriteString("\n")
 	b.WriteString(renderValToggle(m.stepEdit.validatorOn, m.stepEdit.focus == StepFocusValToggle))
@@ -1077,9 +1097,80 @@ func (m model) viewStep() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(hintStyle.Render("enter/tab/↓ siguiente · shift+tab/↑ anterior · ctrl+s guardar step · esc volver"))
+	// Hint del bottom: ctrl+n aparece solo en mode=create (mode=edit no
+	// expone "+ agregar step"; eso lo hace el "+" desde S3 en H7).
+	if m.stepEdit.mode == "create" {
+		b.WriteString(hintStyle.Render("enter/tab/↓ siguiente · shift+tab/↑ anterior · ctrl+s guardar step · ctrl+n agregar otro step · esc volver"))
+	} else {
+		b.WriteString(hintStyle.Render("enter/tab/↓ siguiente · shift+tab/↑ anterior · ctrl+s guardar step · esc volver"))
+	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+// renderStepBreadcrumb dibuja una lista vertical de los steps del
+// pipeline con el step actual resaltado. Sin esto el usuario que hizo
+// ctrl+n no tiene contexto de "que step es este, cuales son los previos".
+//
+// Por step se rinde: numero + nombre + resumen "<cli> · <kind|skill:N> ·
+// <input>" + chip "+ val:<cli>" si tiene validator. El nombre de skill
+// y la presencia del validator son senales claves para entender el
+// pipeline de un vistazo (cross-review vs self-review, que skill corre
+// cada step).
+//
+// El step actual:
+//   - mode=create + idx == len(Steps): rinde "(creando)" al final
+//     (todavia no esta en pipeline.Steps).
+//   - mode=edit:                       rinde el step de Steps[idx] con
+//     marcador "▸ N. <name>  (editando)".
+func renderStepBreadcrumb(m model) string {
+	var b strings.Builder
+	b.WriteString(labelStyle.Render("Steps:"))
+	b.WriteString("\n")
+
+	curIdx := m.stepEdit.idx
+	creating := m.stepEdit.mode == "create"
+
+	for i, s := range m.pipeline.Steps {
+		marker := "  "
+		isCurrent := i == curIdx && !creating
+		if isCurrent {
+			marker = selectedItem.Render("▸ ")
+		}
+
+		summary := stepSummary(s)
+		var row string
+		if isCurrent {
+			row = selectedItem.Render(fmt.Sprintf("%d. %-22s", i+1, s.Name)) + "   " + dimStyle.Render(summary) + "  " + dimStyle.Italic(true).Render("(editando)")
+		} else {
+			row = fmt.Sprintf("%d. %-22s   %s", i+1, s.Name, dimStyle.Render(summary))
+		}
+		b.WriteString(marker + row + "\n")
+	}
+	if creating {
+		marker := selectedItem.Render("▸ ")
+		row := selectedItem.Render(fmt.Sprintf("%d. (creando)", curIdx+1))
+		b.WriteString(marker + row + "\n")
+	}
+	return b.String()
+}
+
+// stepSummary devuelve la linea compacta "<cli> · <kind|skill:N> · <input>
+// [+ val:<cli>]" para un Step persistido. Se usa en el breadcrumb para que
+// el usuario vea de un vistazo: que CLI corre el step, si es prompt o
+// skill (con el nombre cuando es skill), que input consume y si tiene
+// validator (con el CLI del validator, util para distinguir cross-review
+// de self-review).
+func stepSummary(s Step) string {
+	kindPart := s.Kind
+	if s.Kind == KindSkill && s.Content != "" {
+		kindPart = "skill:" + s.Content
+	}
+	out := s.CLI + " · " + kindPart + " · " + s.Input
+	if s.Validator != nil {
+		out += "  + val:" + s.Validator.CLI
+	}
+	return out
 }
 
 func renderCLIPills(m model, focused bool) string {
@@ -1172,12 +1263,6 @@ func renderContent(m model) string {
 func renderInputPills(m model) string {
 	options := inputsForStepIdx(m.stepEdit.idx)
 	focused := m.stepEdit.focus == StepFocusInput
-	// Mutex visual (B1): cuando previous_output esta activo, las 6 base
-	// quedan disabled — usamos disabledItem en vez de dimStyle para
-	// distinguir "no seleccionada por ahora" de "no seleccionable mientras
-	// previous_output mande". Solo aplica a step idx >= 1; en step 0
-	// previous_output ni siquiera aparece en options.
-	mutex := m.stepEdit.input == InputPreviousOutput
 	var parts []string
 	for _, o := range options {
 		switch {
@@ -1185,8 +1270,6 @@ func renderInputPills(m model) string {
 			parts = append(parts, selectedItem.Render("["+o+"]"))
 		case o == m.stepEdit.input:
 			parts = append(parts, selectedOff.Render("["+o+"]"))
-		case mutex:
-			parts = append(parts, disabledItem.Render(" "+o+" "))
 		default:
 			parts = append(parts, dimStyle.Render(" "+o+" "))
 		}
@@ -1234,7 +1317,7 @@ func renderValidatorBlock(m model) string {
 	b.WriteString(labelStyle.Render("Kind"))
 	if m.stepEdit.focus == StepFocusValKind {
 		if hasSkills {
-			b.WriteString(dimStyle.Render("  ← foco · ←/→/↑/↓ alternar · p/s atajo"))
+			b.WriteString(dimStyle.Render("  ← foco · ←/→ alternar · p/s atajo"))
 		} else {
 			b.WriteString(dimStyle.Render("  ← foco · " + m.stepEdit.valCLI + " no tiene skills"))
 		}

@@ -1301,15 +1301,14 @@
       <ul>
         <li>Tres entradas nuevas en <code>internal/wizard/step.go</code>: <code>enterStepEdit(idx)</code> (espejo de <code>enterStepCreate</code> que pre-carga desde <code>m.pipeline.Steps[idx]</code> incluyendo el bloque validator y el cursor del skill picker), <code>stepSaveAndAddAnother</code> (handler de <kbd>ctrl+n</kbd> en <code>mode=create</code>) y la rama nueva de <code>stepBack</code> para <code>mode=create idx≥1</code>.</li>
         <li><code>ctrl+n</code> ya estaba reservado en <code>internal/wizard/textinput.go</code> desde H3 — no hubo que tocar el textInput.</li>
-        <li>Style nuevo <code>disabledItem</code> (<code>#44475A</code> + faint) en <code>styles.go</code>: distingue "pill no seleccionable" de <code>dimStyle</code> ("no seleccionada todavía").</li>
-        <li><strong>Mutex literal de previous_output:</strong> con el spec "ignora cambios" interpretado al pie de la letra — una vez elegido <code>previous_output</code>, las 6 base quedan disabled visual y funcionalmente; <kbd>tab</kbd> sigue moviendo foco. Trade-off: <code>previous_output</code> es default en step idx≥1, así que la mayoría de usuarios lo aceptan; cambiarlo después requiere editar el step desde S3 (H7).</li>
         <li>El "step N+1 mode=create se descarta al ir atrás" se concreta en que solo <code>ctrl+n</code> y <code>ctrl+s</code> pushean a <code>pipeline.Steps</code>; <code>esc</code> reinicia <code>stepEdit</code> via <code>enterStepEdit(idx-1)</code> sin tocar la lista.</li>
+        <li><strong>Mutex de previous_output (relajado vs spec):</strong> el spec decía "ignora cambios" sobre las 6 base cuando previous_output esta activo, pero la interpretacion literal encerraba al usuario sin atajo de salida. Las 6 base son <strong>seleccionables</strong> via ←/→/digit; previous_output queda como default conservador en step idx≥1. La "señal visual" del spec se cumple por la pill resaltada — no hay dimming extra.</li>
       </ul>
 
       <h4>Criterios de aceptación</h4>
       <ul>
         <li>"+ agregar step" (<kbd>ctrl+n</kbd>): valida step actual, push al modelo, abre S2 vacío para step N+1. <code>status.step_idx</code> avanza.</li>
-        <li>En step idx ≥ 1, el selector de input incluye <code>previous_output</code>; si se elige, los demás quedan disabled (mutex visual y funcional).</li>
+        <li>En step idx ≥ 1, el selector de input incluye <code>previous_output</code> como default. Las 6 base siguen seleccionables (ver desviación arriba).</li>
         <li>Atrás (<kbd>esc</kbd>) en mode=create:
           <ul>
             <li>step 1 → S1 descartando lo tipeado en este step.</li>
@@ -1331,11 +1330,38 @@
       <ul>
         <li>Pipeline con 2 steps, segundo con <code>previous_output</code>: asserts sobre el YAML.</li>
         <li>Test atrás: stdin que entra a step 2 mode=create, presiona esc, completa modificación en step 1 → archivo muestra el nuevo contenido del step 1 y no contiene rastro del step 2 buffer.</li>
-        <li>Tests vivos: <code>TestWizard_S2H5LoopTwoSteps</code>, <code>TestWizard_S2H5BackFromStep2</code> en <code>e2e/wizard_test.go</code>.</li>
+        <li>Test combinatorio (<code>TestWizard_S2YAMLCombinations</code>): pipeline de 3 steps que ejercita prompt+skill, validator off+on, cross-CLI vs self-CLI, max_loops y on_max_loops no-default. Pre-seedea una <code>SKILL.md</code> minima en <code>~/.claude/skills/</code>.</li>
+        <li>Tests vivos: <code>TestWizard_S2H5LoopTwoSteps</code>, <code>TestWizard_S2H5BackFromStep2</code>, <code>TestWizard_S2YAMLCombinations</code> en <code>e2e/wizard_test.go</code>.</li>
       </ul>
 
       <h4 class="oos-h">Out of scope</h4>
-      <p class="oos">S3 (H6), editar/borrar/reordenar (H7), deselect explícito de previous_output (no especificado — la salida es <kbd>tab</kbd> + edición desde S3 cuando H7 entre).</p>
+      <p class="oos">S3 (H6), editar/borrar/reordenar (H7).</p>
+    </div>
+
+    <!-- Polish post-H5 (no tiene story id propia: ajustes UX descubiertos al smokear) -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">P5</span>
+        <h3>Polish post-H5 — UX cuando empezas a smokear</h3>
+        <span class="deps">deps: <span class="chip">H5</span></span>
+        <span class="chip ok">done</span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario que recién prueba el wizard, <strong>quiero</strong> que la pantalla S2 me ubique en el contexto del pipeline y que enter no cierre las cosas de pecho, <strong>para</strong> no perder progreso por accidente y entender qué estoy haciendo.
+      </div>
+
+      <h4>Cambios shippeados</h4>
+      <ul>
+        <li><strong>Modal "Step listo"</strong> (<code>internal/wizard/step_save_choice.go</code>): enter sobre el último foco abre un modal con 3 opciones en mode=create (<em>agregar otro</em> / <em>finalizar</em> / <em>volver a editar</em>) o 2 en mode=edit (<em>finalizar</em> / <em>volver</em>). <kbd>ctrl+s</kbd> y <kbd>ctrl+n</kbd> siguen siendo atajos directos sin modal — son ordenes explicitas. Antes enter cerraba el wizard sin avisar.</li>
+        <li><strong>Breadcrumb de steps</strong> (<code>renderStepBreadcrumb</code>): bloque vertical bajo el título con la lista de los steps ya pusheados + el step actual marcado con <code>▸</code>. Por step se rinde <code>cli · kind|skill:&lt;name&gt; · input</code> + chip <code>+ val:&lt;cli&gt;</code> si tiene validator (con el CLI del validator para distinguir cross-review de self-review de un vistazo). El nombre del pipeline aparece debajo del título como <code>Pipeline: &lt;name&gt;</code>.</li>
+        <li><strong>↑/↓ ya no alternan toggles horizontales</strong>: las filas <code>Kind</code>, <code>¿Validar?</code> y <code>ValKind</code> dejaron de consumir ↑/↓ — ahora ↑/↓ mueven foco vertical como en cualquier otra fila. Solo ←/→/space (+ atajos p/s/y/n) alternan. <code>stepRowOwnsVerticalKey</code> ahora sólo retorna true para skill pickers (lista scrolleable real).</li>
+        <li><strong>valCLI sigue al step CLI mientras validator esté off</strong> (<code>afterCLIChange</code>): si el usuario cambia el CLI del step antes de prender el toggle, valCLI se actualiza para mantener el "default conservador = mismo CLI" del flow doc. Una vez que el toggle prende, valCLI se "congela" y el usuario manda. Bug detectado por <code>TestWizard_S2YAMLCombinations</code>.</li>
+        <li><strong>Hints actualizados</strong>: el bottom hint de S2 muestra <kbd>ctrl+n agregar otro step</kbd> en mode=create. La fila Input dice <code>← foco · ←/→ cambiar · 1-7 jump</code> sin la rama "previous_output fijo".</li>
+        <li><strong>ScreenSaveChoice + SaveChoice</strong> agregados a <code>model.go</code>; dispatch en <code>wizard.go</code>. Style <code>disabledItem</code> removido (ya no lo usa nadie tras relajar el mutex).</li>
+      </ul>
+
+      <h4>Out of scope</h4>
+      <p class="oos">Que el modal SaveChoice "finalizar" lleve a S3 — eso es H6. Hoy sigue cerrando el wizard como placeholder.</p>
     </div>
 
     <!-- H6 -->

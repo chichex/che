@@ -18,6 +18,7 @@ type Screen int
 const (
 	ScreenInfo        Screen = iota // S1: nombre + descripcion
 	ScreenStep                      // S2: editor de step (H3+)
+	ScreenSaveChoice                // modal "agregar otro / finalizar / volver"
 	ScreenCancel                    // SC: modal keep/discard/back
 	ScreenCollision                 // modal "el nombre ya existe"
 	ScreenDiscardWarn               // confirmacion extra antes de discard
@@ -47,6 +48,18 @@ type CollisionChoice int
 const (
 	CollisionOverwrite CollisionChoice = iota
 	CollisionCancel
+)
+
+// SaveChoice es la opcion seleccionada en el modal "ya termine este step".
+// Aparece cuando el usuario presiona enter sobre el ultimo foco de S2 —
+// reemplaza el "cierre directo" anterior por una eleccion explicita para
+// que el enter no cierre el wizard de pecho.
+type SaveChoice int
+
+const (
+	SaveAddAnother SaveChoice = iota // ctrl+n equivalent
+	SaveFinish                       // ctrl+s equivalent (placeholder de S3 hoy)
+	SaveBack                         // cancelar el modal, seguir editando
 )
 
 // Pipeline es el draft entero. Status nil = pipeline ready (sin bloque
@@ -250,6 +263,9 @@ type model struct {
 
 	// estado del modal de colision
 	collisionCursor CollisionChoice
+
+	// estado del modal "ya termine el step" (enter en ultimo foco de S2).
+	saveCursor SaveChoice
 
 	// error inline (S1: nombre vacio, slug invalido, write failed)
 	errMsg string

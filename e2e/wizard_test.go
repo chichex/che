@@ -907,3 +907,303 @@ func TestWizard_S2H3BackToInfo(t *testing.T) {
 		t.Errorf("expected exit 0, got %d", res.ExitCode)
 	}
 }
+
+// TestWizard_S2YAMLCombinations es un end-to-end "ancho": construye un
+// pipeline de 3 steps que ejercita la mayor combinacion posible de campos
+// del wizard, y verifica que el YAML final tenga sentido.
+//
+// Cobertura del happy-path (en orden):
+//
+//	step 1 | prompt | claude | input=text            | sin validator
+//	step 2 | skill  | claude | input=previous_output | validator cross-CLI (codex/prompt, max=5, on=continue)
+//	step 3 | prompt | codex  | input=pr              | validator self-CLI (codex/prompt, max=3 default, on=fail default)
+//
+// Pre-seeding: drop una SKILL.md minima en HOME del sandbox para que
+// internal/skills.Detect ofrezca al menos una skill cuando step 2 toca
+// la toggle Kind=skill. El wizard cachea la deteccion en enterStepCreate
+// del primer step, asi que el seed tiene que estar antes del PTY.
+func TestWizard_S2YAMLCombinations(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	// Seed: ~/.claude/skills/summarize-output/SKILL.md
+	skillDir := filepath.Join(env.HomeDir, ".claude", "skills", "summarize-output")
+	if err := os.MkdirAll(skillDir, 0o700); err != nil {
+		t.Fatalf("mkdir skill: %v", err)
+	}
+	seed := "---\nname: summarize-output\ndescription: test skill seeded by harness\n---\n\nbody\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(seed), 0o600); err != nil {
+		t.Fatalf("write skill: %v", err)
+	}
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("2"); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 1/3", 3*time.Second) {
+		t.Fatalf("S1 never rendered\n%s", p.Since(mark))
+	}
+
+	// ---------- S1 ----------
+	if err := p.Send("Combo Demo"); err != nil {
+		t.Fatalf("send name: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab name->desc: %v", err)
+	}
+	if err := p.Send("Pipeline con varias combinaciones"); err != nil {
+		t.Fatalf("send desc: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s S1->S2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
+		t.Fatalf("S2 step 1 never rendered\n%s", p.Since(mark))
+	}
+
+	// ---------- STEP 1: prompt + claude + text + sin validator ----------
+	if err := p.Send("fetch-data"); err != nil {
+		t.Fatalf("send step1 name: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.Send("\t"); err != nil {
+			t.Fatalf("tab #%d step1: %v", i, err)
+		}
+	}
+	if err := p.Send("fetch the PR title from input"); err != nil {
+		t.Fatalf("send step1 content: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab content->input step1: %v", err)
+	}
+
+	mark = p.Mark()
+	if err := p.Send("\x0e"); err != nil {
+		t.Fatalf("ctrl+n step1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 2 (create)", 3*time.Second) {
+		t.Fatalf("step 2 never rendered\n%s", p.Since(mark))
+	}
+
+	// ---------- STEP 2: skill + claude + previous_output + validator cross-CLI ----------
+	if err := p.Send("summarize"); err != nil {
+		t.Fatalf("send step2 name: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab name->cli step2: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab cli->kind step2: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("s"); err != nil {
+		t.Fatalf("send s (skill) step2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "summarize-output", 3*time.Second) {
+		t.Fatalf("skill picker never showed seeded skill\n%s", p.Since(mark))
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab kind->content step2: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab content->input step2: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab input->valtoggle step2: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("y"); err != nil {
+		t.Fatalf("send y validator step2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Bloque validator", 3*time.Second) {
+		t.Fatalf("validator block never appeared step2\n%s", p.Since(mark))
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab valtoggle->valcli step2: %v", err)
+	}
+	if err := p.Send("2"); err != nil {
+		t.Fatalf("send 2 valcli=codex step2: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab valcli->valkind step2: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab valkind->valcontent step2: %v", err)
+	}
+	if err := p.Send("verify the summary is under 200 chars"); err != nil {
+		t.Fatalf("send valcontent step2: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab valcontent->valmaxloops step2: %v", err)
+	}
+	if err := p.Send("5"); err != nil {
+		t.Fatalf("send 5 valmaxloops step2: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab valmaxloops->valonmax step2: %v", err)
+	}
+	if err := p.Send("2"); err != nil {
+		t.Fatalf("send 2 valonmax=continue step2: %v", err)
+	}
+
+	mark = p.Mark()
+	if err := p.Send("\x0e"); err != nil {
+		t.Fatalf("ctrl+n step2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 3 (create)", 3*time.Second) {
+		t.Fatalf("step 3 never rendered\n%s", p.Since(mark))
+	}
+
+	// ---------- STEP 3: prompt + codex + pr + validator self-CLI defaults ----------
+	if err := p.Send("report"); err != nil {
+		t.Fatalf("send step3 name: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab name->cli step3: %v", err)
+	}
+	if err := p.Send("2"); err != nil {
+		t.Fatalf("send 2 cli=codex step3: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := p.Send("\t"); err != nil {
+			t.Fatalf("tab into content step3 #%d: %v", i, err)
+		}
+	}
+	if err := p.Send("produce final report"); err != nil {
+		t.Fatalf("send step3 content: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab content->input step3: %v", err)
+	}
+	if err := p.Send("3"); err != nil {
+		t.Fatalf("send 3 input=pr step3: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab input->valtoggle step3: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("y"); err != nil {
+		t.Fatalf("send y validator step3: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Bloque validator", 3*time.Second) {
+		t.Fatalf("validator block never appeared step3\n%s", p.Since(mark))
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.Send("\t"); err != nil {
+			t.Fatalf("tab into valcontent step3 #%d: %v", i, err)
+		}
+	}
+	if err := p.Send("check format"); err != nil {
+		t.Fatalf("send valcontent step3: %v", err)
+	}
+
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s final step3: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered after final save\n%s", p.Since(mark))
+	}
+
+	// ---------- ASSERTS ----------
+	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "combo-demo.yaml")
+	data, err := os.ReadFile(expected)
+	if err != nil {
+		t.Fatalf("read draft: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		"name: Combo Demo",
+		"description: Pipeline con varias combinaciones",
+		"steps:",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in YAML; got:\n%s", want, body)
+		}
+	}
+
+	if got := strings.Count(body, "- name:"); got != 3 {
+		t.Errorf("expected 3 steps, got %d:\n%s", got, body)
+	}
+
+	for _, want := range []string{
+		"- name: fetch-data",
+		"fetch the PR title from input",
+		"input: text",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("step1 missing %q:\n%s", want, body)
+		}
+	}
+
+	for _, want := range []string{
+		"- name: summarize",
+		"kind: skill",
+		"content: summarize-output",
+		"input: previous_output",
+		"validator:",
+		"verify the summary is under 200 chars",
+		"max_loops: 5",
+		"on_max_loops: continue",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("step2 missing %q:\n%s", want, body)
+		}
+	}
+
+	for _, want := range []string{
+		"- name: report",
+		"produce final report",
+		"input: pr",
+		"check format",
+		"max_loops: 3",
+		"on_max_loops: fail",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("step3 missing %q:\n%s", want, body)
+		}
+	}
+
+	// Conteos cruzados.
+	if got := strings.Count(body, "cli: codex"); got < 3 {
+		t.Errorf("expected ≥3 occurrences of 'cli: codex' (step3 + 2 validators), got %d:\n%s", got, body)
+	}
+	if got := strings.Count(body, "cli: claude"); got != 2 {
+		t.Errorf("expected exactly 2 occurrences of 'cli: claude' (step1+step2), got %d:\n%s", got, body)
+	}
+	if got := strings.Count(body, "validator:"); got != 2 {
+		t.Errorf("expected 2 validators, got %d:\n%s", got, body)
+	}
+
+	// Step 1 NO debe traer claves de validator (toggle off).
+	step1Block := body
+	if i := strings.Index(body, "- name: summarize"); i > 0 {
+		step1Block = body[:i]
+	}
+	for _, unwanted := range []string{"validator:", "max_loops:", "on_max_loops:"} {
+		if strings.Contains(step1Block, unwanted) {
+			t.Errorf("step1 should not have %q (validator off):\n%s", unwanted, step1Block)
+		}
+	}
+
+	// Draft: el placeholder de S3 conserva el bloque status. H6 lo strippea.
+	if !strings.Contains(body, "stage: step") {
+		t.Errorf("expected status.stage=step (draft del placeholder S3); got:\n%s", body)
+	}
+
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Errorf("expected exit 0, got %d", res.ExitCode)
+	}
+}

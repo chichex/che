@@ -20,6 +20,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateInfo(key)
 	case ScreenStep:
 		return m.updateStep(key)
+	case ScreenSaveChoice:
+		return m.updateSaveChoice(key)
 	case ScreenCancel:
 		return m.updateCancel(key)
 	case ScreenCollision:
@@ -35,6 +37,8 @@ func (m model) View() string {
 		return m.viewInfo()
 	case ScreenStep:
 		return m.viewStep()
+	case ScreenSaveChoice:
+		return m.viewSaveChoice()
 	case ScreenCancel:
 		return m.viewCancel()
 	case ScreenCollision:
