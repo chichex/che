@@ -1578,12 +1578,17 @@ func TestWizard_S3InvalidStays(t *testing.T) {
 	}
 }
 
-// TestWizard_S3EscOpensCancel cubre la semantica de esc en S3: abre el
-// modal SC (keep/discard/back) en lugar de saltar a S2 mode=edit del ultimo
-// step (UX original que confunde con resume / edit ready). Para retocar un
-// step desde S3 esta `e` sobre el cursor. Ruta: ctrl+s S2 → S3 → esc → SC
-// → keep → menu; archivo final mantiene stage=summary (draft).
-func TestWizard_S3EscOpensCancel(t *testing.T) {
+// TestWizard_S3EscNoChangesExitsDirect cubre la semantica de esc en S3:
+// si el modelo en RAM coincide con el archivo en disco (ignorando bloque
+// status / LastSavedAt), esc sale directo al menu sin abrir el modal SC.
+// Hasta este fix esc en S3 caia siempre a S2 mode=edit del ultimo step
+// (heuristica de creacion); la version intermedia abria SC siempre, pero
+// el modal confunde cuando no hay nada que decidir. ctrl+c sigue abriendo
+// SC para preservar "ctrl+c×2 = exit total".
+//
+// Ruta: ctrl+s S2 → S3 (archivo persistido por enterSummary con stage=
+// summary) → esc → menu directo. Archivo final sigue draft.
+func TestWizard_S3EscNoChangesExitsDirect(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
 
@@ -1634,38 +1639,16 @@ func TestWizard_S3EscOpensCancel(t *testing.T) {
 		t.Fatalf("S3 never rendered\n%s", p.Since(mark))
 	}
 
-	// esc en S3 → SC modal (no S2). Para retocar un step esta `e`.
+	// esc en S3 sin cambios pendientes → menu directo, sin SC.
 	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
-		t.Fatalf("SC modal never opened from S3 esc\n%s", p.Since(mark))
-	}
-
-	// "3" (back) en SC → vuelve a S3 sin tocar.
-	mark = p.Mark()
-	if err := p.Send("3"); err != nil {
-		t.Fatalf("send 3 (back): %v", err)
-	}
-	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
-		t.Fatalf("never returned to S3 after back\n%s", p.Since(mark))
-	}
-
-	// Otra vez esc + keep para salir limpio.
-	mark = p.Mark()
-	if err := p.Send("\x1b"); err != nil {
-		t.Fatalf("send esc 2: %v", err)
-	}
-	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
-		t.Fatalf("SC modal never re-opened\n%s", p.Since(mark))
-	}
-	mark = p.Mark()
-	if err := p.Send("1"); err != nil {
-		t.Fatalf("send 1 (keep): %v", err)
-	}
 	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
-		t.Fatalf("menu never re-rendered after keep\n%s", p.Since(mark))
+		t.Fatalf("menu never re-rendered after esc\n%s", p.Since(mark))
+	}
+	if strings.Contains(p.Since(mark), "Salir del wizard") {
+		t.Errorf("SC modal should not appear when there are no unsaved changes")
 	}
 
 	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h6-back.yaml")

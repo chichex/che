@@ -529,20 +529,16 @@ func TestPipelinesList_H10EditReadyNoChangesStaysReady(t *testing.T) {
 		t.Fatalf("S3 never opened\n%s", p.Since(mark))
 	}
 
-	// esc → SC → 1 (keep).
+	// esc sin cambios → vuelve directo al lister, sin abrir SC.
 	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
-		t.Fatalf("SC never opened\n%s", p.Since(mark))
-	}
-	mark = p.Mark()
-	if err := p.Send("1"); err != nil {
-		t.Fatalf("send 1 (keep): %v", err)
-	}
 	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
-		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+		t.Fatalf("lister never re-rendered after esc\n%s", p.Since(mark))
+	}
+	if strings.Contains(p.Since(mark), "Salir del wizard") {
+		t.Errorf("SC modal should not appear when there are no unsaved changes")
 	}
 
 	// El archivo sigue ready: sin bloque status, contenido intacto.
@@ -607,11 +603,11 @@ func TestPipelinesList_H10EditReadyDiscardRestores(t *testing.T) {
 		t.Fatalf("S3 never opened\n%s", p.Since(mark))
 	}
 
-	// esc → SC → la label de "discard" debe decir "discard changes" en
-	// este flow. "2" elige discard.
+	// ctrl+c (no esc — esc sin cambios sale directo). Esperamos la label
+	// "discard changes" especifica de edit-ready.
 	mark = p.Mark()
-	if err := p.Send("\x1b"); err != nil {
-		t.Fatalf("send esc: %v", err)
+	if err := p.Send("\x03"); err != nil {
+		t.Fatalf("send ctrl+c: %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "discard changes", 3*time.Second) {
 		t.Fatalf("expected 'discard changes' label in SC under edit-ready; got:\n%s", p.Since(mark))

@@ -49,13 +49,22 @@ func (m model) enterSummary() (model, tea.Cmd) {
 // wizard.
 func (m model) updateSummary(key tea.KeyMsg) (model, tea.Cmd) {
 	switch key.String() {
-	case "ctrl+c", "esc":
-		// esc en S3 abre el modal SC — keep/discard/back. Hasta H10 esc
-		// caia a S2 mode=edit del ultimo step (asumiendo "vengo de crear",
-		// quiero retocar el ultimo); con resume / edit ready esa heuristica
-		// confunde (el usuario abrio un draft existente y espera que esc
-		// salga). Para reeditar un step desde S3 ya esta `e` sobre el
-		// step apuntado por el cursor.
+	case "ctrl+c":
+		// ctrl+c siempre abre SC para preservar el shortcut "ctrl+c×2 =
+		// exit total" (segundo ctrl+c en SC marca exitApp=true).
+		return m.openCancel(ScreenSummary)
+	case "esc":
+		// esc sin cambios pendientes sale directo: no tiene sentido
+		// preguntar "¿que hacer con el progreso?" si no hubo progreso
+		// (caso tipico: edit-ready abierto solo a mirar). Si hay cambios,
+		// el modal SC sigue apareciendo asi el usuario decide keep/
+		// discard. Hasta H10 esc caia a S2 mode=edit del ultimo step
+		// (heuristica del flujo de creacion); con resume / edit ready
+		// confunde — para retocar un step desde S3 ya esta `e`.
+		if m.path != "" && !m.summaryHasUnsavedChanges() {
+			m.exitApp = false
+			return m, tea.Quit
+		}
 		return m.openCancel(ScreenSummary)
 	case "up", "k":
 		if m.summaryCursor > 0 {
@@ -418,6 +427,20 @@ func renderSummaryStepRow(idx int, s Step, focused, broken bool) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// summaryHasUnsavedChanges decide si el modelo en RAM divergio del archivo
+// en disco (ignorando bloque status / LastSavedAt). Usado por esc en S3
+// para skipear el modal SC cuando no hay nada que decidir. Si Load falla
+// (archivo borrado a mano, YAML invalido por edit externo), conservadora-
+// mente devolvemos true — preferimos mostrar el modal antes que asumir
+// "no hay cambios" sobre un estado que no podemos leer.
+func (m model) summaryHasUnsavedChanges() bool {
+	existing, err := Load(m.path)
+	if err != nil {
+		return true
+	}
+	return !pipelinesEquivalentContent(existing, m.pipeline)
 }
 
 // excerpt corta s a max chars conservando una sola linea (newlines pasan
