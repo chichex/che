@@ -1578,11 +1578,12 @@ func TestWizard_S3InvalidStays(t *testing.T) {
 	}
 }
 
-// TestWizard_S3BackToS2 cubre la rama "esc" de H6: en S3, esc vuelve a S2
-// sobre el ultimo step en mode=edit. Una segunda esc (en mode=edit) debe
-// volver a S3 sin guardar. Como salimos via SC keep desde S3, el archivo
-// final debe traer stage=summary (es draft, no ready).
-func TestWizard_S3BackToS2(t *testing.T) {
+// TestWizard_S3EscOpensCancel cubre la semantica de esc en S3: abre el
+// modal SC (keep/discard/back) en lugar de saltar a S2 mode=edit del ultimo
+// step (UX original que confunde con resume / edit ready). Para retocar un
+// step desde S3 esta `e` sobre el cursor. Ruta: ctrl+s S2 → S3 → esc → SC
+// → keep → menu; archivo final mantiene stage=summary (draft).
+func TestWizard_S3EscOpensCancel(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
 
@@ -1633,33 +1634,31 @@ func TestWizard_S3BackToS2(t *testing.T) {
 		t.Fatalf("S3 never rendered\n%s", p.Since(mark))
 	}
 
-	// esc en S3 → S2 mode=edit del ultimo step.
+	// esc en S3 → SC modal (no S2). Para retocar un step esta `e`.
 	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "step 1 (edit)", 3*time.Second) {
-		t.Fatalf("never returned to S2 mode=edit\n%s", p.Since(mark))
+	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
+		t.Fatalf("SC modal never opened from S3 esc\n%s", p.Since(mark))
 	}
 
-	// Una segunda esc en mode=edit vuelve a S3 sin guardar (los buffers
-	// de stepEdit se descartan, pero pipeline.Steps[0] mantiene el
-	// contenido original).
+	// "3" (back) en SC → vuelve a S3 sin tocar.
+	mark = p.Mark()
+	if err := p.Send("3"); err != nil {
+		t.Fatalf("send 3 (back): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("never returned to S3 after back\n%s", p.Since(mark))
+	}
+
+	// Otra vez esc + keep para salir limpio.
 	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc 2: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
-		t.Fatalf("never returned to S3\n%s", p.Since(mark))
-	}
-
-	// Salir via ctrl+c → SC keep desde S3.
-	mark = p.Mark()
-	if err := p.Send("\x03"); err != nil {
-		t.Fatalf("send ctrl+c: %v", err)
-	}
 	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
-		t.Fatalf("SC modal never opened\n%s", p.Since(mark))
+		t.Fatalf("SC modal never re-opened\n%s", p.Since(mark))
 	}
 	mark = p.Mark()
 	if err := p.Send("1"); err != nil {

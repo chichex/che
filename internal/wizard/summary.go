@@ -49,16 +49,14 @@ func (m model) enterSummary() (model, tea.Cmd) {
 // wizard.
 func (m model) updateSummary(key tea.KeyMsg) (model, tea.Cmd) {
 	switch key.String() {
-	case "ctrl+c":
+	case "ctrl+c", "esc":
+		// esc en S3 abre el modal SC — keep/discard/back. Hasta H10 esc
+		// caia a S2 mode=edit del ultimo step (asumiendo "vengo de crear",
+		// quiero retocar el ultimo); con resume / edit ready esa heuristica
+		// confunde (el usuario abrio un draft existente y espera que esc
+		// salga). Para reeditar un step desde S3 ya esta `e` sobre el
+		// step apuntado por el cursor.
 		return m.openCancel(ScreenSummary)
-	case "esc":
-		// Vuelve a S2 sobre el ultimo step en mode=edit. El modelo en RAM
-		// se mantiene; enterStepEdit pisa stepEdit y persiste status.stage
-		// =step para reflejar el cambio en disco.
-		if len(m.pipeline.Steps) == 0 {
-			return m.enterStepCreate(0)
-		}
-		return m.enterStepEdit(len(m.pipeline.Steps) - 1)
 	case "up", "k":
 		if m.summaryCursor > 0 {
 			m.summaryCursor--
@@ -329,7 +327,7 @@ func (m model) viewSummary() string {
 	b.WriteString("\n")
 	b.WriteString(hintStyle.Render("↑/↓ navegar · e editar · d borrar · shift+↑↓ reordenar · + agregar · y abrir en $EDITOR"))
 	b.WriteString("\n")
-	b.WriteString(hintStyle.Render("enter / ctrl+s guardar pipeline · esc volver al ultimo step"))
+	b.WriteString(hintStyle.Render("enter / ctrl+s guardar pipeline · esc salir"))
 	b.WriteString("\n")
 	return b.String()
 }
