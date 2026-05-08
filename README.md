@@ -4,9 +4,11 @@ CLI en Go que orquesta pipelines parametrizables sobre múltiples agentes de IA 
 
 ## Diseño
 
-- [`docs/vision.html`](./docs/vision.html) — visión del producto.
-- [`docs/design.html`](./docs/design.html) — decisiones de arquitectura cerradas.
-- [`docs/manage-pipelines-flow.html`](./docs/manage-pipelines-flow.html) — plan H1–H10 del flow "Create / My pipelines" con chips de progreso.
+Los documentos `docs/*.html` se renderizan via [htmlpreview.github.io](https://htmlpreview.github.io/) (los enlaces de abajo abren la versión renderizada; el path entre paréntesis es la fuente):
+
+- [Visión del producto](https://htmlpreview.github.io/?https://github.com/chichex/che/blob/main/docs/vision.html) (`docs/vision.html`)
+- [Decisiones de arquitectura cerradas](https://htmlpreview.github.io/?https://github.com/chichex/che/blob/main/docs/design.html) (`docs/design.html`)
+- [Plan H1–H10 del flow "Create / My pipelines"](https://htmlpreview.github.io/?https://github.com/chichex/che/blob/main/docs/manage-pipelines-flow.html) (`docs/manage-pipelines-flow.html`) — chips de progreso por story.
 
 ## Instalación
 
@@ -78,7 +80,7 @@ steps:
     on_max_loops: fail
 ```
 
-Decisiones cerradas en [`docs/design.html`](./docs/design.html):
+Decisiones cerradas — ver [docs/design.html renderizado](https://htmlpreview.github.io/?https://github.com/chichex/che/blob/main/docs/design.html):
 
 - Subprocess + headless con `stream-json` (no PTY).
 - 4 CLIs v1 con sus modos de invocación: claude `-p`, codex `exec`, gemini `-p ... --yolo`, opencode `run`.
