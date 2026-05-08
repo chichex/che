@@ -133,13 +133,13 @@ func (m model) viewSaveChoice() string {
 	var options []opt
 	if editMode {
 		options = []opt{
-			{SaveFinish, "1", "finalizar pipeline", "guarda los cambios y cierra (placeholder de S3)"},
+			{SaveFinish, "1", "finalizar pipeline", "guarda los cambios y va al resumen"},
 			{SaveBack, "2", "volver a editar", "seguir tocando este step"},
 		}
 	} else {
 		options = []opt{
 			{SaveAddAnother, "1", "agregar otro step", "guarda este, abre uno nuevo a continuacion"},
-			{SaveFinish, "2", "finalizar pipeline", "guarda este y cierra (placeholder de S3)"},
+			{SaveFinish, "2", "finalizar pipeline", "guarda este y va al resumen"},
 			{SaveBack, "3", "volver a editar", "seguir tocando este step"},
 		}
 	}

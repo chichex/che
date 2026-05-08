@@ -283,9 +283,9 @@ func TestWizard_S1DiscardRemovesDraft(t *testing.T) {
 	}
 }
 
-// TestWizard_S2H3CreateFirstStep cubre los criterios de H3: completar S1 + S2
-// step 1 mode=create con kind=prompt y guardar via ctrl+s deja un YAML con
-// steps[0] poblado + status.stage=step, step_idx=0, step_mode=create.
+// TestWizard_S2H3CreateFirstStep cubre los criterios de H3 + flujo H6: S1 → S2
+// step 1 mode=create con kind=prompt → ctrl+s → S3 (resumen) → ctrl+s → S4
+// (ready) → enter → menu. El YAML final NO trae bloque status (ready).
 func TestWizard_S2H3CreateFirstStep(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
@@ -337,7 +337,7 @@ func TestWizard_S2H3CreateFirstStep(t *testing.T) {
 	if err := p.Send("hola"); err != nil {
 		t.Fatalf("send content: %v", err)
 	}
-	// tab → input (default text). ctrl+s para guardar y cerrar.
+	// tab → input (default text). ctrl+s lleva a S3.
 	if err := p.Send("\t"); err != nil {
 		t.Fatalf("send tab→input: %v", err)
 	}
@@ -345,8 +345,22 @@ func TestWizard_S2H3CreateFirstStep(t *testing.T) {
 	if err := p.Send("\x13"); err != nil {
 		t.Fatalf("send ctrl+s save step: %v", err)
 	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never rendered after step save\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("send ctrl+s save pipeline: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Pipeline guardado", 3*time.Second) {
+		t.Fatalf("S4 never rendered after pipeline save\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
 	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
-		t.Fatalf("menu never re-rendered after step save\n%s", p.Since(mark))
+		t.Fatalf("menu never re-rendered after enter\n%s", p.Since(mark))
 	}
 
 	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h3.yaml")
@@ -356,9 +370,6 @@ func TestWizard_S2H3CreateFirstStep(t *testing.T) {
 	}
 	body := string(data)
 	for _, want := range []string{
-		"status:",
-		"stage: step",
-		"step_mode: create",
 		"name: Demo H3",
 		"steps:",
 		"- name: collect-signals",
@@ -371,11 +382,11 @@ func TestWizard_S2H3CreateFirstStep(t *testing.T) {
 			t.Errorf("expected %q in YAML; got:\n%s", want, body)
 		}
 	}
-	// step_idx=0 se omite por omitempty cuando es cero, pero step_mode
-	// igual indica que el wizard quedo "en step" — ese par es la prueba
-	// que pide H3 ("step_idx=0, step_mode=create").
-	if strings.Contains(body, "step_idx: 1") || strings.Contains(body, "step_idx: 2") {
-		t.Errorf("step_idx should be 0 (omitted) for primer step; got:\n%s", body)
+	// Pipeline ready post-H6: el bloque status fue stripeado.
+	for _, unwanted := range []string{"status:", "stage:", "step_mode:", "step_idx:"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("ready pipeline should not contain %q; got:\n%s", unwanted, body)
+		}
 	}
 
 	if err := p.Send("q"); err != nil {
@@ -472,8 +483,22 @@ func TestWizard_S2H4ValidatorOn(t *testing.T) {
 	if err := p.Send("\x13"); err != nil {
 		t.Fatalf("send ctrl+s save step: %v", err)
 	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("send ctrl+s save pipeline: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Pipeline guardado", 3*time.Second) {
+		t.Fatalf("S4 never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
 	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
-		t.Fatalf("menu never re-rendered after save\n%s", p.Since(mark))
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 
 	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h4-on.yaml")
@@ -558,8 +583,22 @@ func TestWizard_S2H4ValidatorOff(t *testing.T) {
 	if err := p.Send("\x13"); err != nil {
 		t.Fatalf("send ctrl+s save step: %v", err)
 	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("send ctrl+s save pipeline: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Pipeline guardado", 3*time.Second) {
+		t.Fatalf("S4 never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
 	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
-		t.Fatalf("menu never re-rendered after save\n%s", p.Since(mark))
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 
 	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h4-off.yaml")
@@ -666,13 +705,27 @@ func TestWizard_S2H5LoopTwoSteps(t *testing.T) {
 		t.Fatalf("send step2 content: %v", err)
 	}
 
-	// ctrl+s — guarda step 2 + cierra el wizard (placeholder de S3).
+	// ctrl+s — guarda step 2 + va a S3.
 	mark = p.Mark()
 	if err := p.Send("\x13"); err != nil {
 		t.Fatalf("send ctrl+s save step2: %v", err)
 	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("send ctrl+s save pipeline: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Pipeline guardado", 3*time.Second) {
+		t.Fatalf("S4 never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
 	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
-		t.Fatalf("menu never re-rendered after save\n%s", p.Since(mark))
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 
 	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h5-loop.yaml")
@@ -787,13 +840,27 @@ func TestWizard_S2H5BackFromStep2(t *testing.T) {
 		t.Fatalf("send rename suffix: %v", err)
 	}
 
-	// ctrl+s — guarda step 1 actualizado y cierra el wizard.
+	// ctrl+s — guarda step 1 actualizado, va a S3.
 	mark = p.Mark()
 	if err := p.Send("\x13"); err != nil {
 		t.Fatalf("send ctrl+s save step1 edit: %v", err)
 	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("send ctrl+s save pipeline: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Pipeline guardado", 3*time.Second) {
+		t.Fatalf("S4 never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
 	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
-		t.Fatalf("menu never re-rendered after save\n%s", p.Since(mark))
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 
 	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h5-back.yaml")
@@ -1108,8 +1175,22 @@ func TestWizard_S2YAMLCombinations(t *testing.T) {
 	if err := p.Send("\x13"); err != nil {
 		t.Fatalf("ctrl+s final step3: %v", err)
 	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s save pipeline: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Pipeline guardado", 3*time.Second) {
+		t.Fatalf("S4 never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
 	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
-		t.Fatalf("menu never re-rendered after final save\n%s", p.Since(mark))
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 
 	// ---------- ASSERTS ----------
@@ -1194,9 +1275,411 @@ func TestWizard_S2YAMLCombinations(t *testing.T) {
 		}
 	}
 
-	// Draft: el placeholder de S3 conserva el bloque status. H6 lo strippea.
-	if !strings.Contains(body, "stage: step") {
-		t.Errorf("expected status.stage=step (draft del placeholder S3); got:\n%s", body)
+	// Pipeline ready post-H6: el bloque status fue stripeado al guardar
+	// desde S3 (ctrl+s). Cualquier residuo indicaria que el wizard no
+	// llego a finalizar.
+	for _, unwanted := range []string{"status:", "stage:", "step_mode:", "step_idx:"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("ready pipeline should not contain %q; got:\n%s", unwanted, body)
+		}
+	}
+
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Errorf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
+// TestWizard_S3SummarySavesReady cubre el happy-path de H6: completar S1 + S2
+// + entrar al modal "Step listo" via enter en el ultimo foco + elegir
+// "finalizar pipeline" → S3 → ctrl+s → S4 → enter → menu. El YAML final
+// debe ser ready (sin bloque status) y conservar name + steps.
+func TestWizard_S3SummarySavesReady(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("2"); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 1/3", 3*time.Second) {
+		t.Fatalf("S1 never rendered\n%s", p.Since(mark))
+	}
+
+	if err := p.Send("Demo H6 Ready"); err != nil {
+		t.Fatalf("send name: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
+		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
+	}
+
+	// Step 1 con campos minimos. Llegamos al ultimo foco (ValToggle) por tab.
+	if err := p.Send("collect"); err != nil {
+		t.Fatalf("send step name: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.Send("\t"); err != nil {
+			t.Fatalf("tab #%d: %v", i, err)
+		}
+	}
+	if err := p.Send("hola"); err != nil {
+		t.Fatalf("send content: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab→input: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab→valtoggle: %v", err)
+	}
+
+	// enter en el ultimo foco abre el modal "Step listo".
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter (open modal): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Step listo", 3*time.Second) {
+		t.Fatalf("save-choice modal never opened\n%s", p.Since(mark))
+	}
+
+	// "finalizar pipeline" = opcion 2 en mode=create.
+	mark = p.Mark()
+	if err := p.Send("2"); err != nil {
+		t.Fatalf("send 2 (finalizar): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never rendered after modal finalizar\n%s", p.Since(mark))
+	}
+
+	// Mientras seguimos en S3 el archivo debe traer status.stage=summary.
+	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h6-ready.yaml")
+	{
+		data, err := os.ReadFile(expected)
+		if err != nil {
+			t.Fatalf("read draft pre-save: %v", err)
+		}
+		if !strings.Contains(string(data), "stage: summary") {
+			t.Errorf("expected stage: summary in S3 draft; got:\n%s", data)
+		}
+	}
+
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("send ctrl+s save pipeline: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Pipeline guardado", 3*time.Second) {
+		t.Fatalf("S4 never rendered\n%s", p.Since(mark))
+	}
+
+	data, err := os.ReadFile(expected)
+	if err != nil {
+		t.Fatalf("read final: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		"name: Demo H6 Ready",
+		"steps:",
+		"- name: collect",
+		"content: hola",
+		"input: text",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in YAML; got:\n%s", want, body)
+		}
+	}
+	for _, unwanted := range []string{"status:", "stage:", "step_mode:", "step_idx:", "last_saved_at"} {
+		if strings.Contains(body, unwanted) {
+			t.Errorf("ready pipeline should not contain %q; got:\n%s", unwanted, body)
+		}
+	}
+
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter (S4→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered after S4\n%s", p.Since(mark))
+	}
+
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Errorf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
+// TestWizard_S3InvalidStays cubre la rama invalida de H6: pipeline lleva
+// validator gemini, y para cuando el usuario toca ctrl+s en S3 gemini ya
+// no esta en PATH (la skill desinstalo entremedio). IsValid falla → S3
+// sigue visible con el error inline → el archivo NO se ready-fica.
+//
+// Usamos un binario fake llamado `gemini-real` que apunta al chefake
+// (idem fakeIdentities) y un symlink "gemini" hacia el. Al desactivar
+// el segundo entre S2 y S3, el wizard sigue funcionando (skillsCache
+// ya quedo lleno desde el primer enterStepCreate) pero IsValid corre
+// detectInstalledCLIs en vivo y reporta gemini missing.
+func TestWizard_S3InvalidStays(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("2"); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 1/3", 3*time.Second) {
+		t.Fatalf("S1 never rendered\n%s", p.Since(mark))
+	}
+
+	if err := p.Send("Demo H6 Invalid"); err != nil {
+		t.Fatalf("send name: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
+		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
+	}
+
+	// Step 1: cli=claude (default), kind=prompt + validator gemini cross-CLI.
+	if err := p.Send("first"); err != nil {
+		t.Fatalf("send name: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.Send("\t"); err != nil {
+			t.Fatalf("tab #%d: %v", i, err)
+		}
+	}
+	if err := p.Send("hola"); err != nil {
+		t.Fatalf("send content: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab→input: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab→valtoggle: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("y"); err != nil {
+		t.Fatalf("send y: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Bloque validator", 3*time.Second) {
+		t.Fatalf("validator block never appeared\n%s", p.Since(mark))
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab→valcli: %v", err)
+	}
+	// gemini = pill 3 (claude/codex/gemini/opencode).
+	if err := p.Send("3"); err != nil {
+		t.Fatalf("send 3 valcli=gemini: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab→valkind: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab→valcontent: %v", err)
+	}
+	if err := p.Send("verifica formato"); err != nil {
+		t.Fatalf("send valcontent: %v", err)
+	}
+
+	// Antes de ctrl+s, removemos gemini de PATH. Asi cuando IsValid corre
+	// en S3 ya lo ve missing.
+	env.RemoveFake("gemini")
+
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s save step: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never rendered\n%s", p.Since(mark))
+	}
+
+	// ctrl+s en S3 → IsValid falla con gemini missing → seguimos en S3.
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s save pipeline: %v", err)
+	}
+	// Sigue en S3: el header del paso 3/3 sigue visible y el error
+	// "no esta instalado" aparece. Damos tiempo a que el render incluya
+	// el mensaje de error.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := p.Since(mark)
+		if strings.Contains(snap, "no se puede guardar") && strings.Contains(snap, "gemini") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	snap := p.Since(mark)
+	if !strings.Contains(snap, "no se puede guardar") {
+		t.Errorf("expected validation error banner; got:\n%s", snap)
+	}
+	if !strings.Contains(snap, "gemini") {
+		t.Errorf("expected gemini in error; got:\n%s", snap)
+	}
+
+	// Archivo NO debe ser ready: el bloque status sigue presente.
+	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h6-invalid.yaml")
+	data, err := os.ReadFile(expected)
+	if err != nil {
+		t.Fatalf("read draft: %v", err)
+	}
+	body := string(data)
+	if !strings.Contains(body, "status:") {
+		t.Errorf("expected draft to keep status: block (not ready); got:\n%s", body)
+	}
+	if !strings.Contains(body, "stage: summary") {
+		t.Errorf("expected stage: summary; got:\n%s", body)
+	}
+
+	// Salir limpio via ctrl+c → SC keep → menu → q.
+	mark = p.Mark()
+	if err := p.Send("\x03"); err != nil {
+		t.Fatalf("send ctrl+c: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
+		t.Fatalf("SC modal never opened\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1 (keep): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered after keep\n%s", p.Since(mark))
+	}
+
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Errorf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
+// TestWizard_S3BackToS2 cubre la rama "esc" de H6: en S3, esc vuelve a S2
+// sobre el ultimo step en mode=edit. Una segunda esc (en mode=edit) debe
+// volver a S3 sin guardar. Como salimos via SC keep desde S3, el archivo
+// final debe traer stage=summary (es draft, no ready).
+func TestWizard_S3BackToS2(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("2"); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 1/3", 3*time.Second) {
+		t.Fatalf("S1 never rendered\n%s", p.Since(mark))
+	}
+
+	if err := p.Send("Demo H6 Back"); err != nil {
+		t.Fatalf("send name: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
+		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
+	}
+
+	if err := p.Send("only"); err != nil {
+		t.Fatalf("send step name: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.Send("\t"); err != nil {
+			t.Fatalf("tab #%d: %v", i, err)
+		}
+	}
+	if err := p.Send("hola"); err != nil {
+		t.Fatalf("send content: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab→input: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s save step: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never rendered\n%s", p.Since(mark))
+	}
+
+	// esc en S3 → S2 mode=edit del ultimo step.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 1 (edit)", 3*time.Second) {
+		t.Fatalf("never returned to S2 mode=edit\n%s", p.Since(mark))
+	}
+
+	// Una segunda esc en mode=edit vuelve a S3 sin guardar (los buffers
+	// de stepEdit se descartan, pero pipeline.Steps[0] mantiene el
+	// contenido original).
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc 2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("never returned to S3\n%s", p.Since(mark))
+	}
+
+	// Salir via ctrl+c → SC keep desde S3.
+	mark = p.Mark()
+	if err := p.Send("\x03"); err != nil {
+		t.Fatalf("send ctrl+c: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
+		t.Fatalf("SC modal never opened\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1 (keep): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered after keep\n%s", p.Since(mark))
+	}
+
+	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h6-back.yaml")
+	data, err := os.ReadFile(expected)
+	if err != nil {
+		t.Fatalf("read draft: %v", err)
+	}
+	body := string(data)
+	if !strings.Contains(body, "stage: summary") {
+		t.Errorf("expected stage: summary in keep'd draft; got:\n%s", body)
+	}
+	if !strings.Contains(body, "- name: only") {
+		t.Errorf("expected step persisted; got:\n%s", body)
 	}
 
 	if err := p.Send("q"); err != nil {

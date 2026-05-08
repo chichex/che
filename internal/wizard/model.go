@@ -18,6 +18,8 @@ type Screen int
 const (
 	ScreenInfo        Screen = iota // S1: nombre + descripcion
 	ScreenStep                      // S2: editor de step (H3+)
+	ScreenSummary                   // S3: resumen + guardar pipeline final (H6+)
+	ScreenSaved                     // S4: post-save, mostrar path (H6+)
 	ScreenSaveChoice                // modal "agregar otro / finalizar / volver"
 	ScreenCancel                    // SC: modal keep/discard/back
 	ScreenCollision                 // modal "el nombre ya existe"
@@ -58,7 +60,7 @@ type SaveChoice int
 
 const (
 	SaveAddAnother SaveChoice = iota // ctrl+n equivalent
-	SaveFinish                       // ctrl+s equivalent (placeholder de S3 hoy)
+	SaveFinish                       // ctrl+s equivalent — guarda step + va a S3
 	SaveBack                         // cancelar el modal, seguir editando
 )
 
@@ -266,6 +268,15 @@ type model struct {
 
 	// estado del modal "ya termine el step" (enter en ultimo foco de S2).
 	saveCursor SaveChoice
+
+	// cursor de S3: indice del step apuntado por ↑/↓. Sin accion en H6 —
+	// H7 lo usa para e/d/shift+↑↓/+. Se reinicia a 0 al entrar a S3.
+	summaryCursor int
+
+	// errores de IsValid mostrados en S3 cuando ctrl+s falla. Se popula
+	// entrando con un error multi-linea; queda visible hasta el proximo
+	// ctrl+s.
+	summaryErrs []string
 
 	// error inline (S1: nombre vacio, slug invalido, write failed)
 	errMsg string

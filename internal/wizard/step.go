@@ -606,7 +606,9 @@ func (m model) stepHandleValOnMaxLoopsKey(key tea.KeyMsg) (model, tea.Cmd) {
 //     actual (mode=create) se descarta — sus buffers se reinician via
 //     enterStepEdit; el step previo ya esta en pipeline.Steps porque
 //     ctrl+n lo pusheo al avanzar.
-//   - mode=edit: vuelve a S3 sin guardar (H7+ — todavia stub).
+//   - mode=edit: vuelve a S3 sin guardar los cambios del step. El modelo
+//     en RAM mantiene el step original (no llamamos buildStep); solo
+//     transicionamos al resumen.
 func (m model) stepBack() (model, tea.Cmd) {
 	if m.stepEdit.mode == "create" && m.stepEdit.idx == 0 {
 		// Volver a S1 con status.stage=info, descartando el step tipeado.
@@ -633,9 +635,16 @@ func (m model) stepBack() (model, tea.Cmd) {
 		// solo en stepEdit, asi que enterStepEdit(idx-1) los pisa.
 		return m.enterStepEdit(m.stepEdit.idx - 1)
 	}
-	// Stub para mode=edit — H7 lo conecta a S3. Por ahora nos quedamos
-	// donde estamos.
-	return m, nil
+	// mode=edit: el step ya esta en pipeline.Steps con su contenido pre-
+	// edicion (lo que viene de buffers en stepEdit aun no se materializo).
+	// Volver al resumen sin tocar pipeline.Steps cumple "esc descarta los
+	// cambios del step". Si llegamos aca con un pipeline vacio (no deberia
+	// pasar — mode=edit implica algo en Steps) caemos a S1 como red.
+	if len(m.pipeline.Steps) == 0 {
+		m.screen = ScreenInfo
+		return m, nil
+	}
+	return m.enterSummary()
 }
 
 // stepSaveAndAddAnother: ctrl+n en S2 mode=create. Valida el step actual,
@@ -673,9 +682,10 @@ func (m model) stepSaveAndAddAnother() (model, tea.Cmd) {
 // stepSaveAndFinish: ctrl+s en S2.
 //
 // Valida el step actual; si pasa lo pushea (mode=create) o lo reemplaza
-// (mode=edit) en pipeline.Steps, persiste, y cierra el wizard. S3 todavia
-// no existe — H6 reemplazara este "cierre temprano" por la transicion a
-// S3.
+// (mode=edit) en pipeline.Steps, persiste con stage=step, y transiciona
+// a S3 (enterSummary) que ya re-persiste con stage=summary. La doble
+// escritura en quick succession es intencional: si enterSummary falla por
+// algun motivo el archivo en disco refleja el step recien guardado.
 func (m model) stepSaveAndFinish() (model, tea.Cmd) {
 	step, err := m.buildStep()
 	if err != nil {
@@ -692,7 +702,6 @@ func (m model) stepSaveAndFinish() (model, tea.Cmd) {
 	if m.pipeline.Status == nil {
 		m.pipeline.Status = &Status{}
 	}
-	// status sigue marcando "step" hasta que H6 introduzca S3 (stage=summary).
 	m.pipeline.Status.Stage = StageStep
 	m.pipeline.Status.StepIdx = m.stepEdit.idx
 	m.pipeline.Status.StepMode = m.stepEdit.mode
@@ -703,10 +712,7 @@ func (m model) stepSaveAndFinish() (model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Placeholder de S3: cerramos y volvemos al menu. exitApp=false para
-	// que el caller re-muestre el menu principal.
-	m.exitApp = false
-	return m, tea.Quit
+	return m.enterSummary()
 }
 
 // buildStep arma el Step a partir del estado UI, con validaciones inline.

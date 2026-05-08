@@ -1315,7 +1315,7 @@
             <li>step 2+ → S2 prev en <code>mode=edit</code> con campos pre-cargados.</li>
           </ul>
         </li>
-        <li>"guardar y ver resumen" sigue cerrando el wizard (placeholder de S3).</li>
+        <li>"guardar y ver resumen" deriva al modal "Step listo"; "finalizar pipeline" o <kbd>ctrl+s</kbd> avanzan a S3 (ver H6).</li>
       </ul>
 
       <h4>Smoke manual</h4>
@@ -1361,7 +1361,7 @@
       </ul>
 
       <h4>Out of scope</h4>
-      <p class="oos">Que el modal SaveChoice "finalizar" lleve a S3 — eso es H6. Hoy sigue cerrando el wizard como placeholder.</p>
+      <p class="oos">Cubierto en H6: el modal SaveChoice "finalizar" ya transiciona a S3.</p>
     </div>
 
     <!-- H6 -->
@@ -1370,6 +1370,7 @@
         <span class="story-id">H6</span>
         <h3>S3 Summary + guardar pipeline final (sin status)</h3>
         <span class="deps">deps: <span class="chip">H5</span></span>
+        <span class="chip ok">done</span>
       </div>
       <div class="as-a">
         <strong>Como</strong> usuario, <strong>quiero</strong> ver un resumen del pipeline antes de finalizarlo y al confirmar guardar el archivo final sin metadata de wizard, <strong>para</strong> tener un pipeline "ready" listo para ejecutar.
@@ -1378,11 +1379,12 @@
       <h4>Criterios de aceptación</h4>
       <ul>
         <li>Tras "guardar y ver resumen" en S2, llegar a S3 (no más cierre temprano).</li>
-        <li>S3 renderiza: name + description + lista de steps con metadata (CLI, kind+content excerpt, input, chip de validator si tiene).</li>
-        <li>Cursor con <kbd>↑/↓</kbd> entre steps (sin acción todavía — viene en H7).</li>
-        <li>"guardar pipeline" (<kbd>ctrl+s</kbd>): corre <code>IsValid(p)</code>; si pasa, serializa <strong>sin bloque <code>status</code></strong>, sobreescribe el archivo, va a S4.</li>
-        <li>Si <code>IsValid</code> falla: muestra errores inline en S3, queda en S3.</li>
-        <li>S4 muestra path del archivo guardado; <kbd>enter</kbd>/<kbd>esc</kbd> vuelven al menu.</li>
+        <li>S3 renderiza: name + description + lista de steps con metadata rica (CLI, kind/skill o prompt-excerpt, input, bloque validator expandido cuando está on con CLI/prompt-o-skill/max_loops/on_max).</li>
+        <li>Cursor con <kbd>↑/↓</kbd> entre steps (sin acción todavía — viene en H7; se renderiza el marcador <code>▸</code> para que H7 enchufe <kbd>e</kbd>/<kbd>d</kbd>/<kbd>shift+↑↓</kbd>/<kbd>+</kbd> sin diff de UX).</li>
+        <li>"guardar pipeline" (<kbd>enter</kbd> o <kbd>ctrl+s</kbd>): corre <code>IsValid(p)</code>; si pasa, serializa <strong>sin bloque <code>status</code></strong>, sobreescribe el archivo, va a S4.</li>
+        <li>Si <code>IsValid</code> falla: muestra errores inline ("✗ no se puede guardar:" + lista) en S3, queda en S3. <code>IsValid</code> cubre nombre vacío, sin steps, duplicate step name, <code>previous_output</code> en step 0, step CLI no instalado y validator CLI no instalado.</li>
+        <li><kbd>esc</kbd> en S3: vuelve a S2 sobre el último step en <code>mode=edit</code> (campos pre-cargados). Una segunda <kbd>esc</kbd> desde mode=edit vuelve a S3 sin guardar (los buffers de stepEdit se descartan).</li>
+        <li>S4 muestra name + path del archivo guardado; <kbd>enter</kbd>/<kbd>esc</kbd> vuelven al menu, <kbd>ctrl+c</kbd> sale total.</li>
         <li><code>status.stage</code> en el archivo intermedio (mientras está en S3) es <code>summary</code>.</li>
       </ul>
 
@@ -1397,13 +1399,24 @@
 
       <h4>Test e2e</h4>
       <ul>
-        <li>Pipeline completo, llegar a S3, guardar.</li>
-        <li>Asserts: archivo no contiene la clave <code>status</code> a top-level; tiene <code>name</code> + <code>steps</code>.</li>
-        <li>Test failure: pipeline con campo inválido (forzar) → <code>ctrl+s</code> en S3 no avanza, error visible.</li>
+        <li><code>TestWizard_S3SummarySavesReady</code>: pipeline completo via modal "finalizar" → S3 → ctrl+s → S4 → enter → menu. Asserts: <code>stage: summary</code> en el draft pre-save; archivo final sin <code>status</code> a top-level; tiene <code>name</code> + <code>steps</code>.</li>
+        <li><code>TestWizard_S3InvalidStays</code>: dropea <code>gemini</code> de PATH después de armar un step con validator gemini → ctrl+s en S3 → IsValid falla → S3 sigue visible con error "no se puede guardar" + mención de gemini; archivo NO se ready-fica (status sigue presente).</li>
+        <li><code>TestWizard_S3BackToS2</code>: esc en S3 → S2 mode=edit; segunda esc → S3; SC keep desde S3 → archivo conserva <code>stage: summary</code>.</li>
+        <li>Tests existentes (H3/H4/H5/combinations) actualizados para travesar S3+S4 y assertear pipeline ready (sin <code>status</code>).</li>
+      </ul>
+
+      <h4>Implementación</h4>
+      <ul>
+        <li><code>internal/wizard/validate.go</code> — <code>IsValid(p Pipeline) error</code> + <code>detectInstalledCLIs</code> (var inyectable para tests).</li>
+        <li><code>internal/wizard/summary.go</code> — <code>enterSummary</code>, <code>updateSummary</code>, <code>viewSummary</code>, <code>renderSummaryStepRow</code>, <code>excerpt</code>.</li>
+        <li><code>internal/wizard/saved.go</code> — S4 minimal.</li>
+        <li><code>ScreenSummary</code>/<code>ScreenSaved</code> + <code>summaryCursor</code>/<code>summaryErrs</code> en <code>model.go</code>; dispatch en <code>wizard.go</code>.</li>
+        <li><code>stepSaveAndFinish</code> deriva a <code>enterSummary</code>; <code>stepBack</code> mode=edit deja de ser stub y vuelve a S3.</li>
+        <li>Hints del modal SaveChoice: "guarda este y va al resumen" reemplaza "(placeholder de S3)".</li>
       </ul>
 
       <h4 class="oos-h">Out of scope</h4>
-      <p class="oos">Editar/borrar/reordenar desde S3 (H7), $EDITOR (H8).</p>
+      <p class="oos">Editar/borrar/reordenar desde S3 (H7), $EDITOR (H8). El cursor de S3 ya se renderiza pero no acepta acciones todavía.</p>
     </div>
 
     <!-- H7 -->
