@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>che — design notes</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --bg-alt: #f4f4f2;
+    --surface: #ffffff;
+    --ink: #18181b;
+    --ink-soft: #52525b;
+    --ink-mute: #71717a;
+    --line: #e4e4e7;
+    --line-strong: #d4d4d8;
+    --accent: #4338ca;
+    --accent-soft: #eef2ff;
+    --ok: #15803d;
+    --ok-soft: #ecfdf5;
+    --warn: #b45309;
+    --warn-soft: #fef3c7;
+    --fail: #b91c1c;
+    --fail-soft: #fef2f2;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 920px; margin: 0 auto; padding: 80px 32px 120px; }
+  section + section { margin-top: 64px; }
+  h1 {
+    font-size: 40px;
+    line-height: 1.15;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0 0 16px;
+  }
+  h2 {
+    font-size: 24px;
+    line-height: 1.25;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    margin: 0 0 16px;
+  }
+  h3 {
+    font-size: 17px;
+    font-weight: 600;
+    margin: 28px 0 8px;
+    letter-spacing: -0.005em;
+  }
+  p { margin: 0 0 14px; color: var(--ink-soft); }
+  p strong, li strong { color: var(--ink); font-weight: 600; }
+  .eyebrow {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 16px;
+  }
+  .lede { font-size: 18px; color: var(--ink-soft); max-width: 680px; }
+  .rule { height: 1px; background: var(--line); margin: 0; border: 0; }
+  ul, ol { margin: 0 0 14px; padding-left: 22px; color: var(--ink-soft); }
+  ul li, ol li { margin-bottom: 6px; }
+  code {
+    font-family: var(--mono);
+    font-size: 13px;
+    background: var(--bg-alt);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--ink);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 12px 0 18px;
+    font-size: 14.5px;
+  }
+  th, td {
+    text-align: left;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+    color: var(--ink);
+  }
+  th {
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-mute);
+    background: var(--bg-alt);
+  }
+  td code { font-size: 12.5px; }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px 22px;
+  }
+  .card.accent { background: var(--accent-soft); border-color: #c7d2fe; color: var(--ink); }
+  .card.warn { background: var(--warn-soft); border-color: #fde68a; }
+
+  .mockup {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 1px 0 rgba(0,0,0,0.02), 0 12px 32px -16px rgba(0,0,0,0.08);
+    margin-top: 8px;
+  }
+  .mockup .topbar {
+    background: var(--bg-alt);
+    border-bottom: 1px solid var(--line);
+    padding: 10px 14px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-mute);
+  }
+  .mockup .topbar .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--line-strong);
+  }
+  .mockup .topbar .path { margin-left: 6px; color: var(--ink); }
+  .mockup .topbar .step-pos {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--ink-mute);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+  .mockup .body { padding: 26px; }
+  .mockup-caption {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-mute);
+    margin: 10px 4px 0;
+  }
+
+  .field { margin-bottom: 22px; }
+  .field-label {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-mute);
+    font-weight: 600;
+    margin-bottom: 6px;
+    font-family: var(--mono);
+  }
+  .field-help {
+    font-size: 12.5px;
+    color: var(--ink-mute);
+    margin-top: 4px;
+  }
+  .text-input {
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    padding: 10px 12px;
+    font-size: 14.5px;
+    color: var(--ink);
+    min-height: 22px;
+  }
+  .text-input.focused {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .text-input.multiline {
+    min-height: 64px;
+    line-height: 1.5;
+  }
+  .text-input .cursor::after {
+    content: "";
+    display: inline-block;
+    width: 1px;
+    height: 16px;
+    background: var(--accent);
+    vertical-align: middle;
+    margin-left: 1px;
+    animation: blink 1.05s infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .radio-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .radio-pill {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    padding: 8px 14px;
+    font-size: 14px;
+    color: var(--ink);
+  }
+  .radio-pill .dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 1.5px solid var(--line-strong);
+    background: var(--surface);
+    position: relative;
+  }
+  .radio-pill.selected {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+  .radio-pill.selected .dot { border-color: var(--accent); }
+  .radio-pill.selected .dot::after {
+    content: "";
+    position: absolute;
+    inset: 2px;
+    background: var(--accent);
+    border-radius: 50%;
+  }
+
+  .picker {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--surface);
+  }
+  .picker-head {
+    background: var(--bg-alt);
+    padding: 8px 12px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 1px solid var(--line);
+  }
+  .picker-row {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 14px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    font-size: 13.5px;
+    align-items: center;
+  }
+  .picker-row:last-child { border-bottom: 0; }
+  .picker-row .skill-name {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--ink);
+  }
+  .picker-row .skill-desc { color: var(--ink-mute); font-size: 13px; }
+  .picker-row.selected { background: var(--accent-soft); }
+  .picker-row.selected .skill-name { color: var(--accent); font-weight: 600; }
+
+  .validator-block {
+    border: 1px dashed var(--line-strong);
+    border-radius: 8px;
+    padding: 18px 20px;
+    background: var(--bg-alt);
+    margin-top: 12px;
+  }
+  .vb-title {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--accent);
+    font-weight: 600;
+    font-family: var(--mono);
+    margin-bottom: 14px;
+  }
+
+  .btn-row {
+    display: flex;
+    gap: 10px;
+    margin-top: 26px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    align-items: center;
+  }
+  .btn {
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-size: 14px;
+    color: var(--ink);
+    cursor: default;
+  }
+  .btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+  }
+  .btn.ghost {
+    background: transparent;
+    border-color: var(--line);
+    color: var(--ink-mute);
+  }
+  .btn-row .spacer { flex: 1; }
+  .btn .arrow { margin: 0 4px; }
+
+  .toggle {
+    display: inline-flex;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .toggle .opt {
+    padding: 7px 16px;
+    font-size: 13.5px;
+    color: var(--ink);
+    background: var(--surface);
+  }
+  .toggle .opt.on { background: var(--accent); color: white; }
+
+  .summary-step {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin-bottom: 12px;
+    background: var(--surface);
+  }
+  .summary-step h4 {
+    margin: 0 0 8px;
+    font-size: 14.5px;
+    font-weight: 600;
+    font-family: var(--mono);
+    color: var(--ink);
+  }
+  .summary-step .meta {
+    font-size: 13.5px;
+    color: var(--ink-soft);
+    line-height: 1.7;
+  }
+  .chip {
+    display: inline-block;
+    background: var(--bg-alt);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 8px;
+    font-family: var(--mono);
+    font-size: 12px;
+    margin: 0 2px;
+    color: var(--ink);
+  }
+  .chip.accent { background: var(--accent-soft); color: var(--accent); border-color: #c7d2fe; }
+  .chip.warn { background: var(--warn-soft); color: var(--warn); border-color: #fde68a; }
+  .chip.muted { background: var(--bg-alt); color: var(--ink-mute); border-color: var(--line); }
+  .chip.ok { background: var(--ok-soft); color: var(--ok); border-color: #bbf7d0; }
+
+  pre.code {
+    background: #1e1e2e;
+    color: #cdd6f4;
+    padding: 20px 22px;
+    border-radius: 10px;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.55;
+    margin: 14px 0;
+  }
+  pre.code .k { color: #cba6f7; }
+  pre.code .s { color: #a6e3a1; }
+  pre.code .c { color: #6c7086; font-style: italic; }
+  pre.code .n { color: #f9e2af; }
+
+  .tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    background: var(--ok-soft);
+    color: var(--ok);
+    border: 1px solid #bbf7d0;
+    border-radius: 4px;
+    padding: 1px 7px;
+    margin-left: 4px;
+    vertical-align: middle;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .tag.muted { background: var(--bg-alt); color: var(--ink-mute); border-color: var(--line); }
+
+  footer {
+    margin-top: 100px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    color: var(--ink-mute);
+    font-size: 13px;
+    font-family: var(--mono);
+  }
+</style>
+</head>
+<body>
+<main>
+
+  <section>
+    <div class="eyebrow">che / design</div>
+    <h1>Design notes</h1>
+    <p class="lede">
+      Doc vivo. Acumula decisiones de producto y arquitectura técnica del revamp
+      a medida que las vamos cerrando. Compañero de <code>vision.html</code>:
+      mientras ése describe el qué, este describe el cómo.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <section>
+    <div class="eyebrow">arquitectura</div>
+    <h2>Backend de ejecución</h2>
+    <p>
+      <strong>Subprocess + headless con stream-json.</strong> No PTY como base.
+      che invoca cada CLI con su flag de modo no-interactivo, parsea el output
+      estructurado, y normaliza eventos al modelo común del adapter.
+    </p>
+    <p>
+      <strong>PTY queda como escape hatch</strong> para casos específicos donde
+      algún CLI degrade features en headless (slash commands que solo viven en
+      TUI, etc.). No es default.
+    </p>
+    <div class="card accent">
+      <strong>Validado con smoke test del 2026-05-06.</strong> Los 4 CLIs cargan
+      skills, custom commands y project markdown del usuario al ejecutarse en
+      headless. La transparencia que se buscaba (heredar config sin
+      reconfigurar) no requiere PTY.
+    </div>
+  </section>
+
+  <section>
+    <div class="eyebrow">stack</div>
+    <h2>CLIs soportados (v1)</h2>
+    <table>
+      <thead>
+        <tr><th>CLI</th><th>Modo headless</th><th>Custom config detectada</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>claude</strong></td>
+          <td><code>claude -p --dangerously-skip-permissions</code></td>
+          <td><code>~/.claude/skills/&lt;name&gt;/SKILL.md</code></td>
+        </tr>
+        <tr>
+          <td><strong>codex</strong></td>
+          <td><code>codex exec --skip-git-repo-check</code></td>
+          <td><code>~/.codex/skills/&lt;name&gt;/SKILL.md</code></td>
+        </tr>
+        <tr>
+          <td><strong>gemini</strong></td>
+          <td><code>gemini -p "..." --yolo</code></td>
+          <td><code>~/.gemini/commands/&lt;name&gt;.toml</code> + <code>GEMINI.md</code> en cwd</td>
+        </tr>
+        <tr>
+          <td><strong>opencode</strong></td>
+          <td><code>opencode run "..."</code></td>
+          <td><code>~/.config/opencode/skills/&lt;name&gt;/SKILL.md</code></td>
+        </tr>
+      </tbody>
+    </table>
+    <p>
+      <strong>Convergencia:</strong> claude / codex / opencode usan el mismo
+      formato <code>SKILL.md</code> (frontmatter YAML + markdown). Gemini va
+      aparte (TOML para commands, markdown para context). El adapter por CLI
+      puede compartir gran parte del código entre los tres primeros.
+    </p>
+
+    <h3>Caveats encontrados</h3>
+    <ul>
+      <li><code>codex exec</code> requiere <code>--skip-git-repo-check</code> si el cwd no es un git repo trusted.</li>
+      <li><code>claude</code> puede vivir en <code>~/.local/bin/</code>, no asumir <code>/opt/homebrew/bin/</code>. El adapter detecta paths en runtime.</li>
+      <li><code>gemini 0.38.2</code> ya tiene custom commands funcionando en headless (PR #8305 mergeado). Antes era un riesgo, ya no.</li>
+    </ul>
+  </section>
+
+  <hr class="rule">
+
+  <section>
+    <div class="eyebrow">modelo</div>
+    <h2>Pipeline y step</h2>
+    <p>
+      Un <strong>pipeline</strong> es una secuencia ordenada de steps que va
+      de una premisa A a un entregable B. Un <strong>step</strong> ejecuta un
+      prompt y opcionalmente lo valida en loop.
+    </p>
+
+    <h3>Anatomía de un step</h3>
+    <table>
+      <thead>
+        <tr><th style="width: 130px;">Campo</th><th>Valores</th><th style="width: 110px;">Default</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>name</code></td><td>string</td><td>requerido</td></tr>
+        <tr><td><code>cli</code></td><td><code>claude</code> · <code>codex</code> · <code>gemini</code> · <code>opencode</code></td><td>requerido</td></tr>
+        <tr><td><code>kind</code></td><td><code>prompt</code> (texto libre) · <code>skill</code> (skill cargada del CLI)</td><td>requerido</td></tr>
+        <tr><td><code>content</code></td><td>si <code>kind=prompt</code>: el texto. si <code>kind=skill</code>: el nombre.</td><td>requerido</td></tr>
+        <tr><td><code>input</code></td><td><code>text</code> · <code>pr</code> · <code>issue</code> · <code>file</code> · <code>url</code> · <code>none</code> · <code>previous_output</code> (solo desde step 2)</td><td>requerido</td></tr>
+        <tr><td><code>validator</code></td><td>bloque opcional (ver abajo)</td><td><code>none</code></td></tr>
+        <tr><td><code>max_loops</code></td><td>int — cuántas veces se reintenta hasta que el validator apruebe</td><td><code>1</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>Validator (opcional)</h3>
+    <p>
+      Mismo shape que un step. <strong>El validator puede usar un CLI distinto
+      al step principal</strong> — esto habilita cross-review real (claude
+      escribe, codex revisa).
+    </p>
+    <table>
+      <thead>
+        <tr><th style="width: 130px;">Campo</th><th>Valores</th><th style="width: 110px;">Default</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>kind</code></td><td><code>prompt</code> · <code>skill</code></td><td>requerido</td></tr>
+        <tr><td><code>content</code></td><td>string · nombre de skill</td><td>requerido</td></tr>
+        <tr><td><code>cli</code></td><td>uno de los 4, independiente del CLI del step</td><td>requerido</td></tr>
+        <tr><td><code>on_max_loops</code></td><td><code>fail</code> · <code>continue</code> · <code>pause</code></td><td><code>fail</code></td></tr>
+      </tbody>
+    </table>
+
+    <p style="margin-top: 18px;"><strong>Cuando hay validator, el step entra en loop:</strong></p>
+    <ol>
+      <li>Ejecuta el step principal con la premisa + outputs anteriores.</li>
+      <li>Pasa el output al validator.</li>
+      <li>Si el validator aprueba → step termina exitoso, sigue el siguiente.</li>
+      <li>Si el validator rechaza → re-ejecuta el step principal con <strong>prompt original + feedback del validator</strong> como contexto adicional, hasta <code>max_loops</code> veces.</li>
+      <li>Si se agota <code>max_loops</code> sin aprobación → aplica <code>on_max_loops</code>:
+        <ul>
+          <li><code>fail</code>: corta el pipeline, marca el step como fallido.</li>
+          <li><code>continue</code>: avanza con la última versión, marca el step como "no convergido".</li>
+          <li><code>pause</code>: para el pipeline y pide intervención humana.</li>
+        </ul>
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <div class="eyebrow">decisiones cerradas</div>
+    <h2>Lo que ya está cerrado (2026-05-06)</h2>
+    <ul>
+      <li><strong>Backend:</strong> subprocess + headless con stream-json. PTY descartado como base.</li>
+      <li><strong>CLIs:</strong> 4 backends — claude, codex, gemini, opencode.</li>
+      <li><strong>Step:</strong> elige <code>cli</code> + <code>kind</code> (<code>prompt</code> o <code>skill</code>) + <code>content</code> + <code>input</code>.</li>
+      <li><strong>Input del step:</strong> uno de <code>text</code> / <code>pr</code> / <code>issue</code> / <code>file</code> / <code>url</code> / <code>none</code>. Desde el step 2 se suma <code>previous_output</code> (solo el inmediato anterior). Sin "premisa" abstracta a nivel pipeline — cada step declara qué necesita.</li>
+      <li><strong>Validator:</strong> opcional, con CLI <em>independiente</em> del step (cross-review habilitado).</li>
+      <li><strong><code>on_max_loops</code>:</strong> configurable por step, default <code>fail</code>.</li>
+      <li><strong>Re-loop:</strong> el step se reinvoca con prompt original + feedback del validator.</li>
+      <li><strong>Gates humanos:</strong> no soportados en v1. El humano interviene solo al disparar el pipeline (proveyendo el input que el step 1 pide) y al final (revisar entregable).</li>
+      <li><strong>Formato del pipeline:</strong> <strong>YAML estricto</strong> como artefacto canónico. Parser que rechaza type coercion y campos desconocidos. La decisión no es irreversible — internamente che parsea a una struct, exportar a JSON o TOML se puede sumar después si aparece la demanda.</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="eyebrow">para más adelante</div>
+    <h2>Preguntas que no bloquean el wizard</h2>
+    <ul>
+      <li><strong>Pasaje de output entre steps:</strong> ¿el output del step N entra como input del step N+1 automáticamente, o cada step se invoca con la premisa original + un selector explícito tipo <code>{{ steps.N.output }}</code>?</li>
+      <li><strong>Branching / condicionales:</strong> ¿pipelines siempre lineales en v1?</li>
+      <li><strong>Skill inexistente referenciada:</strong> ¿validación al guardar el pipeline o al runtime?</li>
+      <li><strong>Persistencia de outputs intermedios:</strong> ¿en memoria, en disco, ambos? ¿para audit trail, retry, debugging?</li>
+      <li><strong>Definición del pipeline:</strong> ¿YAML, TOML, JSON, UI form-based, todas?</li>
+      <li><strong>Concurrencia:</strong> ¿pueden correr varios pipelines en paralelo? ¿steps en paralelo dentro de un pipeline?</li>
+    </ul>
+  </section>
+
+  <hr class="rule">
+
+  <section>
+    <div class="eyebrow">wizard</div>
+    <h2>Wizard de creación de pipeline</h2>
+    <p>
+      Tres pantallas. La UI llama "skill" a todo por uniformidad — el adapter
+      de gemini traduce internamente a "custom command" (TOML), invisible para
+      el usuario.
+    </p>
+    <p><strong>Donde vive el wizard:</strong></p>
+    <ul>
+      <li><strong>TUI (default):</strong> <code>che pipeline new</code> arranca el wizard como TUI bubbletea.</li>
+      <li><strong>Web:</strong> el dashboard (<code>che dash</code>) lo expone como formulario.</li>
+      <li><strong>YAML directo:</strong> usuarios power escriben el archivo a mano.</li>
+    </ul>
+    <p>Las tres formas producen el mismo artefacto YAML.</p>
+  </section>
+
+  <section>
+    <div class="mockup">
+      <div class="topbar">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="path">che / pipeline new</span>
+        <span class="step-pos">1 / 3 · información</span>
+      </div>
+      <div class="body">
+
+        <div class="field">
+          <div class="field-label">Nombre del pipeline</div>
+          <div class="text-input">Triage de incident — checkout-flow</div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">Descripción</div>
+          <div class="text-input multiline focused">Toma una métrica anómala del flujo de checkout y propone causa probable cruzando logs, deploys y cambios recientes.<span class="cursor"></span></div>
+          <div class="field-help">El input del pipeline lo define cada step. No hay "premisa" a nivel pipeline.</div>
+        </div>
+
+        <div class="btn-row">
+          <span class="btn ghost">cancelar</span>
+          <span class="spacer"></span>
+          <span class="btn primary">siguiente <span class="arrow">→</span></span>
+        </div>
+
+      </div>
+    </div>
+    <div class="mockup-caption">Pantalla 1 — info del pipeline (nombre, descripción, premisa).</div>
+  </section>
+
+  <section>
+    <div class="mockup">
+      <div class="topbar">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="path">che / pipeline new / step 1</span>
+        <span class="step-pos">2 / 3 · steps</span>
+      </div>
+      <div class="body">
+
+        <div class="field">
+          <div class="field-label">Nombre del step</div>
+          <div class="text-input">collect-signals</div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">CLI del step</div>
+          <div class="radio-row">
+            <span class="radio-pill selected"><span class="dot"></span>claude</span>
+            <span class="radio-pill"><span class="dot"></span>codex</span>
+            <span class="radio-pill"><span class="dot"></span>gemini</span>
+            <span class="radio-pill"><span class="dot"></span>opencode</span>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">Input del step</div>
+          <div class="radio-row">
+            <span class="radio-pill selected"><span class="dot"></span>text</span>
+            <span class="radio-pill"><span class="dot"></span>pr</span>
+            <span class="radio-pill"><span class="dot"></span>issue</span>
+            <span class="radio-pill"><span class="dot"></span>file</span>
+            <span class="radio-pill"><span class="dot"></span>url</span>
+            <span class="radio-pill"><span class="dot"></span>none</span>
+          </div>
+          <div class="field-help">
+            Como es el step 1, no aparece <code>previous_output</code>.
+            En steps 2+ se suma esa opción para encadenar.
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">Cómo se define el contenido</div>
+          <div class="radio-row">
+            <span class="radio-pill"><span class="dot"></span>prompt libre</span>
+            <span class="radio-pill selected"><span class="dot"></span>skill</span>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">Skill</div>
+          <div class="picker">
+            <div class="picker-head">skills disponibles en ~/.claude/skills/</div>
+            <div class="picker-row">
+              <span class="skill-name">hs-auto</span>
+              <span class="skill-desc">orquestar pipeline harness end-to-end</span>
+            </div>
+            <div class="picker-row selected">
+              <span class="skill-name">collect-signals</span>
+              <span class="skill-desc">recopila logs, métricas y eventos del periodo</span>
+            </div>
+            <div class="picker-row">
+              <span class="skill-name">correlate-deploys</span>
+              <span class="skill-desc">cruza ventana temporal con deploys recientes</span>
+            </div>
+            <div class="picker-row">
+              <span class="skill-name">cross-review-hypothesis</span>
+              <span class="skill-desc">cuestiona una hipótesis de causa probable</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">¿Validar este step con cross-review?</div>
+          <div class="toggle">
+            <span class="opt on">sí</span>
+            <span class="opt">no</span>
+          </div>
+        </div>
+
+        <div class="validator-block">
+          <div class="vb-title">Validator</div>
+
+          <div class="field">
+            <div class="field-label">CLI del validator <span class="tag muted">independiente del step</span></div>
+            <div class="radio-row">
+              <span class="radio-pill"><span class="dot"></span>claude</span>
+              <span class="radio-pill selected"><span class="dot"></span>codex</span>
+              <span class="radio-pill"><span class="dot"></span>gemini</span>
+              <span class="radio-pill"><span class="dot"></span>opencode</span>
+            </div>
+            <div class="field-help">Sugerido: usar un CLI distinto al del step para cross-review real.</div>
+          </div>
+
+          <div class="field">
+            <div class="field-label">Kind del validator</div>
+            <div class="radio-row">
+              <span class="radio-pill selected"><span class="dot"></span>prompt libre</span>
+              <span class="radio-pill"><span class="dot"></span>skill</span>
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="field-label">Prompt del validator</div>
+            <div class="text-input multiline">Revisá el output del step. ¿Las señales recopiladas son suficientes para hipotetizar una causa? Respondé OK si sí, o listá qué falta.</div>
+          </div>
+
+          <div class="field" style="display: grid; grid-template-columns: 200px 1fr; gap: 24px; align-items: start;">
+            <div>
+              <div class="field-label">Loops máximo</div>
+              <div class="text-input" style="text-align: center; font-family: var(--mono);">3</div>
+            </div>
+            <div>
+              <div class="field-label">Si se agotan los loops</div>
+              <div class="radio-row">
+                <span class="radio-pill selected"><span class="dot"></span>fail</span>
+                <span class="radio-pill"><span class="dot"></span>continue</span>
+                <span class="radio-pill"><span class="dot"></span>pause</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="btn-row">
+          <span class="btn ghost"><span class="arrow">←</span> atrás</span>
+          <span class="btn">+ agregar step</span>
+          <span class="spacer"></span>
+          <span class="btn primary">guardar y ver resumen <span class="arrow">→</span></span>
+        </div>
+
+      </div>
+    </div>
+    <div class="mockup-caption">Pantalla 2 — definición de un step. El bloque del validator se expande al activar el toggle.</div>
+  </section>
+
+  <section>
+    <div class="mockup">
+      <div class="topbar">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="path">che / pipeline new / resumen</span>
+        <span class="step-pos">3 / 3 · resumen</span>
+      </div>
+      <div class="body">
+
+        <div style="margin-bottom: 22px;">
+          <div style="font-size: 18px; font-weight: 600; color: var(--ink); margin-bottom: 4px;">Triage de incident — checkout-flow</div>
+          <div style="font-size: 13.5px; color: var(--ink-mute);">Al disparar pide: <span class="chip">text</span> (lo que define el step 1)</div>
+        </div>
+
+        <div class="summary-step">
+          <h4>step 1 — collect-signals</h4>
+          <div class="meta">
+            <span class="chip accent">claude</span>
+            <span class="chip">skill: collect-signals</span>
+            <span class="chip ok">input: text</span><br>
+            Validator: <span class="chip accent">codex</span> · prompt libre · <span class="chip">3 loops</span> · <span class="chip warn">on_max=fail</span>
+          </div>
+        </div>
+
+        <div class="summary-step">
+          <h4>step 2 — correlate-deploys</h4>
+          <div class="meta">
+            <span class="chip accent">claude</span>
+            <span class="chip">skill: correlate-deploys</span>
+            <span class="chip ok">input: previous_output</span><br>
+            Sin validator · <span class="chip muted">max_loops = 1</span>
+          </div>
+        </div>
+
+        <div class="summary-step">
+          <h4>step 3 — hypothesize</h4>
+          <div class="meta">
+            <span class="chip accent">claude</span>
+            <span class="chip">prompt libre</span>
+            <span class="chip ok">input: previous_output</span><br>
+            Validator: <span class="chip accent">codex</span> · skill: cross-review-hypothesis · <span class="chip">3 loops</span> · <span class="chip warn">on_max=pause</span>
+          </div>
+        </div>
+
+        <div style="margin-top: 22px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg-alt); font-family: var(--mono); font-size: 13px; color: var(--ink-mute);">
+          se va a guardar como: <span style="color: var(--ink);">~/.che/pipelines/triage-checkout-flow.yaml</span>
+        </div>
+
+        <div class="btn-row">
+          <span class="btn ghost"><span class="arrow">←</span> atrás</span>
+          <span class="btn">editar step</span>
+          <span class="spacer"></span>
+          <span class="btn primary">✓ guardar pipeline</span>
+        </div>
+
+      </div>
+    </div>
+    <div class="mockup-caption">Pantalla 3 — resumen y confirmación. Cada step se puede editar sin perder los demás.</div>
+  </section>
+
+  <section>
+    <h3 style="margin-top: 40px;">Reglas del wizard</h3>
+    <ul>
+      <li><strong>Skill picker filtrado por CLI.</strong> Cuando el usuario elige <code>cli: claude</code>, el picker lista solo <code>~/.claude/skills/*</code>. Cuando elige <code>cli: gemini</code>, lista los <code>~/.gemini/commands/*.toml</code>. El campo se llama "skill" en la UI por uniformidad.</li>
+      <li><strong>Default <code>max_loops = 1</code>.</strong> Si no hay validator, max_loops es 1 implícito. El campo solo aparece cuando hay validator activado.</li>
+      <li><strong>Default validator CLI.</strong> El picker arranca con el mismo CLI que el step, pero sugiere visualmente "usar un CLI distinto" (cross-review). El usuario decide.</li>
+      <li><strong>Validación en el wizard:</strong> si se referencia una skill que no existe en el CLI elegido, el wizard la marca en rojo y no deja avanzar.</li>
+      <li><strong>Edición posterior:</strong> desde el resumen se puede ir a un step y editarlo, sin perder los demás.</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="eyebrow">artefacto resultante</div>
+    <h2>YAML del pipeline</h2>
+    <p>
+      Las tres formas del wizard (TUI, web, edición directa) producen el mismo
+      archivo. Vive en <code>~/.che/pipelines/&lt;nombre&gt;.yaml</code>.
+    </p>
+
+<pre class="code"><span class="k">name</span>: <span class="s">triage-checkout-flow</span>
+<span class="k">description</span>: |
+  Toma una métrica anómala del flujo de checkout y propone
+  causa probable.
+
+<span class="k">steps</span>:
+  - <span class="k">name</span>: <span class="s">collect-signals</span>
+    <span class="k">cli</span>: <span class="n">claude</span>
+    <span class="k">kind</span>: <span class="n">skill</span>
+    <span class="k">content</span>: <span class="s">collect-signals</span>
+    <span class="k">input</span>: <span class="n">text</span>           <span class="c"># el step 1 pide texto al disparar</span>
+    <span class="k">validator</span>:
+      <span class="k">cli</span>: <span class="n">codex</span>
+      <span class="k">kind</span>: <span class="n">prompt</span>
+      <span class="k">content</span>: |
+        Revisá el output del step. ¿Las señales recopiladas son
+        suficientes para hipotetizar una causa? Respondé OK si
+        sí, o listá qué falta.
+    <span class="k">max_loops</span>: <span class="n">3</span>
+    <span class="k">on_max_loops</span>: <span class="n">fail</span>
+
+  - <span class="k">name</span>: <span class="s">correlate-deploys</span>
+    <span class="k">cli</span>: <span class="n">claude</span>
+    <span class="k">kind</span>: <span class="n">skill</span>
+    <span class="k">content</span>: <span class="s">correlate-deploys</span>
+    <span class="k">input</span>: <span class="n">previous_output</span>
+
+  - <span class="k">name</span>: <span class="s">hypothesize</span>
+    <span class="k">cli</span>: <span class="n">claude</span>
+    <span class="k">kind</span>: <span class="n">prompt</span>
+    <span class="k">content</span>: |
+      A partir del input recibido, proponé una causa probable
+      de la caída del approval rate. Justificá con evidencia
+      concreta.
+    <span class="k">input</span>: <span class="n">previous_output</span>
+    <span class="k">validator</span>:
+      <span class="k">cli</span>: <span class="n">codex</span>
+      <span class="k">kind</span>: <span class="n">skill</span>
+      <span class="k">content</span>: <span class="s">cross-review-hypothesis</span>
+    <span class="k">max_loops</span>: <span class="n">3</span>
+    <span class="k">on_max_loops</span>: <span class="n">pause</span></pre>
+  </section>
+
+  <footer>
+    che / parametrizable revamp · design notes · 2026-05-06
+  </footer>
+
+</main>
+</body>
+</html>
