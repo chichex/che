@@ -30,6 +30,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateCancel(key)
 	case ScreenCollision:
 		return m.updateCollision(key)
+	case ScreenSummaryConfirmDelete:
+		return m.updateSummaryDelete(key)
 	}
 	return m, nil
 }
@@ -51,6 +53,8 @@ func (m model) View() string {
 		return m.viewCancel()
 	case ScreenCollision:
 		return m.viewCollision()
+	case ScreenSummaryConfirmDelete:
+		return m.viewSummaryDelete()
 	}
 	return ""
 }

@@ -1690,3 +1690,636 @@ func TestWizard_S3BackToS2(t *testing.T) {
 		t.Errorf("expected exit 0, got %d", res.ExitCode)
 	}
 }
+
+// h7BuildThreeSteps deja al wizard parado en S3 con 3 steps creados:
+// "first" (idx 0, input=text), "second" (idx 1, input=previous_output),
+// "third" (idx 2, input=previous_output). Helper compartido entre los
+// tests de H7 — sin esto cada test repite ~80 lineas de tipeo.
+//
+// El nombre del pipeline lo define el caller; el archivo en disco queda
+// en HOME/.che/pipelines/<slug>.yaml con stage=summary.
+func h7BuildThreeSteps(t *testing.T, p *harness.PTYRun, name string) {
+	t.Helper()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("2"); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 1/3", 3*time.Second) {
+		t.Fatalf("S1 never rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send(name); err != nil {
+		t.Fatalf("send name: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
+		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
+	}
+
+	// Step 1: name=first, content=alpha (default input=text).
+	if err := p.Send("first"); err != nil {
+		t.Fatalf("send step1 name: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.Send("\t"); err != nil {
+			t.Fatalf("tab #%d step1: %v", i, err)
+		}
+	}
+	if err := p.Send("alpha"); err != nil {
+		t.Fatalf("send step1 content: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("\x0e"); err != nil {
+		t.Fatalf("ctrl+n step1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 2 (create)", 3*time.Second) {
+		t.Fatalf("step 2 never rendered\n%s", p.Since(mark))
+	}
+
+	// Step 2: name=second, content=beta (default input=previous_output).
+	if err := p.Send("second"); err != nil {
+		t.Fatalf("send step2 name: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.Send("\t"); err != nil {
+			t.Fatalf("tab #%d step2: %v", i, err)
+		}
+	}
+	if err := p.Send("beta"); err != nil {
+		t.Fatalf("send step2 content: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("\x0e"); err != nil {
+		t.Fatalf("ctrl+n step2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 3 (create)", 3*time.Second) {
+		t.Fatalf("step 3 never rendered\n%s", p.Since(mark))
+	}
+
+	// Step 3: name=third, content=gamma (default input=previous_output).
+	if err := p.Send("third"); err != nil {
+		t.Fatalf("send step3 name: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.Send("\t"); err != nil {
+			t.Fatalf("tab #%d step3: %v", i, err)
+		}
+	}
+	if err := p.Send("gamma"); err != nil {
+		t.Fatalf("send step3 content: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s step3: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never rendered\n%s", p.Since(mark))
+	}
+}
+
+// TestWizard_S3H7EditStep cubre la rama "e" de H7: en S3 el cursor sobre
+// el step 2 + e abre S2 mode=edit con campos pre-cargados; agregar al
+// content + ctrl+s vuelve a S3; el archivo refleja el cambio.
+func TestWizard_S3H7EditStep(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	h7BuildThreeSteps(t, p, "Demo H7 Edit")
+
+	// Cursor a step 2. El sleep evita que bubbletea batch'ee "j" + la
+	// proxima tecla como un solo KeyMsg multi-rune (sin handler match).
+	if err := p.Send("j"); err != nil {
+		t.Fatalf("send j: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// e → S2 mode=edit sobre step 2.
+	mark := p.Mark()
+	if err := p.Send("e"); err != nil {
+		t.Fatalf("send e: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 2 (edit)", 3*time.Second) {
+		t.Fatalf("S2 mode=edit never rendered\n%s", p.Since(mark))
+	}
+
+	// Foco arranca en Name → 3 tabs hasta Content (cli, kind, content).
+	for i := 0; i < 3; i++ {
+		if err := p.Send("\t"); err != nil {
+			t.Fatalf("tab→content #%d: %v", i, err)
+		}
+	}
+	// Append "-x" al content existente ("beta") → "beta-x".
+	if err := p.Send("-x"); err != nil {
+		t.Fatalf("append content: %v", err)
+	}
+
+	// ctrl+s → guarda step + vuelve a S3.
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s save edit: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never re-rendered after edit\n%s", p.Since(mark))
+	}
+
+	// Verificar el archivo en disco — sigue draft (stage=summary) con el
+	// content nuevo.
+	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h7-edit.yaml")
+	data, err := os.ReadFile(expected)
+	if err != nil {
+		t.Fatalf("read draft: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		"- name: first",
+		"content: alpha",
+		"- name: second",
+		"content: beta-x",
+		"- name: third",
+		"content: gamma",
+		"stage: summary",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in YAML; got:\n%s", want, body)
+		}
+	}
+	if got := strings.Count(body, "- name:"); got != 3 {
+		t.Errorf("expected exactly 3 steps, got %d:\n%s", got, body)
+	}
+
+	// Salir limpio via ctrl+c → SC keep → menu → q.
+	mark = p.Mark()
+	if err := p.Send("\x03"); err != nil {
+		t.Fatalf("send ctrl+c: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
+		t.Fatalf("SC modal never opened\n%s", p.Since(mark))
+	}
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	mark = p.Mark()
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Errorf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
+// TestWizard_S3H7DeleteStep cubre la rama "d" de H7: en S3 el cursor
+// sobre el step 2 + d abre el modal de confirmacion; "1" confirma y
+// remueve el step; el archivo refleja 2 steps en orden (first, third).
+func TestWizard_S3H7DeleteStep(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	h7BuildThreeSteps(t, p, "Demo H7 Delete")
+
+	// Cursor a step 2. El sleep evita que bubbletea batch'ee "j" + la
+	// proxima tecla como un solo KeyMsg multi-rune (sin handler match).
+	if err := p.Send("j"); err != nil {
+		t.Fatalf("send j: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	// d → modal "Borrar step".
+	mark := p.Mark()
+	if err := p.Send("d"); err != nil {
+		t.Fatalf("send d: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Borrar step", 3*time.Second) {
+		t.Fatalf("delete modal never opened\n%s", p.Since(mark))
+	}
+
+	// "1" = confirmar borrar.
+	mark = p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never re-rendered after delete\n%s", p.Since(mark))
+	}
+
+	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h7-delete.yaml")
+	data, err := os.ReadFile(expected)
+	if err != nil {
+		t.Fatalf("read draft: %v", err)
+	}
+	body := string(data)
+	if got := strings.Count(body, "- name:"); got != 2 {
+		t.Fatalf("expected 2 steps after delete, got %d:\n%s", got, body)
+	}
+	if !strings.Contains(body, "- name: first") {
+		t.Errorf("expected first step still present; got:\n%s", body)
+	}
+	if !strings.Contains(body, "- name: third") {
+		t.Errorf("expected third step still present; got:\n%s", body)
+	}
+	if strings.Contains(body, "- name: second") {
+		t.Errorf("step 2 should have been deleted; got:\n%s", body)
+	}
+	// Orden: first antes que third en el YAML.
+	if iFirst, iThird := strings.Index(body, "- name: first"), strings.Index(body, "- name: third"); iFirst < 0 || iThird < 0 || iFirst >= iThird {
+		t.Errorf("expected first before third; got:\n%s", body)
+	}
+	if !strings.Contains(body, "stage: summary") {
+		t.Errorf("expected stage: summary after delete; got:\n%s", body)
+	}
+
+	// Salir limpio.
+	mark = p.Mark()
+	if err := p.Send("\x03"); err != nil {
+		t.Fatalf("send ctrl+c: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
+		t.Fatalf("SC modal never opened\n%s", p.Since(mark))
+	}
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	mark = p.Mark()
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Errorf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
+// TestWizard_S3H7ReorderStep cubre la rama shift+↓ de H7: cursor sobre el
+// step 2 + shift+↓ baja step 2 a la posicion 3. Orden final: first,
+// third, second. Ningun step queda en idx 0 con previous_output, asi que
+// no se rompe la cadena — el flow happy-path para reorder.
+func TestWizard_S3H7ReorderStep(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	h7BuildThreeSteps(t, p, "Demo H7 Reorder")
+
+	// Cursor a step 2 (idx 1).
+	if err := p.Send("j"); err != nil {
+		t.Fatalf("send j: %v", err)
+	}
+
+	// shift+↓ — bubbletea parsea CSI 1;2B como "shift+down".
+	mark := p.Mark()
+	if err := p.Send("\x1b[1;2B"); err != nil {
+		t.Fatalf("send shift+down: %v", err)
+	}
+	// Tras el reorder seguimos en S3 — esperamos un poco a que rerenderice.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		// El render trae el header "paso 3/3"; si lo vemos asumimos que el
+		// frame se redibujo con el nuevo orden.
+		if strings.Contains(p.Since(mark), "paso 3/3") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h7-reorder.yaml")
+	// El reorder es un evento sincronico de Save — el archivo deberia estar
+	// listo de inmediato, pero damos 2s de gracia para coyunturas de FS.
+	deadline = time.Now().Add(2 * time.Second)
+	var body string
+	for time.Now().Before(deadline) {
+		data, err := os.ReadFile(expected)
+		if err == nil {
+			body = string(data)
+			iFirst := strings.Index(body, "- name: first")
+			iThird := strings.Index(body, "- name: third")
+			iSecond := strings.Index(body, "- name: second")
+			if iFirst >= 0 && iThird > iFirst && iSecond > iThird {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if body == "" {
+		t.Fatalf("draft file never appeared at %s", expected)
+	}
+	iFirst := strings.Index(body, "- name: first")
+	iThird := strings.Index(body, "- name: third")
+	iSecond := strings.Index(body, "- name: second")
+	if !(iFirst >= 0 && iThird > iFirst && iSecond > iThird) {
+		t.Errorf("expected order first < third < second after reorder; got:\n%s", body)
+	}
+	if got := strings.Count(body, "- name:"); got != 3 {
+		t.Errorf("expected 3 steps in YAML, got %d:\n%s", got, body)
+	}
+	if !strings.Contains(body, "stage: summary") {
+		t.Errorf("expected stage: summary after reorder; got:\n%s", body)
+	}
+
+	// Salir limpio.
+	mark = p.Mark()
+	if err := p.Send("\x03"); err != nil {
+		t.Fatalf("send ctrl+c: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
+		t.Fatalf("SC modal never opened\n%s", p.Since(mark))
+	}
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	mark = p.Mark()
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Errorf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
+// TestWizard_S3H7AppendStep cubre la rama "+" de H7: en S3, "+" salta a
+// S2 mode=create con idx == len(Steps), y guardar el step nuevo deja un
+// pipeline con 4 entradas en orden first/second/third/fourth.
+func TestWizard_S3H7AppendStep(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	h7BuildThreeSteps(t, p, "Demo H7 Append")
+
+	// "+" → S2 mode=create con idx == 3 (titulo "step 4 (create)").
+	mark := p.Mark()
+	if err := p.Send("+"); err != nil {
+		t.Fatalf("send +: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 4 (create)", 3*time.Second) {
+		t.Fatalf("S2 mode=create idx 3 never rendered\n%s", p.Since(mark))
+	}
+
+	// Step 4 minimal: name=fourth, content=delta, default input=previous_output.
+	if err := p.Send("fourth"); err != nil {
+		t.Fatalf("send step4 name: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.Send("\t"); err != nil {
+			t.Fatalf("tab #%d step4: %v", i, err)
+		}
+	}
+	if err := p.Send("delta"); err != nil {
+		t.Fatalf("send step4 content: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s save step4: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never re-rendered after append\n%s", p.Since(mark))
+	}
+
+	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h7-append.yaml")
+	data, err := os.ReadFile(expected)
+	if err != nil {
+		t.Fatalf("read draft: %v", err)
+	}
+	body := string(data)
+	if got := strings.Count(body, "- name:"); got != 4 {
+		t.Errorf("expected 4 steps after append, got %d:\n%s", got, body)
+	}
+	for _, want := range []string{
+		"- name: first",
+		"- name: second",
+		"- name: third",
+		"- name: fourth",
+		"content: delta",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q in YAML; got:\n%s", want, body)
+		}
+	}
+	// Orden: first < second < third < fourth.
+	idx := func(needle string) int { return strings.Index(body, needle) }
+	if !(idx("- name: first") < idx("- name: second") &&
+		idx("- name: second") < idx("- name: third") &&
+		idx("- name: third") < idx("- name: fourth")) {
+		t.Errorf("unexpected step order; got:\n%s", body)
+	}
+
+	// Salir limpio.
+	mark = p.Mark()
+	if err := p.Send("\x03"); err != nil {
+		t.Fatalf("send ctrl+c: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
+		t.Fatalf("SC modal never opened\n%s", p.Since(mark))
+	}
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	mark = p.Mark()
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Errorf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
+// TestWizard_S3H7DeleteBreaksPrevDep cubre la red de H7 sobre dependencias
+// rotas: en un pipeline de 2 steps donde step 2 usa previous_output,
+// borrar step 1 deja a step 2 en idx 0 — la dependencia se rompe. El UI
+// muestra el warning ⚠ en S3 y ctrl+s falla en IsValid (previous_output
+// en step 0 esta prohibido). El usuario ve la senal sin perder el
+// archivo.
+func TestWizard_S3H7DeleteBreaksPrevDep(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("2"); err != nil {
+		t.Fatalf("send 2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 1/3", 3*time.Second) {
+		t.Fatalf("S1 never rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("Demo H7 Broken"); err != nil {
+		t.Fatalf("send name: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
+		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
+	}
+
+	// Step 1: name=first, content=alpha (default input=text).
+	if err := p.Send("first"); err != nil {
+		t.Fatalf("send step1 name: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.Send("\t"); err != nil {
+			t.Fatalf("tab #%d step1: %v", i, err)
+		}
+	}
+	if err := p.Send("alpha"); err != nil {
+		t.Fatalf("send step1 content: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("\x0e"); err != nil {
+		t.Fatalf("ctrl+n step1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 2 (create)", 3*time.Second) {
+		t.Fatalf("step 2 never rendered\n%s", p.Since(mark))
+	}
+
+	// Step 2: name=second, content=beta, input=previous_output (default).
+	if err := p.Send("second"); err != nil {
+		t.Fatalf("send step2 name: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := p.Send("\t"); err != nil {
+			t.Fatalf("tab #%d step2: %v", i, err)
+		}
+	}
+	if err := p.Send("beta"); err != nil {
+		t.Fatalf("send step2 content: %v", err)
+	}
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s step2: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never rendered\n%s", p.Since(mark))
+	}
+
+	// Cursor en step 1 (idx 0). d → modal → "1" confirma.
+	mark = p.Mark()
+	if err := p.Send("d"); err != nil {
+		t.Fatalf("send d: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Borrar step", 3*time.Second) {
+		t.Fatalf("delete modal never opened\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 3*time.Second) {
+		t.Fatalf("S3 never re-rendered\n%s", p.Since(mark))
+	}
+
+	// El warning "previous_output sin step previo" debe aparecer en S3.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(p.Since(mark), "previous_output sin step previo") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(p.Since(mark), "previous_output sin step previo") {
+		t.Errorf("expected broken-dep warning in S3 render; got:\n%s", p.Since(mark))
+	}
+
+	// ctrl+s en S3 → IsValid rechaza previous_output en step 0 → seguimos
+	// en S3 con el banner "no se puede guardar".
+	mark = p.Mark()
+	if err := p.Send("\x13"); err != nil {
+		t.Fatalf("ctrl+s save broken: %v", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(p.Since(mark), "no se puede guardar") &&
+			strings.Contains(p.Since(mark), "previous_output") {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	snap := p.Since(mark)
+	if !strings.Contains(snap, "no se puede guardar") {
+		t.Errorf("expected validation error banner; got:\n%s", snap)
+	}
+	if !strings.Contains(snap, "previous_output") {
+		t.Errorf("expected validation error to mention previous_output; got:\n%s", snap)
+	}
+
+	// Archivo en disco: solo step 2 ("second") con input=previous_output;
+	// stage=summary (sigue draft).
+	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "demo-h7-broken.yaml")
+	data, err := os.ReadFile(expected)
+	if err != nil {
+		t.Fatalf("read draft: %v", err)
+	}
+	body := string(data)
+	if got := strings.Count(body, "- name:"); got != 1 {
+		t.Errorf("expected 1 step after delete, got %d:\n%s", got, body)
+	}
+	if strings.Contains(body, "- name: first") {
+		t.Errorf("step 1 should have been deleted; got:\n%s", body)
+	}
+	if !strings.Contains(body, "- name: second") {
+		t.Errorf("step 2 should still exist; got:\n%s", body)
+	}
+	if !strings.Contains(body, "input: previous_output") {
+		t.Errorf("step 2 input should still be previous_output (literal in YAML); got:\n%s", body)
+	}
+	if !strings.Contains(body, "stage: summary") {
+		t.Errorf("expected stage: summary on broken draft; got:\n%s", body)
+	}
+
+	// Salir limpio.
+	mark = p.Mark()
+	if err := p.Send("\x03"); err != nil {
+		t.Fatalf("send ctrl+c: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
+		t.Fatalf("SC modal never opened\n%s", p.Since(mark))
+	}
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	mark = p.Mark()
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Errorf("expected exit 0, got %d", res.ExitCode)
+	}
+}

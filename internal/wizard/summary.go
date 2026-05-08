@@ -43,10 +43,10 @@ func (m model) enterSummary() (model, tea.Cmd) {
 
 // updateSummary maneja teclas en S3.
 //
-// H6 deja casi todo en stub: ↑/↓ mueven el cursor entre steps sin accion;
-// e/d/shift+↑↓/+ quedan reservados para H7. ctrl+s valida y persiste el
-// archivo final sin status; esc vuelve al ultimo step en mode=edit. Sin
-// ctrl+c → SC, igual que el resto del wizard.
+// ↑/↓ navegan los steps; e/d/shift+↑↓/+ accionan sobre el step apuntado
+// (H7). ctrl+s valida y persiste el archivo final sin status; esc vuelve
+// al ultimo step en mode=edit. ctrl+c abre SC, igual que el resto del
+// wizard.
 func (m model) updateSummary(key tea.KeyMsg) (model, tea.Cmd) {
 	switch key.String() {
 	case "ctrl+c":
@@ -69,10 +69,186 @@ func (m model) updateSummary(key tea.KeyMsg) (model, tea.Cmd) {
 			m.summaryCursor++
 		}
 		return m, nil
+	case "shift+up":
+		return m.summaryReorder(-1)
+	case "shift+down":
+		return m.summaryReorder(+1)
+	case "e":
+		// Edit del step apuntado: salto a S2 mode=edit. enterStepEdit
+		// persiste status.stage=step + step_idx + step_mode=edit.
+		if m.summaryCursor < 0 || m.summaryCursor >= len(m.pipeline.Steps) {
+			return m, nil
+		}
+		return m.enterStepEdit(m.summaryCursor)
+	case "d":
+		if len(m.pipeline.Steps) == 0 {
+			return m, nil
+		}
+		return m.openSummaryDelete()
+	case "+":
+		// Append: nuevo step al final → S2 mode=create con idx == len(Steps).
+		// enterStepCreate maneja persistencia del status=step.
+		return m.enterStepCreate(len(m.pipeline.Steps))
 	case "ctrl+s", "enter":
 		return m.summarySaveAndFinish()
 	}
 	return m, nil
+}
+
+// summaryReorder mueve el step apuntado por summaryCursor delta posiciones
+// (delta = -1 sube, +1 baja). No-op si el cursor o el destino estan fuera
+// de rango. Tras el swap, el cursor sigue al step movido (UX: "el step
+// que apunto sigue siendo este") y persistimos el draft con stage=summary.
+func (m model) summaryReorder(delta int) (model, tea.Cmd) {
+	if m.summaryCursor < 0 || m.summaryCursor >= len(m.pipeline.Steps) {
+		return m, nil
+	}
+	target := m.summaryCursor + delta
+	if target < 0 || target >= len(m.pipeline.Steps) {
+		return m, nil
+	}
+	m.pipeline.Steps[m.summaryCursor], m.pipeline.Steps[target] =
+		m.pipeline.Steps[target], m.pipeline.Steps[m.summaryCursor]
+	m.summaryCursor = target
+	return m.summaryPersistDraft()
+}
+
+// summaryPersistDraft escribe el pipeline a disco con stage=summary +
+// LastSavedAt=now. Si tras el cambio el pipeline quedo sin steps (delete
+// del unico restante), bouncea a S2 mode=create — IsValid igual rechaza
+// pipelines sin steps, asi que es mas amable que dejar al usuario en S3
+// con el banner de error.
+func (m model) summaryPersistDraft() (model, tea.Cmd) {
+	if len(m.pipeline.Steps) == 0 {
+		return m.enterStepCreate(0)
+	}
+	if m.pipeline.Status == nil {
+		m.pipeline.Status = &Status{}
+	}
+	m.pipeline.Status.Stage = StageSummary
+	m.pipeline.Status.StepIdx = 0
+	m.pipeline.Status.StepMode = ""
+	m.pipeline.Status.LastSavedAt = time.Now()
+	if err := Save(m.path, m.pipeline); err != nil {
+		m.summaryErrs = []string{"no se pudo guardar el draft: " + err.Error()}
+	} else {
+		m.summaryErrs = nil
+	}
+	if m.summaryCursor < 0 {
+		m.summaryCursor = 0
+	}
+	if m.summaryCursor >= len(m.pipeline.Steps) {
+		m.summaryCursor = len(m.pipeline.Steps) - 1
+	}
+	m.screen = ScreenSummary
+	return m, nil
+}
+
+// openSummaryDelete abre el modal de confirmacion de "borrar step". Default
+// seguro = cancelar (el usuario tiene que mover + enter para confirmar) —
+// pulsar enter por inercia desde S3 no debe perder el step.
+func (m model) openSummaryDelete() (model, tea.Cmd) {
+	m.summaryDelCursor = SummaryDeleteCancel
+	m.screen = ScreenSummaryConfirmDelete
+	return m, nil
+}
+
+// updateSummaryDelete maneja teclas dentro del modal de confirmacion.
+func (m model) updateSummaryDelete(key tea.KeyMsg) (model, tea.Cmd) {
+	switch key.String() {
+	case "esc":
+		m.screen = ScreenSummary
+		return m, nil
+	case "ctrl+c":
+		return m.openCancel(ScreenSummaryConfirmDelete)
+	case "up", "k", "left", "h":
+		m.summaryDelCursor = SummaryDeleteConfirm
+		return m, nil
+	case "down", "j", "right", "l":
+		m.summaryDelCursor = SummaryDeleteCancel
+		return m, nil
+	case "1":
+		m.summaryDelCursor = SummaryDeleteConfirm
+		return m.applySummaryDelete()
+	case "2":
+		m.summaryDelCursor = SummaryDeleteCancel
+		return m.applySummaryDelete()
+	case "enter", " ":
+		return m.applySummaryDelete()
+	}
+	return m, nil
+}
+
+func (m model) applySummaryDelete() (model, tea.Cmd) {
+	switch m.summaryDelCursor {
+	case SummaryDeleteConfirm:
+		return m.summaryDelete()
+	case SummaryDeleteCancel:
+		m.screen = ScreenSummary
+		return m, nil
+	}
+	return m, nil
+}
+
+// summaryDelete remueve el step apuntado, reindexa y persiste. Si el
+// cursor queda fuera de rango (borraste el ultimo) lo clampea a la ultima
+// posicion valida. Vuelve a S3 — summaryPersistDraft ya pone screen.
+func (m model) summaryDelete() (model, tea.Cmd) {
+	if m.summaryCursor < 0 || m.summaryCursor >= len(m.pipeline.Steps) {
+		m.screen = ScreenSummary
+		return m, nil
+	}
+	idx := m.summaryCursor
+	m.pipeline.Steps = append(m.pipeline.Steps[:idx], m.pipeline.Steps[idx+1:]...)
+	return m.summaryPersistDraft()
+}
+
+// viewSummaryDelete renderiza el modal de confirmacion. Muestra el numero
+// + nombre del step apuntado para que el usuario sepa exactamente que va
+// a borrar.
+func (m model) viewSummaryDelete() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("Borrar step"))
+	b.WriteString("\n\n")
+	if m.summaryCursor >= 0 && m.summaryCursor < len(m.pipeline.Steps) {
+		s := m.pipeline.Steps[m.summaryCursor]
+		b.WriteString(fmt.Sprintf("¿Borrar el step %d (%q)?", m.summaryCursor+1, s.Name))
+		b.WriteString("\n\n")
+	}
+
+	options := []struct {
+		choice SummaryDeleteChoice
+		digit  string
+		label  string
+		hint   string
+	}{
+		{SummaryDeleteConfirm, "1", "borrar", "remueve el step y reindexa"},
+		{SummaryDeleteCancel, "2", "cancelar", "volver a S3 sin tocar"},
+	}
+	for _, o := range options {
+		line := "  " + o.digit + ". " + o.label + "  " + dimStyle.Render(o.hint)
+		if m.summaryDelCursor == o.choice {
+			line = selectedItem.Render("> "+o.digit+". "+o.label) + "  " + dimStyle.Render(o.hint)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(hintStyle.Render("↑/↓ navegar · enter confirmar · esc volver"))
+	b.WriteString("\n")
+	return modalBorder.Render(b.String())
+}
+
+// stepHasBrokenPrevDep reporta si el step en idx tiene una dependencia de
+// previous_output que no se puede satisfacer. Hoy esto solo pasa cuando
+// el step quedo en idx 0 (no hay step previo). Tras delete/reorder un step
+// que antes vivia en idx>=1 puede caer a 0 y romper la cadena.
+func stepHasBrokenPrevDep(steps []Step, idx int) bool {
+	if idx < 0 || idx >= len(steps) {
+		return false
+	}
+	return steps[idx].Input == InputPreviousOutput && idx == 0
 }
 
 // summarySaveAndFinish corre IsValid + persiste el archivo final sin
@@ -126,7 +302,8 @@ func (m model) viewSummary() string {
 	b.WriteString("\n\n")
 	for i, s := range m.pipeline.Steps {
 		focused := i == m.summaryCursor
-		b.WriteString(renderSummaryStepRow(i, s, focused))
+		broken := stepHasBrokenPrevDep(m.pipeline.Steps, i)
+		b.WriteString(renderSummaryStepRow(i, s, focused, broken))
 		b.WriteString("\n")
 	}
 
@@ -147,7 +324,9 @@ func (m model) viewSummary() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(hintStyle.Render("↑/↓ navegar steps · enter / ctrl+s guardar pipeline · esc volver al ultimo step"))
+	b.WriteString(hintStyle.Render("↑/↓ navegar · e editar · d borrar · shift+↑↓ reordenar · + agregar"))
+	b.WriteString("\n")
+	b.WriteString(hintStyle.Render("enter / ctrl+s guardar pipeline · esc volver al ultimo step"))
 	b.WriteString("\n")
 	return b.String()
 }
@@ -158,18 +337,31 @@ func (m model) viewSummary() string {
 // con header (numero + nombre + chip estado del validator) + sub-lineas
 // con CLI, kind/skill/content excerpt, input y bloque validator detallado
 // si esta presente.
-func renderSummaryStepRow(idx int, s Step, focused bool) string {
+//
+// broken=true marca el step en rojo y agrega un warning ⚠ explicando que
+// la dependencia previous_output esta rota — H7 lo usa cuando un step que
+// usaba previous_output queda en idx 0 tras un delete/reorder.
+func renderSummaryStepRow(idx int, s Step, focused, broken bool) string {
 	var b strings.Builder
 
 	header := fmt.Sprintf("%d. %s", idx+1, s.Name)
-	if focused {
+	switch {
+	case broken && focused:
+		b.WriteString(errorStyle.Render("▸ " + header))
+	case broken:
+		b.WriteString("  " + errorStyle.Render(header))
+	case focused:
 		b.WriteString(selectedItem.Render("▸ " + header))
-	} else {
+	default:
 		b.WriteString("  " + mutedItem.Render(header))
 	}
 	if s.Validator != nil {
 		b.WriteString("   ")
 		b.WriteString(selectedOff.Render("[validator]"))
+	}
+	if broken {
+		b.WriteString("   ")
+		b.WriteString(errorStyle.Render("⚠ input previous_output sin step previo"))
 	}
 	b.WriteString("\n")
 

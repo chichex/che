@@ -16,14 +16,15 @@ import (
 type Screen int
 
 const (
-	ScreenInfo        Screen = iota // S1: nombre + descripcion
-	ScreenStep                      // S2: editor de step (H3+)
-	ScreenSummary                   // S3: resumen + guardar pipeline final (H6+)
-	ScreenSaved                     // S4: post-save, mostrar path (H6+)
-	ScreenSaveChoice                // modal "agregar otro / finalizar / volver"
-	ScreenCancel                    // SC: modal keep/discard/back
-	ScreenCollision                 // modal "el nombre ya existe"
-	ScreenDiscardWarn               // confirmacion extra antes de discard
+	ScreenInfo                 Screen = iota // S1: nombre + descripcion
+	ScreenStep                               // S2: editor de step (H3+)
+	ScreenSummary                            // S3: resumen + guardar pipeline final (H6+)
+	ScreenSaved                              // S4: post-save, mostrar path (H6+)
+	ScreenSaveChoice                         // modal "agregar otro / finalizar / volver"
+	ScreenCancel                             // SC: modal keep/discard/back
+	ScreenCollision                          // modal "el nombre ya existe"
+	ScreenDiscardWarn                        // confirmacion extra antes de discard
+	ScreenSummaryConfirmDelete               // modal confirm "borrar step" desde S3 (H7)
 )
 
 // FieldFocus marca cual campo de S1 tiene el foco. tab/shift+tab cyclan
@@ -50,6 +51,16 @@ type CollisionChoice int
 const (
 	CollisionOverwrite CollisionChoice = iota
 	CollisionCancel
+)
+
+// SummaryDeleteChoice es la opcion seleccionada en el modal de confirmacion
+// de "borrar step" desde S3 (H7). Default seguro = cancelar; el usuario tiene
+// que mover el cursor + enter para confirmar.
+type SummaryDeleteChoice int
+
+const (
+	SummaryDeleteConfirm SummaryDeleteChoice = iota
+	SummaryDeleteCancel
 )
 
 // SaveChoice es la opcion seleccionada en el modal "ya termine este step".
@@ -269,9 +280,14 @@ type model struct {
 	// estado del modal "ya termine el step" (enter en ultimo foco de S2).
 	saveCursor SaveChoice
 
-	// cursor de S3: indice del step apuntado por ↑/↓. Sin accion en H6 —
-	// H7 lo usa para e/d/shift+↑↓/+. Se reinicia a 0 al entrar a S3.
+	// cursor de S3: indice del step apuntado por ↑/↓. H7 lo usa para
+	// e/d/shift+↑↓/+. Se reinicia a 0 al entrar a S3 si quedo fuera de
+	// rango (delete que dejo al cursor mas alla del ultimo step).
 	summaryCursor int
+
+	// cursor del modal de confirmacion de "borrar step" (H7). Default
+	// seguro = SummaryDeleteCancel, seteado por openSummaryDelete.
+	summaryDelCursor SummaryDeleteChoice
 
 	// errores de IsValid mostrados en S3 cuando ctrl+s falla. Se popula
 	// entrando con un error multi-linea; queda visible hasta el proximo
