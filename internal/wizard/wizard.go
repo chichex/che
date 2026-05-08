@@ -1,6 +1,9 @@
 package wizard
 
 import (
+	"fmt"
+	"time"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -10,6 +13,13 @@ func (m model) Init() tea.Cmd { return nil }
 // Update dispatchea al handler de la screen actual. Las transiciones
 // entre screens se hacen en cada handler escribiendo m.screen.
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// editorFinishedMsg llega tras tea.ExecProcess (H8: `y` en S3 abre
+	// $EDITOR). Lo handleamos antes del switch de teclas porque no es un
+	// KeyMsg — viene del subproceso del editor al terminar.
+	if em, ok := msg.(editorFinishedMsg); ok {
+		return m.handleEditorReturn(em)
+	}
+
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
@@ -82,13 +92,145 @@ func Run() (bool, error) {
 // runWithHome es el entrypoint testeable: permite forzar HomeDir desde
 // los tests sin tocar $HOME del proceso.
 func runWithHome(home string) (bool, error) {
-	final, err := tea.NewProgram(newModel(home)).Run()
+	return runProgram(newModel(home))
+}
+
+// runProgram es el wrapper minimal sobre tea.NewProgram que extrae exitApp
+// del modelo final. Lo usan Run / RunResume / RunEditReady para no duplicar
+// la logica del cast + fallback.
+func runProgram(m model) (bool, error) {
+	final, err := tea.NewProgram(m).Run()
 	if err != nil {
 		return false, err
 	}
-	m, ok := final.(model)
+	mm, ok := final.(model)
 	if !ok {
 		return true, nil
 	}
-	return m.exitApp, nil
+	return mm.exitApp, nil
+}
+
+// RunResume reanuda un draft existente (status != nil). Usa $HOME real;
+// los tests pueden inyectar HOME via env var (HomeDir lee os.UserHomeDir).
+func RunResume(path string) (bool, error) {
+	return runResumeWithHome("", path)
+}
+
+// runResumeWithHome construye un model pre-cargado desde el archivo y arranca
+// el wizard en la screen indicada por status.stage. Status ausente o
+// step_idx fuera de rango caen a S1 con un warning visible (m.errMsg) — el
+// usuario sigue desde S1 con name+desc cargados, lo demas se reconstruye.
+func runResumeWithHome(home, path string) (bool, error) {
+	m := newModel(home)
+	m.path = path
+	p, err := Load(path)
+	if err != nil {
+		// Fallback duro: archivo ilegible. Arrancamos en S1 sin path para
+		// no pisarlo accidentalmente — el usuario decide si guarda con un
+		// nombre nuevo o cancela.
+		m.path = ""
+		m.errMsg = "no se pudo cargar el pipeline (" + err.Error() + ") — arrancando desde S1"
+		return runProgram(m)
+	}
+	m.pipeline = p
+	if p.Name != "" {
+		m.nameInput.SetValue(p.Name)
+	}
+	if p.Description != "" {
+		m.descInput.SetValue(p.Description)
+	}
+
+	if p.Status == nil {
+		// Llamar a RunResume sobre un ready es responsabilidad del caller
+		// (en general usa RunEditReady). Si llegamos aca asumimos draft
+		// corrupto: fallback S1 con warning.
+		m.errMsg = "el archivo no tiene status — arrancando desde S1"
+		return runProgram(m)
+	}
+
+	stage := p.Status.Stage
+	stepIdx := p.Status.StepIdx
+	switch stage {
+	case StageInfo:
+		m.screen = ScreenInfo
+		return runProgram(m)
+	case StageStep:
+		// stepIdx valido: [0, len(Steps)] — len(Steps) corresponde a un
+		// step nuevo que el usuario estaba creando (mode=create idx ==
+		// len). Cualquier cosa fuera de [0, len] es corrupcion.
+		if stepIdx < 0 || stepIdx > len(p.Steps) {
+			m.errMsg = fmt.Sprintf("step_idx %d fuera de rango — arrancando desde S1", stepIdx)
+			return runProgram(m)
+		}
+		if p.Status.StepMode == "edit" && stepIdx < len(p.Steps) {
+			m, _ = m.enterStepEdit(stepIdx)
+		} else {
+			// step_mode=create o vacio: enterStepCreate funciona tanto
+			// para idx existente (lo trata como nuevo encima del idx) como
+			// para idx == len (append).
+			m, _ = m.enterStepCreate(stepIdx)
+		}
+		return runProgram(m)
+	case StageSummary:
+		if len(p.Steps) == 0 {
+			m.errMsg = "summary sin steps — arrancando desde S1"
+			return runProgram(m)
+		}
+		m.summaryCursor = 0
+		m.screen = ScreenSummary
+		return runProgram(m)
+	default:
+		m.errMsg = "stage desconocido (" + stage + ") — arrancando desde S1"
+		return runProgram(m)
+	}
+}
+
+// RunEditReady toma un pipeline ready (status nil), re-introduce
+// status.stage=summary, persiste, y arranca el wizard en S3 mode=edit. Al
+// hacer ctrl+s en S3 el archivo vuelve a ser ready (sin status). Si el
+// archivo no existe, el caller deberia haber filtrado antes.
+func RunEditReady(path string) (bool, error) {
+	return runEditReadyWithHome("", path)
+}
+
+func runEditReadyWithHome(home, path string) (bool, error) {
+	p, err := Load(path)
+	if err != nil {
+		// fallback: arrancamos un wizard limpio con el aviso.
+		m := newModel(home)
+		m.errMsg = "no se pudo cargar el pipeline (" + err.Error() + ") — arrancando desde S1"
+		return runProgram(m)
+	}
+	if len(p.Steps) == 0 {
+		// ready sin steps no deberia existir (IsValid lo rechaza al
+		// finalizar), pero por si acaso: caemos a S1 con el name cargado.
+		m := newModel(home)
+		m.path = path
+		m.pipeline = p
+		if p.Name != "" {
+			m.nameInput.SetValue(p.Name)
+		}
+		if p.Description != "" {
+			m.descInput.SetValue(p.Description)
+		}
+		m.errMsg = "el pipeline ready no tiene steps — arrancando desde S1"
+		return runProgram(m)
+	}
+	p.Status = &Status{
+		Stage:       StageSummary,
+		LastSavedAt: time.Now(),
+	}
+	if err := Save(path, p); err != nil {
+		// No pudimos persistir el status. Arrancamos igual con el modelo
+		// en RAM en S3 — al primer save dentro del wizard se reintenta.
+		// Mostramos el error inline para que el usuario lo vea.
+		m := newModel(home)
+		m.path = path
+		m.pipeline = p
+		m.summaryCursor = 0
+		m.summaryErrs = []string{"no se pudo marcar el archivo como draft: " + err.Error()}
+		m.screen = ScreenSummary
+		return runProgram(m)
+	}
+	return runResumeWithHome(home, path)
 }

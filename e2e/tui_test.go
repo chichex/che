@@ -62,30 +62,31 @@ func TestTUI_MenuRoutesItem2ToWizard(t *testing.T) {
 	}
 }
 
-// TestTUI_MenuItem1IsNotImplemented valida H1: digit 1 selecciona
-// "My pipelines" y dispara el placeholder con exit 1.
-func TestTUI_MenuItem1IsNotImplemented(t *testing.T) {
+// TestTUI_MenuItem1OpensMyPipelines valida H9: digit 1 abre la pantalla
+// "My pipelines"; con HOME limpio renderiza el placeholder vacio. q sale
+// con exit 0.
+func TestTUI_MenuItem1OpensMyPipelines(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
 
 	p := env.StartPTY()
 	defer p.Close()
 
-	if !p.WaitForOutput(t, "My pipelines", 3*time.Second) {
-		t.Fatalf("menu never rendered My pipelines label\nout:\n%s", p.Snapshot())
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
 	}
-
+	mark := p.Mark()
 	if err := p.Send("1"); err != nil {
 		t.Fatalf("send 1: %v", err)
 	}
-	res := p.Wait(t, 3*time.Second)
-
-	if res.ExitCode != 1 {
-		t.Fatalf("expected exit 1, got %d\nout:\n%s", res.ExitCode, res.Stdout)
+	if !p.WaitForOutputSince(t, mark, "no pipelines yet", 3*time.Second) {
+		t.Fatalf("My pipelines screen never rendered\n%s", p.Since(mark))
 	}
-	for _, want := range []string{"My pipelines", "not implemented"} {
-		if !strings.Contains(res.Stdout, want) {
-			t.Fatalf("expected output to contain %q\nout:\n%s", want, res.Stdout)
-		}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d\nout:\n%s", res.ExitCode, res.Stdout)
 	}
 }

@@ -89,6 +89,9 @@ func (m model) updateSummary(key tea.KeyMsg) (model, tea.Cmd) {
 		// Append: nuevo step al final → S2 mode=create con idx == len(Steps).
 		// enterStepCreate maneja persistencia del status=step.
 		return m.enterStepCreate(len(m.pipeline.Steps))
+	case "y":
+		// H8: abre el YAML en $EDITOR y reload al volver.
+		return m.summaryOpenInEditor()
 	case "ctrl+s", "enter":
 		return m.summarySaveAndFinish()
 	}
@@ -324,7 +327,7 @@ func (m model) viewSummary() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(hintStyle.Render("↑/↓ navegar · e editar · d borrar · shift+↑↓ reordenar · + agregar"))
+	b.WriteString(hintStyle.Render("↑/↓ navegar · e editar · d borrar · shift+↑↓ reordenar · + agregar · y abrir en $EDITOR"))
 	b.WriteString("\n")
 	b.WriteString(hintStyle.Render("enter / ctrl+s guardar pipeline · esc volver al ultimo step"))
 	b.WriteString("\n")

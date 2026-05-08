@@ -51,8 +51,12 @@ var rootCmd = &cobra.Command{
 				if exit {
 					return nil
 				}
+			case tui.ActionMyPipelines:
+				if err := runMyPipelines(); err != nil {
+					return err
+				}
 			default:
-				fmt.Fprintln(cmd.ErrOrStderr(), "My pipelines: not implemented")
+				fmt.Fprintln(cmd.ErrOrStderr(), "unknown action:", action)
 				os.Exit(1)
 				return nil
 			}
@@ -71,5 +75,46 @@ func Execute() {
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
+	}
+}
+
+// runMyPipelines orquesta el lister H9/H10: levanta la pantalla, y segun
+// la accion del usuario abre el wizard reanudando un draft o re-editando un
+// ready, despues vuelve al lister hasta que el usuario hace esc/q. Asi el
+// flujo "abrir → cancelar → ver lista actualizada" no necesita pasar por el
+// menu principal cada vez.
+func runMyPipelines() error {
+	for {
+		action, target, exitApp, err := wizard.RunList()
+		if err != nil {
+			return err
+		}
+		switch action {
+		case wizard.ListActionExit:
+			if exitApp {
+				os.Exit(0)
+			}
+			return nil
+		case wizard.ListActionNone:
+			return nil
+		case wizard.ListActionResume:
+			exit, err := wizard.RunResume(target)
+			if err != nil {
+				return err
+			}
+			if exit {
+				os.Exit(0)
+			}
+		case wizard.ListActionEditReady:
+			exit, err := wizard.RunEditReady(target)
+			if err != nil {
+				return err
+			}
+			if exit {
+				os.Exit(0)
+			}
+		default:
+			return nil
+		}
 	}
 }
