@@ -572,6 +572,77 @@ func TestPipelinesList_H10EditReadyNoChangesStaysReady(t *testing.T) {
 	}
 }
 
+// TestPipelinesList_H10EditReadyDiscardRestores cubre el caso "abro un
+// ready con e, no toco nada (o toco algo), elijo discard": el archivo en
+// disco vuelve a su estado ready original — discard en edit-ready significa
+// "tirar mis cambios", no "borrar el pipeline".
+func TestPipelinesList_H10EditReadyDiscardRestores(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	original := readyYAML("Survives Discard")
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"survives.yaml": original,
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Survives Discard", 3*time.Second) {
+		t.Fatalf("ready entry not rendered\n%s", p.Since(mark))
+	}
+
+	mark = p.Mark()
+	if err := p.Send("e"); err != nil {
+		t.Fatalf("send e: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 5*time.Second) {
+		t.Fatalf("S3 never opened\n%s", p.Since(mark))
+	}
+
+	// esc → SC → la label de "discard" debe decir "discard changes" en
+	// este flow. "2" elige discard.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "discard changes", 3*time.Second) {
+		t.Fatalf("expected 'discard changes' label in SC under edit-ready; got:\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("2"); err != nil {
+		t.Fatalf("send 2 (discard): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered after discard\n%s", p.Since(mark))
+	}
+
+	// Archivo debe existir y ser identico al original.
+	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "survives.yaml")
+	got, err := os.ReadFile(expected)
+	if err != nil {
+		t.Fatalf("read after discard: %v (file should still exist)", err)
+	}
+	if string(got) != original {
+		t.Errorf("expected file restored to original ready content;\nwant:\n%s\ngot:\n%s", original, got)
+	}
+
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Errorf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
 // TestPipelinesList_H10Delete cubre H10 delete: d → modal → "1" confirma →
 // archivo desaparece del disco y de la lista.
 func TestPipelinesList_H10Delete(t *testing.T) {

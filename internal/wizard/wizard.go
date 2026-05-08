@@ -2,6 +2,7 @@ package wizard
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -219,6 +220,17 @@ func runEditReadyWithHome(home, path string) (bool, error) {
 		m.errMsg = "el pipeline ready no tiene steps — arrancando desde S1"
 		return runProgram(m)
 	}
+	// Snapshot del archivo ready en disco ANTES de seedearle status —
+	// sirve para que SC discard restaure el archivo byte-a-byte en vez de
+	// borrarlo. Leemos los bytes crudos en vez de Marshal(p) para
+	// preservar formato (indent / comentarios) si el usuario edito el
+	// YAML a mano antes de abrir desde el lister.
+	origSnapshot, sErr := os.ReadFile(path)
+	if sErr != nil {
+		m := newModel(home)
+		m.errMsg = "no se pudo preparar edit-ready (" + sErr.Error() + ") — arrancando desde S1"
+		return runProgram(m)
+	}
 	// Status en RAM solamente: el archivo en disco sigue ready hasta que
 	// haya un cambio real. Sin esto, abrir + esc + keep convertia un ready
 	// en draft sin que el usuario hubiese tocado nada — bug confuso para
@@ -230,6 +242,7 @@ func runEditReadyWithHome(home, path string) (bool, error) {
 	m := newModel(home)
 	m.path = path
 	m.pipeline = p
+	m.originalReadySnapshot = origSnapshot
 	if p.Name != "" {
 		m.nameInput.SetValue(p.Name)
 	}

@@ -300,6 +300,14 @@ type model struct {
 	// HomeDir a usar. "" significa $HOME real; los tests inyectan tmp dir.
 	homeDir string
 
+	// originalReadySnapshot guarda los bytes del archivo ready original
+	// cuando entramos al wizard via RunEditReady. Si el usuario elige
+	// "discard" en el modal SC, restauramos el archivo desde este
+	// snapshot en lugar de borrarlo — "discard" en edit-ready = "tirar
+	// mis cambios y volver al estado original", no "borrar el pipeline".
+	// nil cuando entramos por cualquier otro flow (Run / RunResume).
+	originalReadySnapshot []byte
+
 	// exitApp = true si el wizard pidio salida total al menu (q / ctrl+c
 	// confirmados). false significa "volver al menu principal".
 	exitApp bool

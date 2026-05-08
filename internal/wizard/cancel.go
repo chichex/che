@@ -1,6 +1,7 @@
 package wizard
 
 import (
+	"os"
 	"strings"
 	"time"
 
@@ -89,7 +90,21 @@ func (m model) applyCancelChoice() (model, tea.Cmd) {
 		return m, tea.Quit
 	case CancelDiscard:
 		if m.path != "" {
-			_ = Delete(m.path)
+			if m.originalReadySnapshot != nil {
+				// edit-ready: "discard" = tirar mis cambios y volver al
+				// estado ready original. Restauramos el archivo desde el
+				// snapshot que tomamos al entrar (vale incluso si los
+				// handlers persistieron un draft entre medio).
+				if err := os.WriteFile(m.path, m.originalReadySnapshot, 0o600); err != nil {
+					m.errMsg = "no se pudo restaurar el archivo: " + err.Error()
+					m.screen = m.cancelReturn
+					return m, nil
+				}
+			} else {
+				// Resto de flows (creacion nueva, resume de draft):
+				// discard borra el archivo, como dice la label.
+				_ = Delete(m.path)
+			}
 		}
 		m.exitApp = false
 		return m, tea.Quit
@@ -107,6 +122,15 @@ func (m model) viewCancel() string {
 	b.WriteString("\n\n")
 	b.WriteString("¿Que querés hacer con el progreso actual?\n\n")
 
+	discardLabel := "discard & exit"
+	discardHint := "borra el archivo si existe"
+	if m.originalReadySnapshot != nil {
+		// En edit-ready la semantica es "tirar mis cambios", no "borrar
+		// el pipeline" — la label tiene que reflejarlo o el usuario que
+		// abrio un ready solo para mirar borra el archivo por accidente.
+		discardLabel = "discard changes & exit"
+		discardHint = "vuelve el archivo a su estado ready original"
+	}
 	options := []struct {
 		choice CancelChoice
 		digit  string
@@ -114,7 +138,7 @@ func (m model) viewCancel() string {
 		hint   string
 	}{
 		{CancelKeep, "1", "keep & exit", "guarda como draft, aparece en \"My pipelines\""},
-		{CancelDiscard, "2", "discard & exit", "borra el archivo si existe"},
+		{CancelDiscard, "2", discardLabel, discardHint},
 		{CancelBack, "3", "back", "volver y seguir editando"},
 	}
 	for _, o := range options {
