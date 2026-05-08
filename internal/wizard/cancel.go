@@ -60,7 +60,20 @@ func (m model) applyCancelChoice() (model, tea.Cmd) {
 		// Save final sincronico antes de salir. Si todavia no hay path
 		// (S1 sin completar nombre), no hay nada que guardar — ya
 		// volvemos al menu.
+		//
+		// Skip si el contenido en RAM ya coincide con el archivo en disco
+		// (ignorando el bloque status / LastSavedAt). Esto evita que un
+		// keep "vacio" pase un ready a draft cuando el usuario abrio
+		// edit-ready, no toco nada, y aprieta esc — el archivo en disco
+		// sigue ready, nuestro modelo en RAM tiene status.stage=summary
+		// sembrado por RunEditReady. Sin este chequeo el Save aca lo
+		// pasaria a draft sin justificativo (no hubo cambios reales).
 		if m.path != "" {
+			existing, lerr := Load(m.path)
+			if lerr == nil && pipelinesEquivalentContent(existing, m.pipeline) {
+				m.exitApp = false
+				return m, tea.Quit
+			}
 			if m.pipeline.Status == nil {
 				m.pipeline.Status = &Status{Stage: StageInfo}
 			}

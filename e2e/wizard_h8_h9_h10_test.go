@@ -494,6 +494,84 @@ func TestPipelinesList_H10EditReady(t *testing.T) {
 	}
 }
 
+// TestPipelinesList_H10EditReadyNoChangesStaysReady cubre el caso "abrir
+// un ready, no tocar nada, salir": el archivo en disco debe seguir ready
+// (sin status) — entrar a edit-ready no debe convertirlo en draft por el
+// solo hecho de abrirlo.
+func TestPipelinesList_H10EditReadyNoChangesStaysReady(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"untouched.yaml": readyYAML("Untouched Ready"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Untouched Ready", 3*time.Second) {
+		t.Fatalf("ready entry not rendered\n%s", p.Since(mark))
+	}
+
+	// e → S3 mode=edit, sin tocar nada.
+	mark = p.Mark()
+	if err := p.Send("e"); err != nil {
+		t.Fatalf("send e: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "paso 3/3", 5*time.Second) {
+		t.Fatalf("S3 never opened\n%s", p.Since(mark))
+	}
+
+	// esc → SC → 1 (keep).
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
+		t.Fatalf("SC never opened\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1 (keep): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+
+	// El archivo sigue ready: sin bloque status, contenido intacto.
+	expected := filepath.Join(env.HomeDir, ".che", "pipelines", "untouched.yaml")
+	data, err := os.ReadFile(expected)
+	if err != nil {
+		t.Fatalf("read final: %v", err)
+	}
+	body := string(data)
+	if strings.Contains(body, "status:") {
+		t.Errorf("ready pipeline turned draft after no-op edit; got:\n%s", body)
+	}
+	if !strings.Contains(body, "name: Untouched Ready") {
+		t.Errorf("expected name preserved; got:\n%s", body)
+	}
+	// El chip del lister debe seguir mostrando [ready].
+	if !strings.Contains(p.Since(mark), "[ready]") {
+		t.Errorf("expected [ready] chip after no-op edit; got:\n%s", p.Since(mark))
+	}
+
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Errorf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
 // TestPipelinesList_H10Delete cubre H10 delete: d → modal → "1" confirma →
 // archivo desaparece del disco y de la lista.
 func TestPipelinesList_H10Delete(t *testing.T) {

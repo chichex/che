@@ -185,10 +185,13 @@ func runResumeWithHome(home, path string) (bool, error) {
 	}
 }
 
-// RunEditReady toma un pipeline ready (status nil), re-introduce
-// status.stage=summary, persiste, y arranca el wizard en S3 mode=edit. Al
-// hacer ctrl+s en S3 el archivo vuelve a ser ready (sin status). Si el
-// archivo no existe, el caller deberia haber filtrado antes.
+// RunEditReady toma un pipeline ready (status nil), siembra status.stage=
+// summary EN RAM, y arranca el wizard en S3 mode=edit. NO persiste el
+// status al disco — si el usuario no toca nada y sale con SC keep el
+// archivo sigue ready. La primera mutacion dentro del wizard (e/d/+/
+// shift+↑↓/y en S3, o cualquier ctrl+s/ctrl+n en S2 al editar un step)
+// persiste como draft via los Save() habituales; ctrl+s en S3 lo vuelve
+// a ready strippeando el status.
 func RunEditReady(path string) (bool, error) {
 	return runEditReadyWithHome("", path)
 }
@@ -216,21 +219,24 @@ func runEditReadyWithHome(home, path string) (bool, error) {
 		m.errMsg = "el pipeline ready no tiene steps — arrancando desde S1"
 		return runProgram(m)
 	}
+	// Status en RAM solamente: el archivo en disco sigue ready hasta que
+	// haya un cambio real. Sin esto, abrir + esc + keep convertia un ready
+	// en draft sin que el usuario hubiese tocado nada — bug confuso para
+	// el flujo "miro el resumen y salgo".
 	p.Status = &Status{
 		Stage:       StageSummary,
 		LastSavedAt: time.Now(),
 	}
-	if err := Save(path, p); err != nil {
-		// No pudimos persistir el status. Arrancamos igual con el modelo
-		// en RAM en S3 — al primer save dentro del wizard se reintenta.
-		// Mostramos el error inline para que el usuario lo vea.
-		m := newModel(home)
-		m.path = path
-		m.pipeline = p
-		m.summaryCursor = 0
-		m.summaryErrs = []string{"no se pudo marcar el archivo como draft: " + err.Error()}
-		m.screen = ScreenSummary
-		return runProgram(m)
+	m := newModel(home)
+	m.path = path
+	m.pipeline = p
+	if p.Name != "" {
+		m.nameInput.SetValue(p.Name)
 	}
-	return runResumeWithHome(home, path)
+	if p.Description != "" {
+		m.descInput.SetValue(p.Description)
+	}
+	m.summaryCursor = 0
+	m.screen = ScreenSummary
+	return runProgram(m)
 }
