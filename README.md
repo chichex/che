@@ -8,7 +8,8 @@ Los documentos `docs/*.html` se renderizan via [htmlpreview.github.io](https://h
 
 - [Visión del producto](https://htmlpreview.github.io/?https://github.com/chichex/che/blob/main/docs/vision.html) (`docs/vision.html`)
 - [Decisiones de arquitectura cerradas](https://htmlpreview.github.io/?https://github.com/chichex/che/blob/main/docs/design.html) (`docs/design.html`)
-- [Plan H1–H10 del flow "Create / My pipelines"](https://htmlpreview.github.io/?https://github.com/chichex/che/blob/main/docs/manage-pipelines-flow.html) (`docs/manage-pipelines-flow.html`) — chips de progreso por story.
+- [Flujo "Create / My pipelines"](https://htmlpreview.github.io/?https://github.com/chichex/che/blob/main/docs/manage-pipelines-flow.html) (`docs/manage-pipelines-flow.html`) — wizard S1–S4 + lister de drafts/ready.
+- [Flujo de ejecución de pipelines](https://htmlpreview.github.io/?https://github.com/chichex/che/blob/main/docs/pipeline-execution-flow.html) (`docs/pipeline-execution-flow.html`) — runner R0–RF, validator loop, manifest atómico, addenda post-H10.
 
 ## Instalación
 
@@ -45,13 +46,14 @@ che               # abre la TUI interactiva (entry point por defecto)
 che <subcomando>  # invocación directa, útil para scripting / CI / tests
 ```
 
-La TUI tiene 4 entradas:
+La TUI tiene 5 entradas:
 
 | # | Entrada | Qué hace |
 |---|---------|----------|
-| 1 | **My pipelines** | Lista los pipelines en `~/.che/pipelines/`, mezclando ready y drafts. Acciones por row: <kbd>enter</kbd> reanuda un draft o avisa "ejecución no implementada" sobre ready, <kbd>e</kbd> reedita un ready, <kbd>d</kbd> borra (con confirm), <kbd>y</kbd> abre el YAML en `$EDITOR`. |
-| 2 | **Create pipeline** | Wizard de 3 pantallas (info → steps → resumen) que termina en un YAML ready en `~/.che/pipelines/<slug>.yaml`. Persistencia incremental (el archivo es "draft" mientras el wizard tenga abierto el bloque `status`; se vuelve "ready" al finalizar). |
-| 3 | **See skills** | Detecta los skills instalados en los 4 CLIs (claude / codex / gemini / opencode) y permite abrir cada `SKILL.md` en VS Code. Solo lectura. |
+| 1 | **My pipelines** | Lista los pipelines en `~/.che/pipelines/`, mezclando ready y drafts, con chip del último run por row. Acciones: <kbd>enter</kbd> reanuda un draft o **ejecuta** un ready (entra al runner R0→R1→R2→R3→R4/RF), <kbd>e</kbd> reedita un ready, <kbd>d</kbd> borra (con confirm), <kbd>y</kbd> abre el YAML en `$EDITOR`, <kbd>r</kbd> abre la sub-screen "Run history" del row. |
+| 2 | **Create pipeline** | Wizard que termina en un YAML ready en `~/.che/pipelines/<slug>.yaml`. Persistencia incremental (el archivo es "draft" mientras el wizard no haya cerrado el bloque `status`; se vuelve "ready" al finalizar). Incluye prompt review IA opcional sobre cada step. |
+| 3 | **Crear pipeline con IA** | Genera un pipeline a partir de una descripción libre, lo deja en formato draft listo para revisar en el wizard. |
+| 4 | **See skills** | Detecta los skills instalados en los 4 CLIs (claude / codex / gemini / opencode) y permite abrir cada `SKILL.md` en VS Code. Solo lectura. |
 | 0 | **Exit** | Salir. |
 
 ## Anatomía de un pipeline
@@ -88,6 +90,21 @@ Decisiones cerradas — ver [docs/design.html renderizado](https://htmlpreview.g
 - Validator opcional, CLI **independiente** del step (cross-review). `on_max_loops`: `fail` (default) / `continue` / `pause`.
 - Sin gates humanos, sin "premisa" abstracta, sin SQLite — un único archivo por pipeline.
 
+## Ejecutar un pipeline
+
+Desde **My pipelines**, <kbd>enter</kbd> sobre un row con chip `ready` entra al runner. Diagrama de estados completo en [`docs/pipeline-execution-flow.html`](https://htmlpreview.github.io/?https://github.com/chichex/che/blob/main/docs/pipeline-execution-flow.html). Resumen:
+
+| Estado | Qué pasa |
+|--------|----------|
+| **R1 · InputPrompt** | Pide y resuelve eagerly el input del primer step según `input` (`text` / `file` / `url` / `pr` / `issue`). `none` skipea directo a R2. |
+| **R2 · Preflight** | Chequea CLI requerido, skill instalado, `gh auth` y disco. Verdict + <kbd>r</kbd> retry. |
+| **R3 · Running** | Spawnea cada step con `stream-json`, log pane viviente con sticky-bottom + ring buffer, chaining vía `previous_output`, validator loop honrando `max_loops` + `on_max_loops`. <kbd>tab</kbd> cicla entre steps. |
+| **R4 / RF · Done** | Modal final (ok / failed). Teclas: <kbd>y</kbd> copy output, <kbd>l</kbd> abrir log, <kbd>r</kbd> retry pre-cargando el input. |
+| **RC · Cancel** | <kbd>ctrl+c</kbd> dispara graceful shutdown (SIGTERM→SIGKILL) y cleanup de handles. |
+| **RP · Pause** | Sólo si algún step define `on_max_loops: pause`. Espera decisión humana. |
+
+Cada run persiste un manifest atómico (`.tmp` + rename) bajo `~/.che/runs/<run-id>/`. Al boot, `My pipelines` recovera runs interrumpidos y los marca con chip explícito; un GC limpia runs viejos.
+
 ## Subcomandos
 
 | Comando | Qué hace |
@@ -106,12 +123,16 @@ make release    # goreleaser release --clean
 
 Layout:
 
-- `cmd/` — entrypoints cobra (`doctor`, `upgrade`, `root`).
-- `internal/wizard/` — wizard "Create pipeline" + lister "My pipelines" + persist + YAML + IsValid.
-- `internal/tui/` — menu principal y pantalla "See skills".
+- `cmd/` — entrypoints cobra (`doctor`, `upgrade`, `root`) + `cmd/fake/` para los e2e.
+- `internal/wizard/` — wizard "Create pipeline" + lister "My pipelines" (con chip last-run + sub-screen Run history) + prompt review IA + persist + YAML + IsValid.
+- `internal/tui/` — menu principal, "See skills" y "Crear pipeline con IA".
+- `internal/runner/` — runner R0–RF (input, preflight, spawn, streaming, validator loop, manifest, cancel, pause, done) + `internal/runner/parser/` (claude / codex / raw stream-json).
 - `internal/skills/` — detección de skills en los 4 CLIs.
 - `internal/output/` — logger unificado (stdout=payload, stderr=logs).
-- `e2e/` — harness e2e (PTY + fakes polimórficos) y tests.
+- `internal/aiprompt/` — generación IA de prompts y de pipelines (entry "Crear pipeline con IA" + prompt review).
+- `internal/repoctx/` — resolución del repo del cwd para inputs `pr` / `issue`.
+- `internal/clipboard/` — copy del output final desde el modal RF.
+- `e2e/` — harness e2e (PTY + fakes polimórficos) y tests por feature (wizard, runner, tui).
 
 Pre-condiciones para correr el binario en local:
 
