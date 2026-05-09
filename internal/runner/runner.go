@@ -182,4 +182,10 @@ var (
 
 	pickerSelected = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF79C6")).Bold(true)
 	pickerNormal   = lipgloss.NewStyle().Foreground(lipgloss.Color("#F8F8F2"))
+
+	// stderrStyle es el render de las lineas de stderr en el log pane:
+	// rojo dimmed, intercalado con stdout (criterio del doc de H5).
+	// Sin Bold para diferenciarse del errorStyle (usado en errores
+	// fatales).
+	stderrStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6E6E")).Faint(true)
 )

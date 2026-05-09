@@ -183,9 +183,34 @@ type RunModel struct {
 	Active int
 
 	// LogDump guarda el stdout del step en curso (concat dump al final).
-	// H4 lo escribe entero al terminar el subprocess; H5 lo va a
-	// reemplazar por un ring buffer streaming.
+	// H4 lo escribe entero al terminar el subprocess; H5 lo sigue
+	// poblando al cerrar el step para que R4/RF mantengan el resumen
+	// terminal — durante R3, sin embargo, el render usa LogBuffers (ring
+	// buffer en RAM) para streaming linea por linea.
 	LogDump string
+
+	// LogBuffers es el ring buffer por step (2000 lineas / step segun el
+	// doc). H5 lo crea al spawnear el step y lo va llenando desde la
+	// goroutine de tee del subprocess. El render de R3 lee el buffer del
+	// step en LogFocus (default = step activo). H6 va a sumar mas
+	// elementos cuando lleguen multi-step.
+	LogBuffers []*RingBuffer
+
+	// LogFocus es el indice del step cuyos logs se renderean en el log
+	// pane. H5 lo deja igual a Active (1 step) — H6 lo va a desacoplar via
+	// tab.
+	LogFocus int
+
+	// StickyBottom = true cuando el viewport hace auto-scroll al fondo
+	// (default). Se desactiva cuando el usuario scrollea con ↑/↓; `g` lo
+	// reactiva (criterio del doc).
+	StickyBottom bool
+
+	// LogScrollOffset es la cantidad de lineas que el viewport esta
+	// scrolleado HACIA ARRIBA (desde el fondo). 0 significa "fondo" (que
+	// junto con StickyBottom=true es la posicion default). Solo es
+	// relevante cuando StickyBottom=false.
+	LogScrollOffset int
 
 	// FailedStderr almacena el stderr del step que fallo, para que RF
 	// pueda mostrarlo en la pantalla terminal. H4 lo lee del archivo

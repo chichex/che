@@ -32,6 +32,28 @@ func (m RunModel) updateCancelModal(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.CancelModal = false
 			return m.handleStepDone(doneMsg)
 		}
+		// stepLineMsg puede seguir llegando del subprocess hasta que el
+		// SIGTERM corte la salida. Drenamos appendeando al ring buffer
+		// (el log pane queda actualizado por debajo del modal) y
+		// re-issueamos el wait — sin esto el canal se llena y la
+		// goroutine de tee se bloquea.
+		if lineMsg, ok := msg.(stepLineMsg); ok {
+			bufIdx := lineMsg.Idx - 1
+			if bufIdx < 0 {
+				bufIdx = 0
+			}
+			for len(m.LogBuffers) <= bufIdx {
+				m.LogBuffers = append(m.LogBuffers, NewRingBuffer(2000))
+			}
+			kind := LogLineStdout
+			if lineMsg.Line.Stderr {
+				kind = LogLineStderr
+			}
+			m.LogBuffers[bufIdx].Append(kind, lineMsg.Line.Text)
+			if m.runState != nil {
+				return m, waitForLine(m.runState.lineCh)
+			}
+		}
 		return m, nil
 	}
 	switch key.String() {

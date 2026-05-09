@@ -1,6 +1,7 @@
 package e2e_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1239,5 +1240,397 @@ func TestRunner_R3H4CancelAbort(t *testing.T) {
 	stdoutRaw := readRunFile(t, filepath.Join(runDir, "step-01.stdout.log"))
 	if !strings.Contains(stdoutRaw, "started-h4-cancel") {
 		t.Errorf("expected partial stdout to contain started-h4-cancel, got:\n%s", stdoutRaw)
+	}
+}
+
+// streamJSONEventClaude arma una linea de stream-json con un evento
+// type=assistant cuyo unico bloque text es el texto dado. Permite a los
+// tests de H5 emitir N eventos faciles de matchear visualmente y de contar
+// en events.jsonl.
+func streamJSONEventClaude(text string) string {
+	// Marshalear inline para evitar dependencias adicionales y garantizar
+	// escape de caracteres especiales del payload.
+	body, err := json.Marshal(map[string]any{
+		"type": "assistant",
+		"message": map[string]any{
+			"role": "assistant",
+			"content": []map[string]any{
+				{"type": "text", "text": text},
+			},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return string(body)
+}
+
+// readyYAMLSkillStepCLI es la version de readyYAMLSkillStep que permite
+// elegir el CLI del step (no solo claude). Necesario para los tests de H5
+// que ejercitan gemini (parser raw, sin events.jsonl).
+func readyYAMLSkillStepCLI(name, cli, skill, inputKind string) string {
+	return fmt.Sprintf(`name: %s
+description: ready desc
+steps:
+- name: alpha
+  cli: %s
+  kind: skill
+  content: %s
+  input: %s
+`, name, cli, skill, inputKind)
+}
+
+// preArmCLISkill es la version generica de preArmClaudeSkill que crea la
+// "skill" bajo el path correcto segun el CLI. claude usa SKILL.md adentro
+// de un dir; gemini usa un .toml suelto en commands/ (campo description).
+// H5 necesita instalar skills para gemini en algun test; preArmClaudeSkill
+// alcanza para claude solo.
+func preArmCLISkill(t *testing.T, home, cli, skill string) {
+	t.Helper()
+	switch cli {
+	case "claude":
+		preArmClaudeSkill(t, home, skill)
+	case "gemini":
+		dir := filepath.Join(home, ".gemini", "commands")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		body := fmt.Sprintf("description = %q\nprompt = \"test\"\n", "skill "+skill)
+		if err := os.WriteFile(filepath.Join(dir, skill+".toml"), []byte(body), 0o644); err != nil {
+			t.Fatalf("write toml: %v", err)
+		}
+	default:
+		t.Fatalf("preArmCLISkill: unsupported cli %q", cli)
+	}
+}
+
+// TestRunner_R3H5StreamJSONLines cubre el primer test e2e listado en H5:
+// "Fake CLI que emite 5 eventos stream-json con sleeps cortos. Assert: log
+// pane termina mostrando la ultima linea + events.jsonl tiene 5 entradas."
+//
+// El fake claude emite 5 eventos JSON tipo assistant con texto unico cada
+// uno. El runner los stream-parsea (claude.go), los appendea a events.jsonl
+// crudo y los renderea en el log pane como "> linea N de cinco". Tras el
+// run, el ultimo sentinel tiene que estar visible en el viewport y
+// events.jsonl tiene que tener exactamente 5 lineas.
+func TestRunner_R3H5StreamJSONLines(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmClaudeSkill(t, env.HomeDir, "h5-stream")
+
+	// Fake claude: 5 lineas de stream-json, separadas por 30ms cada una
+	// para dar tiempo al scanner del runner a leer linea por linea (en
+	// vez de drenar todo de una). Al final exit 0.
+	expect := env.ExpectAgent("claude").WhenArgsMatch(`h5-stream`)
+	for i := 1; i <= 5; i++ {
+		text := fmt.Sprintf("linea %d de cinco", i)
+		expect = expect.StreamLine(streamJSONEventClaude(text), 30)
+	}
+	expect.RespondStreamed(0)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h5-stream.yaml": readyYAMLSkillStep("R3H5 Stream", "h5-stream", "none"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H5 Stream", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight de R3H5 Stream", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 3*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	// El run termina rapido (5 * 30ms ≈ 150ms + overhead) y aterrizamos
+	// en R4. Esperamos el sentinel "Run completo".
+	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+		t.Fatalf("R4 'Run completo' never rendered\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Disco: events.jsonl tiene que existir + tener exactamente 5 lineas
+	// no vacias (1 por evento del stream).
+	runDir := firstRunDir(t, env.HomeDir, "r3h5-stream")
+	eventsRaw := readRunFile(t, filepath.Join(runDir, "step-01.events.jsonl"))
+	count := 0
+	for _, line := range strings.Split(strings.TrimRight(eventsRaw, "\n"), "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	if count != 5 {
+		t.Errorf("expected events.jsonl to have 5 entries, got %d. raw:\n%s", count, eventsRaw)
+	}
+
+	// stdout.log tiene que tener las 5 lineas crudas (json) y la ultima
+	// debe contener el sentinel "linea 5 de cinco" para confirmar que el
+	// stream llego al final.
+	stdoutRaw := readRunFile(t, filepath.Join(runDir, "step-01.stdout.log"))
+	if !strings.Contains(stdoutRaw, "linea 5 de cinco") {
+		t.Errorf("expected stdout.log to contain final sentinel, got:\n%s", stdoutRaw)
+	}
+
+	// El R4 final muestra el resumen (no el log pane) — los logs los
+	// chequeamos en disco. El sentinel "ok" del invocations log confirma
+	// que claude se llamo 1 sola vez.
+	calls := env.Invocations().For("claude")
+	if len(calls) != 1 {
+		t.Errorf("expected 1 invocation of claude, got %d", len(calls))
+	}
+}
+
+// TestRunner_R3H5StreamJSONLargeLine cubre el segundo test e2e de H5:
+// "Fake CLI que emite una linea > 64 KiB. Assert: parser no trunca;
+// events.jsonl tiene la linea entera."
+//
+// Validamos el criterio del doc: el buffer del scanner se subio a 1 MiB
+// para evitar el truncate silencioso de bufio.Scanner (memory project
+// gotcha). Si el buffer estuviera en el default de 64 KiB, la linea se
+// cortaria sin error visible y events.jsonl quedaria con < tamaño_real
+// bytes.
+func TestRunner_R3H5StreamJSONLargeLine(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmClaudeSkill(t, env.HomeDir, "h5-large")
+
+	// Construir un payload que exceda 64 KiB: 100 KiB de un solo char
+	// dentro del field text del evento. La linea resultante (JSON
+	// escapado + envelope) supera los 100 KiB facilmente — bien por
+	// encima del default de bufio.Scanner.
+	bigText := strings.Repeat("X", 100*1024)
+	bigEvent := streamJSONEventClaude(bigText)
+	if len(bigEvent) <= 64*1024 {
+		t.Fatalf("test fixture corrupted: bigEvent size %d <= 64 KiB; expected > 64 KiB", len(bigEvent))
+	}
+
+	env.ExpectAgent("claude").WhenArgsMatch(`h5-large`).
+		StreamLine(bigEvent, 0).
+		RespondStreamed(0)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h5-large.yaml": readyYAMLSkillStep("R3H5 Large", "h5-large", "none"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H5 Large", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run completo", 8*time.Second) {
+		t.Fatalf("R4 never rendered\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// events.jsonl debe tener el evento completo (no truncado). El check
+	// principal es el tamaño: si el scanner truncara, la linea seria <=
+	// 64 KiB. Tambien chequeamos que los XXX...X esten presentes
+	// completos (sentinel del fin del repeat).
+	runDir := firstRunDir(t, env.HomeDir, "r3h5-large")
+	eventsRaw := readRunFile(t, filepath.Join(runDir, "step-01.events.jsonl"))
+	// events.jsonl tiene 1 linea + un newline final → trimear y medir.
+	eventsLine := strings.TrimRight(eventsRaw, "\n")
+	if len(eventsLine) < len(bigEvent) {
+		t.Fatalf("expected events.jsonl line length >= %d (no truncation), got %d",
+			len(bigEvent), len(eventsLine))
+	}
+	// El payload original empieza con XXXX... cuenta exacta de Xs en el
+	// JSON resultante (ya escapado).
+	xCount := strings.Count(eventsLine, "X")
+	if xCount < 100*1024 {
+		t.Errorf("expected at least 100 KiB of X chars in events.jsonl line, got %d", xCount)
+	}
+}
+
+// TestRunner_R3H5StderrInterleaved cubre el tercer test e2e de H5:
+// "Fake CLI que emite stderr y stdout intercalados. Assert: stderr.log y
+// stdout.log tienen el split correcto, ring buffer mantiene el orden de
+// llegada."
+//
+// Usamos gemini en vez de claude porque gemini es text mode (parser raw)
+// — asi los sentinels que emitimos van directo al log pane sin pasar por
+// el parser de stream-json. El runner separa stdout/stderr en dos files
+// distintos pero el ring buffer en RAM los registra en orden de llegada.
+func TestRunner_R3H5StderrInterleaved(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmCLISkill(t, env.HomeDir, "gemini", "h5-mix")
+
+	// Stream alternado: out1 → err1 → out2 → err2 → out3. Todos con
+	// pequeno delay para que el scanner del runner pueda procesarlos
+	// linea por linea (ver siempre el mismo orden).
+	env.ExpectAgent("gemini").WhenArgsMatch(`h5-mix`).
+		StreamLine("out-line-uno", 20).
+		StreamStderrLine("err-line-uno", 20).
+		StreamLine("out-line-dos", 20).
+		StreamStderrLine("err-line-dos", 20).
+		StreamLine("out-line-tres", 20).
+		RespondStreamed(0)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h5-mix.yaml": readyYAMLSkillStepCLI("R3H5 Mix", "gemini", "h5-mix", "none"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H5 Mix", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run completo", 8*time.Second) {
+		t.Fatalf("R4 never rendered\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Disco: stdout.log tiene SOLO out-line-*; stderr.log tiene SOLO
+	// err-line-*. Cada archivo split correctamente.
+	runDir := firstRunDir(t, env.HomeDir, "r3h5-mix")
+	stdoutRaw := readRunFile(t, filepath.Join(runDir, "step-01.stdout.log"))
+	stderrRaw := readRunFile(t, filepath.Join(runDir, "step-01.stderr.log"))
+
+	for _, want := range []string{"out-line-uno", "out-line-dos", "out-line-tres"} {
+		if !strings.Contains(stdoutRaw, want) {
+			t.Errorf("stdout.log missing %q. raw:\n%s", want, stdoutRaw)
+		}
+		if strings.Contains(stderrRaw, want) {
+			t.Errorf("stderr.log should NOT contain stdout sentinel %q. raw:\n%s", want, stderrRaw)
+		}
+	}
+	for _, want := range []string{"err-line-uno", "err-line-dos"} {
+		if !strings.Contains(stderrRaw, want) {
+			t.Errorf("stderr.log missing %q. raw:\n%s", want, stderrRaw)
+		}
+		if strings.Contains(stdoutRaw, want) {
+			t.Errorf("stdout.log should NOT contain stderr sentinel %q. raw:\n%s", want, stdoutRaw)
+		}
+	}
+
+	// gemini text mode no genera events.jsonl (criterio del doc).
+	if _, err := os.Stat(filepath.Join(runDir, "step-01.events.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("events.jsonl should NOT exist for gemini (text mode), stat err=%v", err)
 	}
 }

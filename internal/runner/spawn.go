@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -13,12 +14,20 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/chichex/che/internal/runner/parser"
 	"github.com/chichex/che/internal/wizard"
 )
 
 // killGraceDefault es el TTL entre SIGTERM y SIGKILL durante el cancel del
 // step. El doc lo deja configurable via env CHE_KILL_GRACE (default 5s).
 const killGraceDefault = 5 * time.Second
+
+// scannerBufferMax es el cap del buffer de bufio.Scanner. El default (64
+// KiB) trunca lineas largas SILENCIOSAMENTE — la memoria del proyecto
+// "bufio.Scanner 64 KiB silent drop" lo deja explicito. H5 lo sube a 1 MiB
+// segun el criterio del doc; cualquier linea por encima de eso se loggea
+// como warning + cae a stdout crudo (no es RF — defensive).
+const scannerBufferMax = 1024 * 1024
 
 // runState agrupa los handles vivos del spawn actual. Como los modelos
 // bubbletea se pasan por valor, lo mantenemos como puntero y se lo damos al
@@ -31,26 +40,38 @@ type runState struct {
 	stderrPath    string
 	requestCancel chan struct{}
 	cancelled     bool
+
+	// lineCh es el canal por donde la goroutine del tee emite eventos al
+	// program de bubbletea. Cada mensaje es un stepLineMsg (linea humana)
+	// o el sentinel stepDoneMsg (cuando el subprocess termina). El
+	// program corre un tea.Cmd recursivo (waitForLine) que bloquea sobre
+	// este canal y re-emite el siguiente.
+	//
+	// Buffer generoso (256) para amortiguar bursts de stream-json sin
+	// bloquear la goroutine del scanner.
+	lineCh chan tea.Msg
+
+	// done indica que la goroutina del wait ya escribio el stepDoneMsg en
+	// lineCh — sirve para no doblar el envio si la cancel llega tarde.
+	done bool
 }
 
 // spawnCmdFn es la factoria swappable usada por R3 para spawnear el step.
 // Tests unitarios la reemplazan; los e2e dejan el default que arma el
 // exec.Cmd real (con el cli del step apuntando al symlink chefake).
+//
+// Cambio H5: la firma se mantiene para no romper tests viejos. La logica
+// de stream-json va dentro de buildSpawnArgs (ahora claude pasa
+// --output-format stream-json --verbose por default).
 var spawnCmdFn = defaultSpawnCmd
 
-// defaultSpawnCmd construye el comando segun el cli/kind del step. H4
-// soporta el subset minimo (cli del step, kind prompt o skill, content
-// crudo). Tabla del doc:
+// defaultSpawnCmd construye el comando segun el cli/kind del step. Tabla
+// del doc:
 //
 //	claude   -p <skill-or-prompt> --output-format stream-json --verbose
 //	codex    exec --json <skill-or-prompt>
 //	gemini   -p <prompt>  /  /<skill>
 //	opencode run <prompt>
-//
-// H4 no implementa stream-json (out of scope del doc — es H5). Usamos
-// invocaciones blocking-friendly: para claude/codex caemos a `<cli> -p
-// <content>`, para gemini el mismo flag, para opencode `run`. El parser
-// de stream-json llega en H5 — por eso H4 no agrega --output-format.
 //
 // El payload del input (R1) se envia por stdin (criterio del doc:
 // "todas pasan el input/payload por stdin para evitar problemas de escaping
@@ -66,9 +87,11 @@ func defaultSpawnCmd(step wizard.Step, payload string) (*exec.Cmd, error) {
 }
 
 // buildSpawnArgs es la parte testeable de defaultSpawnCmd: dado un step,
-// devuelve los args para el subprocess (sin tocar exec.Command). H4 solo
-// cubre los 4 CLIs canonicos; cualquier otro cae en error explicito en vez
-// de un default silencioso.
+// devuelve los args para el subprocess (sin tocar exec.Command).
+//
+// H5: claude ahora pasa --output-format stream-json --verbose (el parser
+// de internal/runner/parser/claude.go lo consume). codex se mantiene en
+// `exec --json` (parser stub que cae a raw — ver parser/codex.go).
 func buildSpawnArgs(step wizard.Step) ([]string, error) {
 	if step.CLI == "" {
 		return nil, fmt.Errorf("step sin cli")
@@ -78,11 +101,16 @@ func buildSpawnArgs(step wizard.Step) ([]string, error) {
 	}
 	switch step.CLI {
 	case "claude":
-		// H4 usa text mode (stream-json llega en H5). `-p` toma el
-		// prompt o el nombre de la skill — claude resuelve ambos.
-		return []string{"-p", step.Content}, nil
+		return []string{
+			"-p", step.Content,
+			"--output-format", "stream-json",
+			"--verbose",
+		}, nil
 	case "codex":
-		return []string{"exec", step.Content}, nil
+		// codex --json: parser stub (raw). Mantener `exec --json` para
+		// alinear con el doc; cuando codex.go tenga shape estable, el
+		// runtime no cambia.
+		return []string{"exec", "--json", step.Content}, nil
 	case "gemini":
 		// kind=skill se invoca como /<skill> en gemini (alias TOML).
 		if step.Kind == wizard.KindSkill {
@@ -92,11 +120,24 @@ func buildSpawnArgs(step wizard.Step) ([]string, error) {
 	case "opencode":
 		return []string{"run", step.Content}, nil
 	default:
-		return nil, fmt.Errorf("cli %q no soportado en H4", step.CLI)
+		return nil, fmt.Errorf("cli %q no soportado", step.CLI)
 	}
 }
 
-// stepDoneMsg lo emite la goroutine del spawn al terminar el subprocess.
+// stepLineMsg lo emite la goroutine del tee cuando aparece una nueva linea
+// (humana, post-parser) en stdout o stderr del subprocess. El handler de R3
+// lo appendea al ring buffer del step + (si stream-json) appendea el evento
+// crudo a events.jsonl. Es el msg que viaja decenas-centenas de veces por
+// step (vs stepDoneMsg que llega 1 sola vez).
+type stepLineMsg struct {
+	Idx  int
+	Line parser.Line
+	// Seq es el numero global asignado por el ring buffer al appendear.
+	// Lo usamos para correlacionar con events.jsonl.
+	Seq uint64
+}
+
+// stepDoneMsg lo emite la goroutine del wait al terminar el subprocess.
 // Lo consume R3 para transicionar a R4 / RF segun el ExitCode + error.
 type stepDoneMsg struct {
 	Idx       int
@@ -114,109 +155,191 @@ type stepDoneMsg struct {
 	Cancelled bool
 }
 
-// stepLogTickMsg podria usarse para refrescar el log pane mientras el
-// subprocess corre. H4 no la emite (blocking) — H5 la va a usar para
-// streaming. Se deja declarada para que el TODO sea trivial.
-//
-// type stepLogTickMsg struct { Idx int }
-
-// runStep arranca el subprocess, redirige stdout/stderr a los archivos de
-// log + buffers en RAM, y devuelve un tea.Cmd que bloquea hasta el Wait().
-// El log pane se renderea con los buffers al terminar (no streaming en H4).
+// runStep arranca el subprocess en MODO STREAMING (cmd.Start()), lanza
+// goroutines de tee para stdout/stderr (cada una scanea linea por linea
+// con un buffer de 1 MiB y empuja stepLineMsg al lineCh del runState), y
+// devuelve un tea.Cmd que es el primer "wait for next line". El program
+// vuelve a llamar al cmd retornado por handleStepLine para chainear las
+// lineas siguientes; cuando el subprocess termina, la goroutine del wait
+// emite stepDoneMsg y cierra el canal.
 //
 // runDir tiene que existir (lo crea el caller — initRunDir). state es el
 // pointer compartido con el modelo: se popula con cmd y los paths de log.
+//
+// H5 reemplaza el cmd.Run() bloqueante de H4 por este pipeline de
+// streaming. Stdin sigue siendo el ResolvedPayload del input (R1).
 func runStep(step wizard.Step, payload string, runDir string, idx int, state *runState) tea.Cmd {
-	return func() tea.Msg {
-		startedAt := time.Now()
-		cmd, err := spawnCmdFn(step, payload)
-		if err != nil {
-			return stepDoneMsg{
-				Idx:       idx,
-				ExitCode:  -1,
-				StartedAt: startedAt,
-				EndedAt:   time.Now(),
-				SpawnErr:  err.Error(),
-			}
-		}
-		// Los archivos de log viven en runDir/step-NN.{stdout,stderr}.log
-		// segun el "Layout en disco" del doc. H4 los crea con permisos
-		// 0600 (file) — el dir 0700 lo crea initRunDir.
-		stdoutPath := filepath.Join(runDir, fmt.Sprintf("step-%02d.stdout.log", idx))
-		stderrPath := filepath.Join(runDir, fmt.Sprintf("step-%02d.stderr.log", idx))
-		stdoutFile, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		if err != nil {
-			return stepDoneMsg{
-				Idx:       idx,
-				ExitCode:  -1,
-				StartedAt: startedAt,
-				EndedAt:   time.Now(),
-				SpawnErr:  fmt.Sprintf("create stdout.log: %v", err),
-			}
-		}
-		stderrFile, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		if err != nil {
-			_ = stdoutFile.Close()
-			return stepDoneMsg{
-				Idx:       idx,
-				ExitCode:  -1,
-				StartedAt: startedAt,
-				EndedAt:   time.Now(),
-				SpawnErr:  fmt.Sprintf("create stderr.log: %v", err),
-			}
-		}
+	startedAt := time.Now()
+	// Inicializar lineCh ANTES del start: si Start() falla, el caller
+	// igual va a leer del canal (waitForLine) y necesita encontrarlo
+	// poblado.
+	state.lineCh = make(chan tea.Msg, 256)
 
-		// Tee a buffer en RAM + archivo. H4 hace dump al final, asi que el
-		// buffer queda en memoria y se vuelca al modelo via stepDoneMsg.
-		var stdoutBuf, stderrBuf strings.Builder
-		cmd.Stdout = io.MultiWriter(stdoutFile, &stdoutBuf)
-		cmd.Stderr = io.MultiWriter(stderrFile, &stderrBuf)
-		// Process group propio para que SIGTERM al cmd alcance a los
-		// hijos del subprocess (defensivo — los CLIs pueden spawnear
-		// helpers).
-		setProcAttrs(cmd)
-
-		state.mu.Lock()
-		state.cmd = cmd
-		state.stdoutPath = stdoutPath
-		state.stderrPath = stderrPath
-		state.mu.Unlock()
-
-		startErr := cmd.Start()
-		if startErr != nil {
-			_ = stdoutFile.Close()
-			_ = stderrFile.Close()
-			return stepDoneMsg{
-				Idx:       idx,
-				ExitCode:  -1,
-				StartedAt: startedAt,
-				EndedAt:   time.Now(),
-				SpawnErr:  fmt.Sprintf("start %s: %v", step.CLI, startErr),
-			}
-		}
-
-		// Goroutine de cancel: si requestCancel llega antes de Wait,
-		// SIGTERM al pgid; tras grace SIGKILL. Marcamos cancelled=true
-		// ANTES de signalCancel para evitar la race con Wait() que puede
-		// retornar inmediatamente cuando el subprocess muere por SIGTERM:
-		// si el flag se setea despues, handleStepDone lee false y trata
-		// el run como failed en vez de cancelled.
-		waitDone := make(chan struct{})
+	cmd, buildErr := spawnCmdFn(step, payload)
+	if buildErr != nil {
+		// Error de build: emitimos el done sintetico antes de devolver
+		// para que el program reciba la transicion a RF.
 		go func() {
-			select {
-			case <-state.requestCancel:
-				state.mu.Lock()
-				state.cancelled = true
-				state.mu.Unlock()
-				signalCancel(cmd, killGrace())
-			case <-waitDone:
+			state.lineCh <- stepDoneMsg{
+				Idx:       idx,
+				ExitCode:  -1,
+				StartedAt: startedAt,
+				EndedAt:   time.Now(),
+				SpawnErr:  buildErr.Error(),
 			}
 		}()
+		return waitForLine(state.lineCh)
+	}
 
+	// Archivos de log: stdout / stderr / events.jsonl. events.jsonl solo
+	// se popula para CLIs con stream-json (claude). Los otros lo dejan
+	// vacio — el doc lo deja explicito ("stdout crudo, sin events.jsonl").
+	stdoutPath := filepath.Join(runDir, fmt.Sprintf("step-%02d.stdout.log", idx))
+	stderrPath := filepath.Join(runDir, fmt.Sprintf("step-%02d.stderr.log", idx))
+	eventsPath := filepath.Join(runDir, fmt.Sprintf("step-%02d.events.jsonl", idx))
+
+	stdoutFile, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		go func() {
+			state.lineCh <- stepDoneMsg{
+				Idx: idx, ExitCode: -1, StartedAt: startedAt, EndedAt: time.Now(),
+				SpawnErr: fmt.Sprintf("create stdout.log: %v", err),
+			}
+		}()
+		return waitForLine(state.lineCh)
+	}
+	stderrFile, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		_ = stdoutFile.Close()
+		go func() {
+			state.lineCh <- stepDoneMsg{
+				Idx: idx, ExitCode: -1, StartedAt: startedAt, EndedAt: time.Now(),
+				SpawnErr: fmt.Sprintf("create stderr.log: %v", err),
+			}
+		}()
+		return waitForLine(state.lineCh)
+	}
+	// events.jsonl: solo lo abrimos para CLIs con stream-json. Para
+	// otros, eventsFile queda nil y el writer no escribe nada.
+	var eventsFile *os.File
+	if step.CLI == "claude" {
+		eventsFile, err = os.OpenFile(eventsPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			_ = stdoutFile.Close()
+			_ = stderrFile.Close()
+			go func() {
+				state.lineCh <- stepDoneMsg{
+					Idx: idx, ExitCode: -1, StartedAt: startedAt, EndedAt: time.Now(),
+					SpawnErr: fmt.Sprintf("create events.jsonl: %v", err),
+				}
+			}()
+			return waitForLine(state.lineCh)
+		}
+	}
+
+	// Pipes para stdout/stderr (necesarios para scannear linea por
+	// linea en modo streaming). cmd.Stdout = MultiWriter no nos sirve aca
+	// porque queremos chunks → lineas → parser → events.
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdoutFile.Close()
+		_ = stderrFile.Close()
+		if eventsFile != nil {
+			_ = eventsFile.Close()
+		}
+		go func() {
+			state.lineCh <- stepDoneMsg{
+				Idx: idx, ExitCode: -1, StartedAt: startedAt, EndedAt: time.Now(),
+				SpawnErr: fmt.Sprintf("stdout pipe: %v", err),
+			}
+		}()
+		return waitForLine(state.lineCh)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdoutFile.Close()
+		_ = stderrFile.Close()
+		if eventsFile != nil {
+			_ = eventsFile.Close()
+		}
+		go func() {
+			state.lineCh <- stepDoneMsg{
+				Idx: idx, ExitCode: -1, StartedAt: startedAt, EndedAt: time.Now(),
+				SpawnErr: fmt.Sprintf("stderr pipe: %v", err),
+			}
+		}()
+		return waitForLine(state.lineCh)
+	}
+
+	// Process group propio para que SIGTERM al cmd alcance a los hijos
+	// del subprocess (defensivo — los CLIs pueden spawnear helpers).
+	setProcAttrs(cmd)
+
+	state.mu.Lock()
+	state.cmd = cmd
+	state.stdoutPath = stdoutPath
+	state.stderrPath = stderrPath
+	state.mu.Unlock()
+
+	startErr := cmd.Start()
+	if startErr != nil {
+		_ = stdoutFile.Close()
+		_ = stderrFile.Close()
+		if eventsFile != nil {
+			_ = eventsFile.Close()
+		}
+		go func() {
+			state.lineCh <- stepDoneMsg{
+				Idx: idx, ExitCode: -1, StartedAt: startedAt, EndedAt: time.Now(),
+				SpawnErr: fmt.Sprintf("start %s: %v", step.CLI, startErr),
+			}
+		}()
+		return waitForLine(state.lineCh)
+	}
+
+	// Buffers en RAM para el dump terminal (R4/RF reusa el mismo formato
+	// que H4). Streaming los popula en paralelo al log pane.
+	var stdoutBuf, stderrBuf strings.Builder
+	var bufMu sync.Mutex // protege ambos builders (concat raro en e2e parallel)
+
+	p := parser.ForCLI(step.CLI)
+
+	// Goroutine cancel: si requestCancel llega antes de Wait, SIGTERM al
+	// pgid; tras grace SIGKILL. Marcamos cancelled=true ANTES de
+	// signalCancel para evitar la race con Wait que puede retornar
+	// inmediatamente cuando el subprocess muere.
+	waitDone := make(chan struct{})
+	go func() {
+		select {
+		case <-state.requestCancel:
+			state.mu.Lock()
+			state.cancelled = true
+			state.mu.Unlock()
+			signalCancel(cmd, killGrace())
+		case <-waitDone:
+		}
+	}()
+
+	// WG para cerrar lineCh recien cuando ambas goroutines de tee
+	// terminaron (sino el program podria leer un done con stdout buf
+	// incompleto si la goroutina de stderr todavia escribia).
+	var teeWG sync.WaitGroup
+	teeWG.Add(2)
+	go teeStream(idx, stdoutPipe, stdoutFile, &stdoutBuf, &bufMu, p, eventsFile, false, state, &teeWG)
+	go teeStream(idx, stderrPipe, stderrFile, &stderrBuf, &bufMu, parser.Raw(), nil, true, state, &teeWG)
+
+	// Goroutina del wait — al terminar emite stepDoneMsg y cierra el
+	// canal para que waitForLine devuelva un sentinel y el handler
+	// transicione a R4/RF.
+	go func() {
+		teeWG.Wait()
 		waitErr := cmd.Wait()
 		close(waitDone)
 		_ = stdoutFile.Close()
 		_ = stderrFile.Close()
+		if eventsFile != nil {
+			_ = eventsFile.Close()
+		}
 		endedAt := time.Now()
 
 		exitCode := 0
@@ -233,17 +356,111 @@ func runStep(step wizard.Step, payload string, runDir string, idx int, state *ru
 
 		state.mu.Lock()
 		cancelled := state.cancelled
+		state.done = true
 		state.mu.Unlock()
 
-		return stepDoneMsg{
+		bufMu.Lock()
+		stdoutCopy := stdoutBuf.String()
+		stderrCopy := stderrBuf.String()
+		bufMu.Unlock()
+
+		state.lineCh <- stepDoneMsg{
 			Idx:       idx,
 			ExitCode:  exitCode,
-			Stdout:    stdoutBuf.String(),
-			Stderr:    stderrBuf.String(),
+			Stdout:    stdoutCopy,
+			Stderr:    stderrCopy,
 			StartedAt: startedAt,
 			EndedAt:   endedAt,
 			SpawnErr:  spawnErr,
 			Cancelled: cancelled,
+		}
+	}()
+
+	return waitForLine(state.lineCh)
+}
+
+// waitForLine es el tea.Cmd recursivo que el program dispara para drenar el
+// lineCh del runState. Bloquea hasta que llegue un msg (stepLineMsg o
+// stepDoneMsg) y lo devuelve. handleStepLine vuelve a issuear este cmd
+// hasta que llegue stepDoneMsg.
+func waitForLine(ch <-chan tea.Msg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			// Canal cerrado sin done — defensive: emit un done sintetico
+			// para que el program no quede colgado esperando.
+			return stepDoneMsg{ExitCode: -1, SpawnErr: "channel closed unexpectedly"}
+		}
+		return msg
+	}
+}
+
+// teeStream lee linea por linea de pipe (stdout / stderr del subprocess),
+// la escribe al file de log + al builder en RAM (con su mutex), la pasa al
+// parser, y empuja el resultado al lineCh como stepLineMsg. Si el parser
+// devuelve un evento crudo (no vacio), lo appendea a eventsFile.
+//
+// Buffer del scanner subido a 1 MiB (memory bufio.Scanner). Si igual se
+// excede, scanner.Err() devuelve bufio.ErrTooLong — emit un warning como
+// stderr y caer a "stdout crudo" para esa linea (no RF — defensive segun
+// la tabla de errores del doc).
+func teeStream(
+	idx int,
+	pipe io.ReadCloser,
+	logFile io.Writer,
+	bufBuilder *strings.Builder,
+	bufMu *sync.Mutex,
+	p parser.Parser,
+	eventsFile io.Writer,
+	isStderr bool,
+	state *runState,
+	wg *sync.WaitGroup,
+) {
+	defer wg.Done()
+	defer pipe.Close()
+
+	scanner := bufio.NewScanner(pipe)
+	// Buffer grande para evitar truncate silencioso en lineas de
+	// stream-json largas (memory bufio.Scanner 64 KiB silent drop).
+	scanner.Buffer(make([]byte, 64*1024), scannerBufferMax)
+
+	for scanner.Scan() {
+		raw := scanner.Text()
+		// Disco: append crudo + newline (preservamos el formato original
+		// para que stdout.log / stderr.log sean fieles).
+		_, _ = io.WriteString(logFile, raw+"\n")
+		if syncer, ok := logFile.(*os.File); ok {
+			_ = syncer.Sync()
+		}
+		// RAM (dump terminal — H4 lo usaba; H5 lo conserva para R4/RF).
+		bufMu.Lock()
+		bufBuilder.WriteString(raw)
+		bufBuilder.WriteString("\n")
+		bufMu.Unlock()
+
+		// Parser → lineas humanas + evento crudo.
+		lines, ev := p.Parse(raw)
+		if !ev.Empty() && eventsFile != nil {
+			_, _ = io.WriteString(eventsFile, ev.Raw+"\n")
+			if syncer, ok := eventsFile.(*os.File); ok {
+				_ = syncer.Sync()
+			}
+		}
+		for _, line := range lines {
+			line.Stderr = line.Stderr || isStderr
+			state.lineCh <- stepLineMsg{Idx: idx, Line: line}
+		}
+	}
+	// Errores del scanner: ErrTooLong (linea > 1 MiB) cae a un warning
+	// dimmed; otros errores (pipe cerrado, etc) los ignoramos —
+	// generalmente son consecuencia de cmd.Wait() retornando antes.
+	if err := scanner.Err(); err != nil && errors.Is(err, bufio.ErrTooLong) {
+		state.lineCh <- stepLineMsg{
+			Idx: idx,
+			Line: parser.Line{
+				Text:   "! linea > 1 MiB descartada (parser bufio.ErrTooLong)",
+				Stderr: true,
+			},
 		}
 	}
 }

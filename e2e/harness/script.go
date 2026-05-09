@@ -24,6 +24,15 @@ type Matcher struct {
 	Exit          int               `json:"exit"`
 	TouchFiles    map[string]string `json:"touch_files,omitempty"`
 	BlockSeconds  int               `json:"block_seconds,omitempty"`
+	Stream        []StreamItem      `json:"stream,omitempty"`
+}
+
+// StreamItem es una entrada del Stream del matcher: una linea + opcional
+// delay/stream destino. Usado por los tests de H5 para validar streaming.
+type StreamItem struct {
+	Stream  string `json:"stream,omitempty"` // "stdout" (default) | "stderr"
+	Text    string `json:"text"`
+	DelayMs int    `json:"delay_ms,omitempty"`
 }
 
 // ExpectBuilder is the fluent API used to script a single matcher. Values
@@ -142,6 +151,29 @@ func (b *ExpectBuilder) TouchFile(relPath, content string) *ExpectBuilder {
 func (b *ExpectBuilder) BlockSeconds(n int) *ExpectBuilder {
 	b.m.BlockSeconds = n
 	return b
+}
+
+// StreamLine appendea un item al stream del matcher: una linea hacia
+// stdout (default), con un delay opcional ANTES de emitirla. Usado por los
+// tests de H5 para validar streaming linea por linea.
+func (b *ExpectBuilder) StreamLine(text string, delayMs int) *ExpectBuilder {
+	b.m.Stream = append(b.m.Stream, StreamItem{Text: text, DelayMs: delayMs})
+	return b
+}
+
+// StreamStderrLine es la version stderr de StreamLine. Permite intercalar
+// lineas a ambos streams en orden ("stdout 1, stderr 1, stdout 2, ...").
+func (b *ExpectBuilder) StreamStderrLine(text string, delayMs int) *ExpectBuilder {
+	b.m.Stream = append(b.m.Stream, StreamItem{Stream: "stderr", Text: text, DelayMs: delayMs})
+	return b
+}
+
+// RespondStreamed cierra el matcher con exit code, sin stdout estatico —
+// el cuerpo viene del Stream que el caller appendeo previamente con
+// StreamLine / StreamStderrLine.
+func (b *ExpectBuilder) RespondStreamed(exitCode int) *MatcherRef {
+	b.m.Exit = exitCode
+	return b.commit()
 }
 
 // MatcherRef is returned from a Respond* call so the test can refer back to

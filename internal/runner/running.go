@@ -120,14 +120,30 @@ func enterRunning(m RunModel) (RunModel, tea.Cmd) {
 	m.Steps[0].Status = StepStatusRunning
 	m.Steps[0].StartedAt = time.Now()
 
+	// H5: ring buffers por step (2000 lineas / step segun el doc). Solo
+	// inicializamos el del step 0 (H6 va a sumar el resto). LogFocus = 0
+	// (renderea el step activo); StickyBottom = true (auto-scroll).
+	m.LogBuffers = []*RingBuffer{NewRingBuffer(2000)}
+	m.LogFocus = 0
+	m.StickyBottom = true
+	m.LogScrollOffset = 0
+
 	// runState compartido entre Update + spawn goroutine (cancel handler).
 	m.runState = &runState{requestCancel: make(chan struct{}, 1)}
 	cmd := runStep(step0, m.Input.ResolvedPayload, runDir, 1, m.runState)
 	return m, cmd
 }
 
-// updateRunning maneja teclas + msgs durante R3. La transicion a R4/RF se
-// activa cuando llega stepDoneMsg (lo emite la goroutine del spawn).
+// updateRunning maneja teclas + msgs durante R3. Las transiciones:
+//
+//   - ctrl+c       → abre RC (cancel modal).
+//   - ↑/↓ / k/j    → scroll del log pane (desactiva sticky).
+//   - g            → re-stick al fondo + reset scroll.
+//   - ctrl+l       → limpia el ring buffer del step activo (no toca disco).
+//
+// stepLineMsg appendea al ring buffer del step indicado (H5: solo el
+// activo) y vuelve a issuear waitForLine. stepDoneMsg cierra el step y
+// transiciona a R4/RF.
 func (m RunModel) updateRunning(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.CancelModal {
 		return m.updateCancelModal(msg)
@@ -141,13 +157,71 @@ func (m RunModel) updateRunning(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.CancelModal = true
 			m.CancelChoice = CancelChoiceAbort
 			return m, nil
+		case "up", "k":
+			// Desactivar sticky + scrollear arriba 1 linea. El cap del
+			// scroll se mide al render (clamp segun visible/total).
+			m.StickyBottom = false
+			m.LogScrollOffset++
+			return m, nil
+		case "down", "j":
+			// Scrollear abajo. Si llegamos al fondo, re-activamos sticky.
+			if m.LogScrollOffset > 0 {
+				m.LogScrollOffset--
+			}
+			if m.LogScrollOffset == 0 {
+				m.StickyBottom = true
+			}
+			return m, nil
+		case "g":
+			// Re-sticky al fondo.
+			m.StickyBottom = true
+			m.LogScrollOffset = 0
+			return m, nil
+		case "ctrl+l":
+			// Limpiar viewport (ring buffer del step activo). Disco intacto.
+			if rb := m.activeBuffer(); rb != nil {
+				rb.Clear()
+			}
+			m.LogScrollOffset = 0
+			m.StickyBottom = true
+			return m, nil
 		}
-		// Resto de teclas (g / ctrl+l / tab / arrows) las dejamos para H5.
+		return m, nil
+	case stepLineMsg:
+		// Append al ring buffer del step indicado (H5: validamos contra
+		// LogBuffers; idx 1-based). Si por alguna razon el buffer no
+		// existe (race, defensive), lo creamos al vuelo.
+		bufIdx := msg.Idx - 1
+		if bufIdx < 0 {
+			bufIdx = 0
+		}
+		for len(m.LogBuffers) <= bufIdx {
+			m.LogBuffers = append(m.LogBuffers, NewRingBuffer(2000))
+		}
+		kind := LogLineStdout
+		if msg.Line.Stderr {
+			kind = LogLineStderr
+		}
+		m.LogBuffers[bufIdx].Append(kind, msg.Line.Text)
+		// Re-issuear el wait para drenar la siguiente linea.
+		if m.runState != nil {
+			return m, waitForLine(m.runState.lineCh)
+		}
 		return m, nil
 	case stepDoneMsg:
 		return m.handleStepDone(msg)
 	}
 	return m, nil
+}
+
+// activeBuffer devuelve el ring buffer del step en LogFocus, o nil si no
+// existe. Defensive — el render lo usa para no panic-ear si el slice
+// quedo desfasado.
+func (m RunModel) activeBuffer() *RingBuffer {
+	if m.LogFocus < 0 || m.LogFocus >= len(m.LogBuffers) {
+		return nil
+	}
+	return m.LogBuffers[m.LogFocus]
 }
 
 // handleStepDone procesa el mensaje de fin del subprocess. Escribe el
@@ -285,19 +359,12 @@ func (m RunModel) viewRunning() string {
 	}
 	b.WriteString("\n")
 
-	// Log pane — H4 muestra "ejecutando ..." mientras corre; el dump real
-	// llega cuando handleStepDone setea m.LogDump (en ese momento ya
-	// estamos en R4/RF, no en R3 — pero por consistencia del modelo lo
-	// renderizamos si esta presente).
-	if m.LogDump != "" {
-		b.WriteString(dimStyle.Render(m.LogDump))
-		b.WriteString("\n")
-	} else {
-		b.WriteString(dimStyle.Render("> ejecutando " + m.Pipeline.Steps[m.Active].CLI + "..."))
-		b.WriteString("\n")
-	}
+	// Log pane — H5: ring buffer del step en LogFocus, sticky-bottom por
+	// default. Si el buffer esta vacio (todavia no llego ninguna linea),
+	// caemos al placeholder "ejecutando ...".
+	b.WriteString(renderLogPane(m))
 	b.WriteString("\n")
-	b.WriteString(hintStyle.Render("ctrl+c cancelar"))
+	b.WriteString(hintStyle.Render("ctrl+c cancelar · ↑/↓ scroll · g fondo · ctrl+l clear"))
 	b.WriteString("\n")
 
 	if m.CancelModal {
@@ -306,6 +373,88 @@ func (m RunModel) viewRunning() string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// logViewportLines es el cap de lineas visibles en el log pane (height del
+// viewport). H5 lo deja fijo en 18 — H6 va a sumar resize dinamico segun
+// tea.WindowSizeMsg. 18 es suficiente para mostrar ~media pantalla en una
+// terminal estandar sin ahogar el header + tracker + footer.
+const logViewportLines = 18
+
+// renderLogPane dibuja el viewport del log pane: header del step activo +
+// las ultimas N lineas del ring buffer (segun StickyBottom / LogScrollOffset).
+// Lineas de stderr en rojo dimmed, intercaladas con stdout (criterio del
+// doc para H5).
+func renderLogPane(m RunModel) string {
+	var b strings.Builder
+	if m.Active < len(m.Pipeline.Steps) {
+		step := m.Pipeline.Steps[m.Active]
+		head := fmt.Sprintf("[%d/%d] %s (%s / %s)",
+			m.Active+1, len(m.Pipeline.Steps), step.Name, step.CLI, step.Kind)
+		b.WriteString(labelStyle.Render(head))
+		b.WriteString("\n")
+	}
+	rb := m.activeBuffer()
+	if rb == nil || rb.Len() == 0 {
+		// Sin lineas todavia: placeholder igual que H4.
+		cli := ""
+		if m.Active < len(m.Pipeline.Steps) {
+			cli = m.Pipeline.Steps[m.Active].CLI
+		}
+		if cli != "" {
+			b.WriteString(dimStyle.Render("> ejecutando " + cli + "..."))
+		} else {
+			b.WriteString(dimStyle.Render("> ejecutando..."))
+		}
+		b.WriteString("\n")
+		return b.String()
+	}
+	snap := rb.Snapshot()
+	// Slice visible: tomar las ultimas logViewportLines lineas, ajustando
+	// con LogScrollOffset cuando el usuario scrolleo arriba.
+	visible := windowLines(snap, logViewportLines, m.LogScrollOffset)
+	for _, line := range visible {
+		switch line.Kind {
+		case LogLineStderr:
+			b.WriteString(stderrStyle.Render(line.Text))
+		default:
+			b.WriteString(line.Text)
+		}
+		b.WriteString("\n")
+	}
+	// Indicador de scroll arriba si hay mas lineas no visibles.
+	if !m.StickyBottom && m.LogScrollOffset > 0 {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("(scroll · %d lineas mas abajo · g para ir al fondo)", m.LogScrollOffset)))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// windowLines selecciona las lineas visibles del snapshot segun el scroll
+// offset. offset=0 → ultimas `size` lineas (sticky-bottom). offset>0 →
+// ventana corrida hacia atras `offset` lineas.
+//
+// Clampamos para evitar leer fuera de rango: si offset > len-size, la
+// ventana queda al inicio del slice.
+func windowLines(snap []LogLine, size, offset int) []LogLine {
+	if size <= 0 || len(snap) == 0 {
+		return nil
+	}
+	if size >= len(snap) {
+		return snap
+	}
+	end := len(snap) - offset
+	if end < size {
+		end = size
+	}
+	if end > len(snap) {
+		end = len(snap)
+	}
+	start := end - size
+	if start < 0 {
+		start = 0
+	}
+	return snap[start:end]
 }
 
 // renderStepRow es el row de un step en el tracker. icono + nombre + cli +
