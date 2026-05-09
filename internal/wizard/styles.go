@@ -1,6 +1,30 @@
 package wizard
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
+)
+
+// breadcrumb arma el header "che › ... › <pantalla>" para el View() de cada
+// screen del wizard. El ultimo segmento se renderea en titleStyle (cyan
+// bold dracula) — la pantalla actual destaca; los segmentos previos +
+// separadores van en dimStyle (gris dracula) para que el ojo aterrice en
+// el ultimo. parts NO debe incluir el root "che" — lo prependeamos aca
+// para que toda la TUI hable la misma jerarquia sin que cada screen tenga
+// que recordarlo.
+func breadcrumb(parts ...string) string {
+	all := append([]string{"che"}, parts...)
+	if len(all) == 1 {
+		return titleStyle.Render(all[0])
+	}
+	sep := dimStyle.Render(" › ")
+	prefix := make([]string, 0, len(all)-1)
+	for _, p := range all[:len(all)-1] {
+		prefix = append(prefix, dimStyle.Render(p))
+	}
+	return strings.Join(prefix, sep) + sep + titleStyle.Render(all[len(all)-1])
+}
 
 // Paleta dracula-ish, alineada con internal/tui. La duplicamos para
 // evitar import circular cuando wizard quiera estilar errores propios sin

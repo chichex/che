@@ -87,10 +87,10 @@ type Pipeline struct {
 // Status es el bloque opcional que marca donde quedo el wizard. Solo
 // aparece en archivos draft.
 type Status struct {
-	Stage         string    `yaml:"stage"`
-	StepIdx       int       `yaml:"step_idx,omitempty"`
-	StepMode      string    `yaml:"step_mode,omitempty"`
-	LastSavedAt   time.Time `yaml:"last_saved_at"`
+	Stage       string    `yaml:"stage"`
+	StepIdx     int       `yaml:"step_idx,omitempty"`
+	StepMode    string    `yaml:"step_mode,omitempty"`
+	LastSavedAt time.Time `yaml:"last_saved_at"`
 }
 
 // Stage values del bloque status.

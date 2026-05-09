@@ -210,7 +210,7 @@ func TestRunner_R1H2TextConfirm(t *testing.T) {
 	// Post-H3 R2 ya no es placeholder — render real con header "Preflight
 	// de <name>" + rows del checklist. El sentinel "Preflight de" es
 	// estable porque el header sale en el primer Render().
-	if !p.WaitForOutputSince(t, mark, "Preflight de R1H2 Text", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	// Pipeline usa cli=claude → R2 lista al menos el row "cli claude
@@ -371,7 +371,7 @@ func TestRunner_R1H2FileSelectAndConfirm(t *testing.T) {
 	if err := p.Send("\x13"); err != nil { // ctrl+s
 		t.Fatalf("send ctrl+s: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R1H2 File", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	// Post-H3 R2 lista un row "file readable: <path>" (re-check defensivo
@@ -456,7 +456,7 @@ func TestRunner_R1H2IssueGHHappy(t *testing.T) {
 	if err := p.Send("\x13"); err != nil { // ctrl+s
 		t.Fatalf("send ctrl+s: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R1H2 Issue", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	// El row de gh auth tiene que existir cuando input=issue.
@@ -614,7 +614,7 @@ func TestRunner_R2H3AllGreenAdvances(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R2H3 Green", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	// Esperamos a que aparezca el row de la skill — es el ultimo
@@ -636,12 +636,12 @@ func TestRunner_R2H3AllGreenAdvances(t *testing.T) {
 	}
 
 	// enter avanza a R3 (post-H4 con spawn real → fake claude responde
-	// "ok h3-green" y aterrizamos en R4 "Run completo").
+	// "ok h3-green" y aterrizamos en R4 "Done").
 	mark = p.Mark()
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✓ done", 5*time.Second) {
 		t.Fatalf("R4 Run completo never rendered after enter\n%s", p.Since(mark))
 	}
 
@@ -709,7 +709,7 @@ func TestRunner_R2H3MissingSkillBlocks(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R2H3 Missing", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	// El row debe aparecer + estar marcado como rojo (con remedio).
@@ -799,7 +799,7 @@ func TestRunner_R2H3MissingSkillRetries(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R2H3 Retry", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	if !strings.Contains(p.Since(mark), "enter bloqueado") {
@@ -869,7 +869,7 @@ func TestRunner_R1H2NoneSkipsR1(t *testing.T) {
 		t.Fatalf("send enter: %v", err)
 	}
 	// Esperamos R2 directo, sin pasar por R1.
-	if !p.WaitForOutputSince(t, mark, "Preflight de R1H2 None", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered for input=none\n%s", p.Since(mark))
 	}
 	if strings.Contains(p.Since(mark), "Input · text") || strings.Contains(p.Since(mark), "Input · file") {
@@ -939,7 +939,7 @@ func readRunFile(t *testing.T, path string) string {
 // TestRunner_R3H4SpawnHappy cubre el camino feliz de H4: pipeline 1 step
 // con un fake claude que devuelve "ok-h4-happy" y exit 0. El runner
 // arranca R3, ejecuta blocking, escribe manifest + result.yaml, y aterriza
-// en R4 ("Run completo"). Coincide con el primer test e2e listado en H4.
+// en R4 ("Done"). Coincide con el primer test e2e listado en H4.
 func TestRunner_R3H4SpawnHappy(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
@@ -970,7 +970,7 @@ func TestRunner_R3H4SpawnHappy(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R3H4 Happy", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	if !p.WaitForOutputSince(t, mark, "todo listo", 3*time.Second) {
@@ -982,7 +982,7 @@ func TestRunner_R3H4SpawnHappy(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✓ done", 5*time.Second) {
 		t.Fatalf("R4 'Run completo' never rendered\n%s", p.Since(mark))
 	}
 	if !strings.Contains(p.Since(mark), "R3H4 Happy") {
@@ -1066,7 +1066,7 @@ func TestRunner_R3H4SpawnFailExit1(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R3H4 Fail", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	if !p.WaitForOutputSince(t, mark, "todo listo", 3*time.Second) {
@@ -1077,7 +1077,7 @@ func TestRunner_R3H4SpawnFailExit1(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Run fallo", 5*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✗ failed", 5*time.Second) {
 		t.Fatalf("RF 'Run fallo' never rendered\n%s", p.Since(mark))
 	}
 	if !strings.Contains(p.Since(mark), "exit_code: 1") {
@@ -1160,7 +1160,7 @@ func TestRunner_R3H4CancelAbort(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R3H4 Cancel", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 never rendered\n%s", p.Since(mark))
 	}
 	if !p.WaitForOutputSince(t, mark, "todo listo", 3*time.Second) {
@@ -1202,7 +1202,7 @@ func TestRunner_R3H4CancelAbort(t *testing.T) {
 	// Tras el cancel, la goroutine SIGTERMea al fake; con
 	// CHE_KILL_GRACE=1 a lo sumo 1s + grace SIGKILL → el msg done llega
 	// rapido y aterrizamos en RF (tono cancelled).
-	if !p.WaitForOutputSince(t, mark, "Run cancelado", 8*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "! cancelled", 8*time.Second) {
 		t.Fatalf("RF cancelled screen never rendered\n%s", p.Since(mark))
 	}
 
@@ -1350,7 +1350,7 @@ func TestRunner_R3H5StreamJSONLines(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R3H5 Stream", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	if !p.WaitForOutputSince(t, mark, "todo listo", 3*time.Second) {
@@ -1362,8 +1362,8 @@ func TestRunner_R3H5StreamJSONLines(t *testing.T) {
 		t.Fatalf("send enter: %v", err)
 	}
 	// El run termina rapido (5 * 30ms ≈ 150ms + overhead) y aterrizamos
-	// en R4. Esperamos el sentinel "Run completo".
-	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+	// en R4. Esperamos el sentinel "Done".
+	if !p.WaitForOutputSince(t, mark, "✓ done", 5*time.Second) {
 		t.Fatalf("R4 'Run completo' never rendered\n%s", p.Since(mark))
 	}
 
@@ -1478,7 +1478,7 @@ func TestRunner_R3H5StreamJSONLargeLine(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Run completo", 8*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✓ done", 8*time.Second) {
 		t.Fatalf("R4 never rendered\n%s", p.Since(mark))
 	}
 
@@ -1579,7 +1579,7 @@ func TestRunner_R3H5StderrInterleaved(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Run completo", 8*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✓ done", 8*time.Second) {
 		t.Fatalf("R4 never rendered\n%s", p.Since(mark))
 	}
 
@@ -1728,7 +1728,7 @@ func TestRunner_R3H6MultiStepPreviousOutput(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R3H6 Multi", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
@@ -1738,8 +1738,8 @@ func TestRunner_R3H6MultiStepPreviousOutput(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	// El run ejecuta los 2 steps en orden y aterriza en R4 ("Run completo").
-	if !p.WaitForOutputSince(t, mark, "Run completo", 8*time.Second) {
+	// El run ejecuta los 2 steps en orden y aterriza en R4 ("Done").
+	if !p.WaitForOutputSince(t, mark, "✓ done", 8*time.Second) {
 		t.Fatalf("R4 'Run completo' never rendered\n%s", p.Since(mark))
 	}
 
@@ -1870,7 +1870,7 @@ func TestRunner_R3H6MultiStepFailStops(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R3H6 Fail", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
@@ -1880,7 +1880,7 @@ func TestRunner_R3H6MultiStepFailStops(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Run fallo", 8*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✗ failed", 8*time.Second) {
 		t.Fatalf("RF 'Run fallo' never rendered\n%s", p.Since(mark))
 	}
 
@@ -2024,7 +2024,7 @@ func TestRunner_R3H7ValidatorOkFirstTry(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R3H7 Ok", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
@@ -2034,7 +2034,7 @@ func TestRunner_R3H7ValidatorOkFirstTry(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Run completo", 8*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✓ done", 8*time.Second) {
 		t.Fatalf("R4 'Run completo' never rendered\n%s", p.Since(mark))
 	}
 
@@ -2141,7 +2141,7 @@ func TestRunner_R3H7ValidatorFailMaxLoopsFail(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R3H7 Fail", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
@@ -2152,7 +2152,7 @@ func TestRunner_R3H7ValidatorFailMaxLoopsFail(t *testing.T) {
 		t.Fatalf("send enter: %v", err)
 	}
 	// Tras agotar max_loops con on_max_loops=fail, R3 transiciona a RF.
-	if !p.WaitForOutputSince(t, mark, "Run fallo", 10*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✗ failed", 10*time.Second) {
 		t.Fatalf("RF 'Run fallo' never rendered\n%s", p.Since(mark))
 	}
 
@@ -2249,7 +2249,7 @@ func TestRunner_R3H7ValidatorNoVerdictBlock(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R3H7 NoBlock", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
@@ -2259,7 +2259,7 @@ func TestRunner_R3H7ValidatorNoVerdictBlock(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Run fallo", 8*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✗ failed", 8*time.Second) {
 		t.Fatalf("RF 'Run fallo' never rendered\n%s", p.Since(mark))
 	}
 
@@ -2345,7 +2345,7 @@ func TestRunner_R3H7ValidatorPauseContinue(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Preflight de R3H7 Pause", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
 		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
 	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
@@ -2370,7 +2370,7 @@ func TestRunner_R3H7ValidatorPauseContinue(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter (continuar): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✓ done", 5*time.Second) {
 		t.Fatalf("R4 'Run completo' never rendered after continuar\n%s", p.Since(mark))
 	}
 
@@ -2592,7 +2592,7 @@ func TestRunner_R3H8GCKeepsLatestN(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✓ done", 5*time.Second) {
 		t.Fatalf("R4 never rendered\n%s", p.Since(mark))
 	}
 
@@ -2722,7 +2722,7 @@ steps:
 		t.Fatalf("send enter: %v", err)
 	}
 	// initManifest falla → enterRunning aterriza en ScreenFailed (RF).
-	if !p.WaitForOutputSince(t, mark, "Run fallo", 5*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✗ failed", 5*time.Second) {
 		t.Fatalf("RF never rendered\n%s", p.Since(mark))
 	}
 	if !strings.Contains(p.Since(mark), "fault inject") {
@@ -2793,7 +2793,7 @@ steps:
 // listado en H9: fake CLI que ignora SIGTERM (signal.Notify + drain). Tras
 // abort & save, el runner manda SIGTERM, el fake lo descarta, y tras
 // CHE_KILL_GRACE el runner escala a SIGKILL. Asserts:
-//   - aterrizamos en RC-done (pantalla amarilla "Run cancelado").
+//   - aterrizamos en RC-done (pantalla amarilla "Cancelled").
 //   - manifest cierra status: cancelled, step en cancelled con exit_code: -1.
 //   - todos los handles cerrados (re-abrir stdout.log/stderr.log no devuelve
 //     EBADF — el OS es estricto con write-after-close en file descriptors,
@@ -2870,7 +2870,7 @@ func TestRunner_RCH9SigtermIgnoredEscalatesToKill(t *testing.T) {
 	// drenado de pipes + el ciclo del bubbletea. Si el escalation no
 	// funciona, el test cuelga porque el fake bloquea 10s y a SIGTERM lo
 	// ignora.
-	if !p.WaitForOutputSince(t, mark, "Run cancelado", 10*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "! cancelled", 10*time.Second) {
 		t.Fatalf("RC-done screen never rendered\n%s", p.Since(mark))
 	}
 	// El hint de RC-done (H9) anuncia "r retry / l log / esc volver".
@@ -3010,9 +3010,9 @@ func TestRunner_RCH9RaceSubprocessExitsBeforeAbort(t *testing.T) {
 
 	// Esperar a que el fake termine naturalmente (BlockSeconds=1 → ~1s
 	// despues del Start()). El stepDoneMsg llega con cancelled=false; el
-	// handler del modal lo procesa y transiciona a R4 ("Run completo")
+	// handler del modal lo procesa y transiciona a R4 ("Done")
 	// porque exit 0 == done.
-	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✓ done", 5*time.Second) {
 		t.Fatalf("R4 never rendered after natural exit during modal:\n%s", p.Since(mark))
 	}
 
@@ -3119,7 +3119,7 @@ func TestRunner_R4H10ChipDoneInLister(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✓ done", 5*time.Second) {
 		t.Fatalf("R4 never rendered\n%s", p.Since(mark))
 	}
 	r4Snap := p.Since(mark)
@@ -3224,7 +3224,7 @@ func TestRunner_RFH10StderrInline(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Run fallo", 5*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "✗ failed", 5*time.Second) {
 		t.Fatalf("RF never rendered\n%s", p.Since(mark))
 	}
 	rfSnap := p.Since(mark)
@@ -3344,7 +3344,11 @@ func TestRunner_R0H10RunHistoryListsRuns(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Run · R0H10 History", 3*time.Second) {
+	// El detalle del run repite el run-id en la linea "run id: <id>" (que
+	// viene en un solo span ANSI). Aserciones sobre el ultimo segmento del
+	// breadcrumb directamente fallan porque dim+title quedan en spans
+	// distintos — el id en el cuerpo es el sentinel mas robusto.
+	if !p.WaitForOutputSince(t, mark, "run id: 2024-12-03T00-00-00", 3*time.Second) {
 		t.Fatalf("Run detail screen never rendered\n%s", p.Since(mark))
 	}
 	detailSnap := p.Since(mark)

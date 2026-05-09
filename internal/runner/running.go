@@ -767,8 +767,23 @@ func (m RunModel) viewRunning() string {
 	}
 
 	var b strings.Builder
-	header := fmt.Sprintf("Run · %s    step %d/%d", name, m.Active+1, len(m.Pipeline.Steps))
-	b.WriteString(titleStyle.Render(header))
+	// Ultimo segmento = "Running" (la pantalla activa). El "step N/M" vivia
+	// pegado al "Run · <name>" — lo bajamos a una linea propia debajo del
+	// breadcrumb para no inflar el path con un counter que cambia cada
+	// step. Si el modal RC o RP esta abierto, el ultimo segmento muta a
+	// "Cancel?" / "Pause" para reflejar el sub-screen activo (siguen
+	// renderizandose como overlays sobre R3).
+	last := "Running"
+	switch {
+	case m.PauseModal != nil:
+		last = "Pause"
+	case m.CancelModal:
+		last = "Cancel?"
+	}
+	crumb := append(runnerCrumb(name), last)
+	b.WriteString(breadcrumb(crumb...))
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render(fmt.Sprintf("step %d/%d", m.Active+1, len(m.Pipeline.Steps))))
 	b.WriteString("\n\n")
 
 	// Steps tracker — un row por step del pipeline. Marcamos el activo

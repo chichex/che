@@ -103,12 +103,14 @@ func (m RunModel) updateFailedEditorReturn(_ editorReturnedMsg) (tea.Model, tea.
 // doc (R4): titulo, duracion, lista de steps, path al run dir + result.yaml
 // del ultimo step.
 func (m RunModel) viewDone() string {
-	name := m.Pipeline.Name
-	if name == "" {
-		name = "(sin nombre)"
-	}
 	var b strings.Builder
-	b.WriteString(okStyle.Render("Run completo · " + name))
+	crumb := append(runnerCrumb(m.Pipeline.Name), "Done")
+	b.WriteString(breadcrumb(crumb...))
+	b.WriteString("  ")
+	// Chip "✓ done" verde apenas a la derecha del breadcrumb — sustituye
+	// al "Run completo · <name>" verde que tenia antes (mismo color, misma
+	// senal de exito sin pisar el header del breadcrumb).
+	b.WriteString(okStyle.Render("✓ done"))
 	b.WriteString("\n\n")
 
 	if len(m.Steps) > 0 {
@@ -148,13 +150,11 @@ func (m RunModel) viewDone() string {
 // el step que fallo, muestra el exit_code y un dump de las ultimas lineas
 // del stderr (el doc fija las "ultimas 20 lineas").
 func (m RunModel) viewFailed() string {
-	name := m.Pipeline.Name
-	if name == "" {
-		name = "(sin nombre)"
-	}
 	var b strings.Builder
 
-	// Detectar si fue cancel para usar tono amarillo.
+	// Detectar si fue cancel para distinguir el ultimo segmento del
+	// breadcrumb + el chip de tono. El nombre del pipeline ya vive en el
+	// segmento "Run · <name>", asi que no se repite en el ultimo.
 	cancelled := false
 	for _, s := range m.Steps {
 		if s.Status == StepStatusCancelled {
@@ -162,10 +162,17 @@ func (m RunModel) viewFailed() string {
 			break
 		}
 	}
+	last := "Failed"
 	if cancelled {
-		b.WriteString(warnStyle.Render("Run cancelado · " + name))
+		last = "Cancelled"
+	}
+	crumb := append(runnerCrumb(m.Pipeline.Name), last)
+	b.WriteString(breadcrumb(crumb...))
+	b.WriteString("  ")
+	if cancelled {
+		b.WriteString(warnStyle.Render("! cancelled"))
 	} else {
-		b.WriteString(errorStyle.Render("Run fallo · " + name))
+		b.WriteString(errorStyle.Render("✗ failed"))
 	}
 	b.WriteString("\n\n")
 

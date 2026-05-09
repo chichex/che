@@ -117,7 +117,7 @@ func (m model) applySaveChoice() (model, tea.Cmd) {
 
 func (m model) viewSaveChoice() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Step listo"))
+	b.WriteString(breadcrumb("Create pipeline", "Step listo"))
 	b.WriteString("\n\n")
 	b.WriteString("¿Que querés hacer ahora?\n\n")
 

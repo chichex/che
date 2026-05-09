@@ -159,7 +159,7 @@ func prevFocus(f FieldFocus) FieldFocus {
 // viewInfo renderiza S1.
 func (m model) viewInfo() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Create pipeline · paso 1/3"))
+	b.WriteString(breadcrumb("Create pipeline", "paso 1/3 · nombre"))
 	b.WriteString("\n\n")
 
 	b.WriteString(renderLabeledField("Nombre", m.nameInput, m.focus == FocusName))

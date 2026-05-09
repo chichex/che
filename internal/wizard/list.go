@@ -191,7 +191,7 @@ func runListWithHome(home string) (ListAction, string, bool, error) {
 		return ListActionNone, "", false, err
 	}
 	m := listModel{homeDir: home, items: items}
-	final, err := tea.NewProgram(m).Run()
+	final, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if err != nil {
 		return ListActionNone, "", false, err
 	}
@@ -474,7 +474,7 @@ func (m listModel) View() string {
 		return m.viewHistory()
 	}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("My pipelines"))
+	b.WriteString(breadcrumb("My pipelines"))
 	b.WriteString("\n\n")
 
 	if len(m.items) == 0 {
@@ -646,7 +646,7 @@ func displayWidth(s string) int {
 
 func (m listModel) viewDelete() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Borrar pipeline"))
+	b.WriteString(breadcrumb("My pipelines", "Borrar pipeline"))
 	b.WriteString("\n\n")
 	if m.cursor >= 0 && m.cursor < len(m.items) {
 		it := m.items[m.cursor]
@@ -690,12 +690,17 @@ func (m listModel) viewDelete() string {
 // abre el detalle.
 func (m listModel) viewHistory() string {
 	var b strings.Builder
-	title := "Run history"
+	b.WriteString(breadcrumb("My pipelines", "Run history"))
+	b.WriteString("\n")
 	if m.historyItem.name != "" {
-		title += " · " + m.historyItem.name
+		// Mantenemos el nombre del pipeline como subtitulo dimmed para no
+		// inflar el ultimo segmento del breadcrumb (el spec lo fija como
+		// "Run history" pelado) — pero el contexto sigue visible para que
+		// el usuario sepa de que pipeline son los runs listados.
+		b.WriteString(dimStyle.Render(m.historyItem.name))
+		b.WriteString("\n")
 	}
-	b.WriteString(titleStyle.Render(title))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
 	if len(m.historyRuns) == 0 {
 		b.WriteString(dimStyle.Render("(sin runs todavia para este pipeline)"))
 		b.WriteString("\n\n")
@@ -769,20 +774,26 @@ func renderHistoryRow(r RunSummary) string {
 func (m listModel) viewHistoryDetail() string {
 	r := m.historyDetailR
 	var b strings.Builder
-	title := "Run · " + m.historyItem.name
+	runID := r.RunID
+	if runID == "" {
+		runID = "(sin id)"
+	}
+	b.WriteString(breadcrumb("My pipelines", "Run history", runID))
+	b.WriteString("\n")
+	// El status chip vivia anexado al titulo previo. Lo bajamos a una
+	// linea propia debajo del breadcrumb para no romper el patron del
+	// header (ultimo segmento = nombre exacto de la pantalla, sin chips).
 	switch r.Status {
 	case RunStatusDone:
-		b.WriteString(chipReadyStyle.Render(title + " · ✓ done"))
+		b.WriteString(chipReadyStyle.Render("✓ done"))
 	case RunStatusFailed:
-		b.WriteString(chipFailStyle.Render(title + " · ✗ failed"))
+		b.WriteString(chipFailStyle.Render("✗ failed"))
 	case RunStatusCancelled:
-		b.WriteString(chipWarnStyle.Render(title + " · ! cancelled"))
+		b.WriteString(chipWarnStyle.Render("! cancelled"))
 	case RunStatusInterrupted:
-		b.WriteString(chipInfoStyle.Render(title + " · ? interrupted"))
+		b.WriteString(chipInfoStyle.Render("? interrupted"))
 	case RunStatusRunning:
-		b.WriteString(chipInfoStyle.Render(title + " · ⏳ running"))
-	default:
-		b.WriteString(titleStyle.Render(title))
+		b.WriteString(chipInfoStyle.Render("⏳ running"))
 	}
 	b.WriteString("\n\n")
 	b.WriteString(dimStyle.Render("run id: " + r.RunID))

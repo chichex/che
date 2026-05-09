@@ -345,53 +345,47 @@ func (m RunModel) confirmInput() (tea.Model, tea.Cmd) {
 
 // viewInput renderiza R1 segun el kind.
 func (m RunModel) viewInput() string {
-	name := m.Pipeline.Name
-	if name == "" {
-		name = "(sin nombre)"
-	}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Run · " + name))
+	// Ultimo segmento del breadcrumb = "Input · <kind>" (text/pr/issue/
+	// url/file/...). Asi la pantalla actual destaca con el kind exacto y
+	// el header arriba sustituye al "Run · <name>" + label "Input · text"
+	// que vivian apilados antes — info redundante una vez que el path
+	// completo aparece en el header.
+	last := "Input · " + m.inputUI.kind
+	if m.inputUI.kind == "" {
+		last = "Input"
+	}
+	crumb := append(runnerCrumb(m.Pipeline.Name), last)
+	b.WriteString(breadcrumb(crumb...))
 	b.WriteString("\n\n")
 
 	switch m.inputUI.kind {
 	case wizard.InputText:
-		b.WriteString(labelStyle.Render("Input · text"))
-		b.WriteString("\n")
 		b.WriteString(dimStyle.Render("el step recibira este texto en stdin / como prompt"))
 		b.WriteString("\n")
 		b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
 		b.WriteString("\n")
 	case wizard.InputPR:
-		b.WriteString(labelStyle.Render("Input · pr"))
-		b.WriteString("\n")
 		b.WriteString(dimStyle.Render("formato: owner/repo#NNN — se valida con `gh pr view`"))
 		b.WriteString("\n")
 		b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
 		b.WriteString("\n")
 	case wizard.InputIssue:
-		b.WriteString(labelStyle.Render("Input · issue"))
-		b.WriteString("\n")
 		b.WriteString(dimStyle.Render("formato: owner/repo#NNN — se valida con `gh issue view`"))
 		b.WriteString("\n")
 		b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
 		b.WriteString("\n")
 	case wizard.InputURL:
-		b.WriteString(labelStyle.Render("Input · url"))
-		b.WriteString("\n")
 		b.WriteString(dimStyle.Render("http/https — fetch con timeout 10s al confirmar"))
 		b.WriteString("\n")
 		b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
 		b.WriteString("\n")
 	case wizard.InputFile:
-		b.WriteString(labelStyle.Render("Input · file"))
-		b.WriteString("\n")
 		b.WriteString(dimStyle.Render(fmt.Sprintf("dir: %s", m.inputUI.fileDir)))
 		b.WriteString("\n")
 		b.WriteString(renderFilePicker(m.inputUI))
 		b.WriteString("\n")
 	default:
-		b.WriteString(labelStyle.Render("Input · " + m.inputUI.kind))
-		b.WriteString("\n")
 		b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
 		b.WriteString("\n")
 	}

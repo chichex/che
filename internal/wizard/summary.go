@@ -218,7 +218,7 @@ func (m model) summaryDelete() (model, tea.Cmd) {
 // a borrar.
 func (m model) viewSummaryDelete() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Borrar step"))
+	b.WriteString(breadcrumb("Create pipeline", "paso 3/3 · resumen", "Borrar step"))
 	b.WriteString("\n\n")
 	if m.summaryCursor >= 0 && m.summaryCursor < len(m.pipeline.Steps) {
 		s := m.pipeline.Steps[m.summaryCursor]
@@ -296,7 +296,7 @@ func (m model) summarySaveAndFinish() (model, tea.Cmd) {
 // validator), errores de IsValid (si aplica), hint de teclas.
 func (m model) viewSummary() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Create pipeline · paso 3/3 · resumen"))
+	b.WriteString(breadcrumb("Create pipeline", "paso 3/3 · resumen"))
 	b.WriteString("\n\n")
 
 	b.WriteString(labelStyle.Render("Pipeline: "))

@@ -57,7 +57,7 @@ func Run(path string) (exitApp bool, err error) {
 			m.inputUI.textBuf.cursor = len(m.inputUI.textBuf.runes)
 		}
 
-		final, runErr := tea.NewProgram(m).Run()
+		final, runErr := tea.NewProgram(m, tea.WithAltScreen()).Run()
 		if runErr != nil {
 			return false, runErr
 		}
@@ -206,18 +206,46 @@ func (m RunModel) View() string {
 // viewSkeleton es el render legacy de H1 — placeholder generico. Solo se
 // usa como fallback de View; el flow real arranca en R1 o ScreenSecondary.
 func (m RunModel) viewSkeleton() string {
-	name := m.Pipeline.Name
-	if name == "" {
-		name = "(sin nombre)"
-	}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Run · " + name))
+	b.WriteString(breadcrumb(runnerCrumb(m.Pipeline.Name)...))
 	b.WriteString("\n\n")
 	b.WriteString(dimStyle.Render("runner pendiente — H3+ implementa preflight/running/done"))
 	b.WriteString("\n\n")
 	b.WriteString(hintStyle.Render("esc volver · q salir"))
 	b.WriteString("\n")
 	return b.String()
+}
+
+// breadcrumb arma el header "che › My pipelines › Run · <pipeline> ›
+// <screen>" para el View() de cada screen del runner. El ultimo segmento
+// queda en titleStyle (cyan bold); los previos + separadores en dimStyle
+// (gris dracula) para que el ojo aterrice en la pantalla actual. parts NO
+// incluye el root "che" — lo prependeamos aca asi todas las screens hablan
+// la misma jerarquia.
+func breadcrumb(parts ...string) string {
+	all := append([]string{"che"}, parts...)
+	if len(all) == 1 {
+		return titleStyle.Render(all[0])
+	}
+	sep := dimStyle.Render(" › ")
+	prefix := make([]string, 0, len(all)-1)
+	for _, p := range all[:len(all)-1] {
+		prefix = append(prefix, dimStyle.Render(p))
+	}
+	return strings.Join(prefix, sep) + sep + titleStyle.Render(all[len(all)-1])
+}
+
+// runnerCrumb es el helper interno que devuelve el path comun a todas las
+// screens del runner: "My pipelines › Run · <pipeline>". Cada screen le
+// appendea su propio segmento final ("Input · text", "Preflight",
+// "Running", "Done", "Failed", "Cancel?", "Pause"). Asi el padre del
+// runner queda en un solo lugar y rename del flow no obliga a tocar 6
+// archivos.
+func runnerCrumb(name string) []string {
+	if name == "" {
+		name = "(sin nombre)"
+	}
+	return []string{"My pipelines", "Run · " + name}
 }
 
 // Estilos locales del runner. Duplicados de internal/wizard/styles.go por

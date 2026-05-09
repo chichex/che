@@ -1017,8 +1017,8 @@ func neighborInt(options []int, current, delta int) int {
 // viewStep renderiza S2.
 func (m model) viewStep() string {
 	var b strings.Builder
-	title := fmt.Sprintf("Create pipeline · paso 2/3 · step %d (%s)", m.stepEdit.idx+1, m.stepEdit.mode)
-	b.WriteString(titleStyle.Render(title))
+	last := fmt.Sprintf("paso 2/3 · step %d (%s)", m.stepEdit.idx+1, m.stepEdit.mode)
+	b.WriteString(breadcrumb("Create pipeline", last))
 	b.WriteString("\n")
 	if name := m.pipeline.Name; name != "" {
 		// Linea de contexto: "Pipeline: <name>" dimmed para que el usuario

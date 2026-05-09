@@ -478,15 +478,14 @@ func (m RunModel) updatePreflight(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // viewPreflight renderiza R2. La estructura sigue el mockup del doc: header
-// "Preflight de <name>", lista con icono + label + (si aplica) linea de
-// remedio indentada, footer con counts + hints.
+// breadcrumb (... · Preflight), lista con icono + label + (si aplica) linea de
+// remedio indentada, footer con counts + hints. El nombre del pipeline ya
+// vive en el segmento "Run · <name>" del breadcrumb — no lo repetimos en
+// el ultimo segmento.
 func (m RunModel) viewPreflight() string {
-	name := m.Pipeline.Name
-	if name == "" {
-		name = "(sin nombre)"
-	}
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Preflight de " + name))
+	crumb := append(runnerCrumb(m.Pipeline.Name), "Preflight")
+	b.WriteString(breadcrumb(crumb...))
 	b.WriteString("\n\n")
 
 	for _, c := range m.Preflight {

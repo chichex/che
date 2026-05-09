@@ -100,7 +100,7 @@ func runWithHome(home string) (bool, error) {
 // del modelo final. Lo usan Run / RunResume / RunEditReady para no duplicar
 // la logica del cast + fallback.
 func runProgram(m model) (bool, error) {
-	final, err := tea.NewProgram(m).Run()
+	final, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if err != nil {
 		return false, err
 	}
