@@ -401,6 +401,15 @@ func (m RunModel) handleStepDone(msg stepDoneMsg) (tea.Model, tea.Cmd) {
 		step.Status = StepStatusDone
 	}
 
+	// Post-mortem: leer events.jsonl del step para detectar permission_denials
+	// (claude pidio una tool y le fue denegada — sintoma de "exit 0 pero sin
+	// haber hecho nada", como cuando el prompt invita a AskUserQuestion en
+	// modo no-TTY). Solo aplica a CLIs stream-json; para los demas el helper
+	// devuelve nil.
+	if denials := readPermissionDenials(m.RunDir, step.Idx); len(denials) > 0 {
+		step.PermissionDenials = denials
+	}
+
 	// LogDump para el render terminal — concat stdout+stderr resumido del
 	// step que acaba de terminar. Para multi-step done, se va sobreescribiendo
 	// en cada step; el render terminal R4 lo usa para el bloque "ultimas
@@ -809,7 +818,7 @@ func (m RunModel) viewRunning() string {
 	// caemos al placeholder "ejecutando ...".
 	b.WriteString(renderLogPane(m))
 	b.WriteString("\n")
-	hint := "ctrl+c cancelar · ↑/↓ scroll · g fondo · ctrl+l clear"
+	hint := "ctrl+c cancelar · ↑/↓ scroll · g auto follow · ctrl+l clear"
 	if len(m.Pipeline.Steps) > 1 {
 		hint += " · tab cambiar logs"
 	}

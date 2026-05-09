@@ -2,6 +2,7 @@ package wizard
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -654,11 +655,24 @@ func (m model) stepBack() (model, tea.Cmd) {
 	return m.enterSummary()
 }
 
-// stepSaveAndAddAnother: ctrl+n en S2 mode=create. Valida el step actual,
-// lo pushea a pipeline.Steps, persiste con status.step_idx avanzado y
-// reabre S2 vacio para step idx+1. mode=edit no expone ctrl+n — H7
-// agregara "+ nuevo step al final" desde S3.
+// stepSaveAndAddAnother: ctrl+n en S2 mode=create. Si kind=prompt + content
+// no vacio, primero dispara la review automatica con claude (modal
+// ScreenStepReview). El skip de review (con o sin sugerencia aplicada)
+// llama a stepSaveAndAddAnotherSkippingReview directamente.
 func (m model) stepSaveAndAddAnother() (model, tea.Cmd) {
+	if m.stepEdit.mode != "create" {
+		return m, nil
+	}
+	if shouldRunPromptReview(m) {
+		return m.startPromptReview("addanother")
+	}
+	return m.stepSaveAndAddAnotherSkippingReview()
+}
+
+// stepSaveAndAddAnotherSkippingReview es el path original (pre-review):
+// build + save + enterStepCreate del siguiente. El modal de review llama
+// aca despues de aplicar (o no) la sugerencia.
+func (m model) stepSaveAndAddAnotherSkippingReview() (model, tea.Cmd) {
 	if m.stepEdit.mode != "create" {
 		return m, nil
 	}
@@ -686,14 +700,46 @@ func (m model) stepSaveAndAddAnother() (model, tea.Cmd) {
 	return m.enterStepCreate(m.stepEdit.idx + 1)
 }
 
-// stepSaveAndFinish: ctrl+s en S2.
-//
-// Valida el step actual; si pasa lo pushea (mode=create) o lo reemplaza
-// (mode=edit) en pipeline.Steps, persiste con stage=step, y transiciona
-// a S3 (enterSummary) que ya re-persiste con stage=summary. La doble
-// escritura en quick succession es intencional: si enterSummary falla por
-// algun motivo el archivo en disco refleja el step recien guardado.
+// stepSaveAndFinish: ctrl+s en S2 (y SaveFinish del modal de save choice).
+// Si kind=prompt + content no vacio, dispara la review automatica con
+// claude (modal ScreenStepReview). La aprobacion del modal (con o sin
+// sugerencia aplicada) llama stepSaveAndFinishSkippingReview directamente.
 func (m model) stepSaveAndFinish() (model, tea.Cmd) {
+	if shouldRunPromptReview(m) {
+		return m.startPromptReview("finish")
+	}
+	return m.stepSaveAndFinishSkippingReview()
+}
+
+// shouldRunPromptReview reporta si el step actual amerita pasar por la
+// review automatica de prompt: kind=prompt, content no-blank, y todavia
+// no estamos volviendo del modal (pendingSaveAction vacio). Si el usuario
+// abrio el modal y ya decidio (guardar igual / aplicar sugerencia), saltea
+// para no entrar en loop.
+//
+// CHE_DISABLE_PROMPT_REVIEW=1 desactiva el feature entero — lo usa el
+// harness e2e (claude esta fakeado y no tiene matcher para la review;
+// pedir uno por cada test seria ruido). En produccion no esta seteado.
+func shouldRunPromptReview(m model) bool {
+	if os.Getenv("CHE_DISABLE_PROMPT_REVIEW") == "1" {
+		return false
+	}
+	if m.stepEdit.kind != KindPrompt {
+		return false
+	}
+	if strings.TrimSpace(m.stepEdit.contentInput.Value()) == "" {
+		return false
+	}
+	if m.stepEdit.pendingSaveAction != "" {
+		return false
+	}
+	return true
+}
+
+// stepSaveAndFinishSkippingReview es el path original (pre-review): valida,
+// pushea/reemplaza el step en pipeline.Steps, persiste con stage=step y
+// transiciona a S3. El modal de review llama aca despues de aprobar.
+func (m model) stepSaveAndFinishSkippingReview() (model, tea.Cmd) {
 	step, err := m.buildStep()
 	if err != nil {
 		m.stepEdit.errMsg = err.Error()

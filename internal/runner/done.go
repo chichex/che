@@ -111,6 +111,16 @@ func (m RunModel) viewDone() string {
 	// al "Run completo · <name>" verde que tenia antes (mismo color, misma
 	// senal de exito sin pisar el header del breadcrumb).
 	b.WriteString(okStyle.Render("✓ done"))
+	if anyPermissionDenials(m.Steps) {
+		// Chip warn al lado de "✓ done" cuando algun step recibio
+		// permission_denials de claude. Caso clasico: el prompt invitaba
+		// a AskUserQuestion / Bash interactivo, claude pidio permiso, no
+		// hay TTY → la tool quedo denegada → exit 0 sin trabajo real.
+		// El verdict de done se preserva (no rompemos semantica), pero
+		// la senal queda visible para que el usuario sepa revisar.
+		b.WriteString("  ")
+		b.WriteString(warnStyle.Render("⚠ permission denied — revisar prompt"))
+	}
 	b.WriteString("\n\n")
 
 	if len(m.Steps) > 0 {
@@ -127,6 +137,12 @@ func (m RunModel) viewDone() string {
 				s.Name,
 				s.FinishedAt.Sub(s.StartedAt).Round(time.Millisecond),
 				okStyle.Render("✓"))
+			if len(s.PermissionDenials) > 0 {
+				// Lista compacta de tools denegadas — el usuario reconoce
+				// "AskUserQuestion" / "Bash" y entiende que el step pidio
+				// algo que claude no pudo ejecutar.
+				line += "  " + warnStyle.Render("⚠ "+strings.Join(s.PermissionDenials, ", "))
+			}
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
@@ -173,6 +189,10 @@ func (m RunModel) viewFailed() string {
 		b.WriteString(warnStyle.Render("! cancelled"))
 	} else {
 		b.WriteString(errorStyle.Render("✗ failed"))
+	}
+	if anyPermissionDenials(m.Steps) {
+		b.WriteString("  ")
+		b.WriteString(warnStyle.Render("⚠ permission denied — revisar prompt"))
 	}
 	b.WriteString("\n\n")
 
@@ -222,6 +242,19 @@ func (m RunModel) viewFailed() string {
 	b.WriteString(hintStyle.Render("enter / esc volver al menu · r retry · l abrir log · q / ctrl+c salir"))
 	b.WriteString("\n")
 	return b.String()
+}
+
+// anyPermissionDenials reporta si algun step del run cargo permission_denials
+// detectados post-mortem desde events.jsonl. Sirve al chip global del
+// breadcrumb de R4 — si al menos un step pidio una tool y le fue denegada,
+// vale la pena que el usuario sepa antes de mirar step por step.
+func anyPermissionDenials(steps []StepRun) bool {
+	for _, s := range steps {
+		if len(s.PermissionDenials) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func totalDuration(steps []StepRun) time.Duration {

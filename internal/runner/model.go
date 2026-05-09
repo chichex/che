@@ -94,6 +94,15 @@ type StepRun struct {
 	// loop incrementa LoopsRun y sobrescribe LastFeedback. FinalVerdict
 	// se setea al salir del loop (ok | fail | human-override).
 	Validator *ValidatorRun
+
+	// PermissionDenials = nombres de tools que claude pidio durante el
+	// step y le fueron denegadas (no-TTY). Lo poblamos post-mortem
+	// leyendo el ultimo `result` event de events.jsonl. Cuando no esta
+	// vacio, R4 renderea un chip warn ("⚠ permission denied: tool")
+	// porque el step puede haber salido exit 0 sin haber hecho nada.
+	// Solo aplica a CLIs que emiten stream-json (claude); para los
+	// demas queda nil.
+	PermissionDenials []string
 }
 
 // ValidatorRun es el estado vivo del loop del validator de un step. Sigue

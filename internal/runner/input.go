@@ -47,6 +47,29 @@ type inputUIState struct {
 	ghEntries []GHListItem
 	ghCursor  int
 	ghLoadErr string
+	// ghLoading marca que el picker esta esperando la respuesta async de
+	// `gh pr list` / `gh issue list`. Mientras true, el render muestra
+	// "Cargando..." en vez de la lista vacia (sin esto, alt-screen + fetch
+	// sincronico en initInputUI dejaba la pantalla en blanco varios segundos
+	// mientras gh corria — el usuario veia "todo desaparecer y reaparecer").
+	ghLoading bool
+}
+
+// ghListLoadedMsg llega cuando el goroutine de carga del picker termina.
+// Contiene los items + un eventual error; updateInput lo aplica al UI.
+type ghListLoadedMsg struct {
+	items []GHListItem
+	err   error
+}
+
+// loadGHListCmd corre ghListFn(kind) en un goroutine y dispatchea
+// ghListLoadedMsg al terminar. Asi el program puede renderear "Cargando..."
+// inmediatamente y poblar la lista cuando llega.
+func loadGHListCmd(kind string) tea.Cmd {
+	return func() tea.Msg {
+		items, err := ghListFn(kind)
+		return ghListLoadedMsg{items: items, err: err}
+	}
 }
 
 // fileItem es una entrada del file picker.
@@ -195,15 +218,10 @@ func initInputUI(kind string) inputUIState {
 		}
 		ui.repoMode = true
 		ui.repo = info.Repo
-		listKind := "pr"
-		if kind == wizard.InputIssue {
-			listKind = "issue"
-		}
-		items, err := ghListFn(listKind)
-		if err != nil {
-			ui.ghLoadErr = err.Error()
-		}
-		ui.ghEntries = items
+		ui.ghLoading = true
+		// El fetch real lo dispara RunModel.Init() via loadGHListCmd para
+		// no bloquear el render del primer frame. Al volver de gh, el
+		// handler de ghListLoadedMsg pobla ghEntries / ghLoadErr.
 		return ui
 	default:
 		// url → single-line.
@@ -315,6 +333,12 @@ func (m RunModel) updateInputSingleLine(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 // (ghLoadErr o repo sin items) el confirm rebota con un error inline —
 // esc igual deja al usuario volver al lister para fixear el contexto.
 func (m RunModel) updateInputGHPicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.inputUI.ghLoading {
+		// Mientras la lista esta cargando, ↑/↓/enter no tienen lista que
+		// operar — los ignoramos en silencio. esc/ctrl+c los maneja
+		// updateInput (caller) antes de bajar aca.
+		return m, nil
+	}
 	switch key.String() {
 	case "up", "k":
 		if m.inputUI.ghCursor > 0 {
@@ -517,6 +541,13 @@ func (m RunModel) viewInput() string {
 // la lista esta vacia, mostramos el error de carga (si lo hubo) o un
 // placeholder neutro — el handler de teclas igual respeta esc para volver.
 func renderGHPicker(ui inputUIState) string {
+	if ui.ghLoading {
+		label := "PRs"
+		if ui.kind == wizard.InputIssue {
+			label = "issues"
+		}
+		return dimStyle.Render(fmt.Sprintf("  Cargando %s abiertos en %s…", label, ui.repo))
+	}
 	if ui.ghLoadErr != "" {
 		return errorStyle.Render("✗ "+ui.ghLoadErr) + "\n" + dimStyle.Render("  esc para volver al lister")
 	}

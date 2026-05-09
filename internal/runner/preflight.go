@@ -544,7 +544,7 @@ func (m RunModel) viewPreflight() string {
 	case preflightVerdictAllOK:
 		b.WriteString(okStyle.Render("todo listo"))
 		b.WriteString("\n")
-		b.WriteString(hintStyle.Render("enter siguiente · r reintentar · esc volver · ctrl+c salir"))
+		b.WriteString(hintStyle.Render("enter siguiente · esc volver · ctrl+c salir"))
 	}
 	b.WriteString("\n")
 	return b.String()

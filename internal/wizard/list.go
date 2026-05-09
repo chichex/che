@@ -92,10 +92,32 @@ type listModel struct {
 	historyDetail  bool
 	historyDetailR RunSummary
 
+	// loading marca que items todavia no se cargo. Mientras true, View()
+	// muestra "Cargando..." en vez de la lista vacia. El fetch real lo
+	// dispara Init() async — sin esto, alt-screen + read sincronico de
+	// ~/.che/pipelines/*.yaml + manifests dejaba la pantalla en blanco
+	// varios cientos de ms al entrar.
+	loading bool
+
 	// resultado para el caller
 	action  ListAction
 	target  string
 	exitApp bool
+}
+
+// listLoadedMsg llega cuando el goroutine de carga termina.
+type listLoadedMsg struct {
+	items []listItem
+	err   error
+}
+
+// loadListItemsCmd corre loadListItems(home) en un goroutine y dispatchea
+// listLoadedMsg al terminar.
+func loadListItemsCmd(home string) tea.Cmd {
+	return func() tea.Msg {
+		items, err := loadListItems(home)
+		return listLoadedMsg{items: items, err: err}
+	}
 }
 
 // listEditorFinishedMsg es el msg que devuelve openEditorCmd cuando el
@@ -195,13 +217,11 @@ func RunList() (ListAction, string, bool, error) {
 }
 
 // runListWithHome es el entrypoint testeable: permite forzar HomeDir desde
-// los tests sin tocar $HOME del proceso.
+// los tests sin tocar $HOME del proceso. La carga de items la dispara Init()
+// async para que el primer frame ya muestre "Cargando..." en vez de bloquear
+// el render mientras se leen los manifests.
 func runListWithHome(home string) (ListAction, string, bool, error) {
-	items, err := loadListItems(home)
-	if err != nil {
-		return ListActionNone, "", false, err
-	}
-	m := listModel{homeDir: home, items: items}
+	m := listModel{homeDir: home, loading: true}
 	final, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if err != nil {
 		return ListActionNone, "", false, err
@@ -216,11 +236,26 @@ func runListWithHome(home string) (ListAction, string, bool, error) {
 	return mm.action, mm.target, mm.exitApp, nil
 }
 
-func (m listModel) Init() tea.Cmd { return nil }
+func (m listModel) Init() tea.Cmd {
+	if m.loading {
+		return loadListItemsCmd(m.homeDir)
+	}
+	return nil
+}
 
 func (m listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width = ws.Width
+		return m, nil
+	}
+	if loaded, ok := msg.(listLoadedMsg); ok {
+		m.loading = false
+		if loaded.err != nil {
+			m.toast = "no se pudo cargar la lista: " + loaded.err.Error()
+			m.toastOK = false
+		} else {
+			m.items = loaded.items
+		}
 		return m, nil
 	}
 	if em, ok := msg.(editorFinishedMsg); ok {
@@ -491,6 +526,12 @@ func (m listModel) View() string {
 	var b strings.Builder
 	b.WriteString(breadcrumb("My pipelines"))
 	b.WriteString("\n\n")
+
+	if m.loading {
+		b.WriteString(dimStyle.Render("  Cargando pipelines…"))
+		b.WriteString("\n")
+		return b.String()
+	}
 
 	if len(m.items) == 0 {
 		b.WriteString(dimStyle.Render("(no pipelines yet — usa \"Create pipeline\" desde el menu)"))

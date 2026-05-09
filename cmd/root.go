@@ -52,6 +52,14 @@ var rootCmd = &cobra.Command{
 				if exit {
 					return nil
 				}
+			case tui.ActionAIGen:
+				exit, err := tui.RunAIGen()
+				if err != nil {
+					return err
+				}
+				if exit {
+					return nil
+				}
 			case tui.ActionMyPipelines:
 				if err := runMyPipelines(); err != nil {
 					return err

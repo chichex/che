@@ -113,10 +113,20 @@ func firstInputKind(p wizard.Pipeline) string {
 	return k
 }
 
-// Init satisface tea.Model. Las screens H1/H2 no tienen side-effects al
-// arrancar (sin tickers, sin async load, sin subprocess) — devolver nil es lo
-// correcto.
-func (m RunModel) Init() tea.Cmd { return nil }
+// Init satisface tea.Model. Si arrancamos en R1 con el picker de gh en modo
+// loading (kind=pr|issue + repo activo), disparamos el fetch async para que
+// el primer frame ya muestre "Cargando..." en vez de bloquear el render
+// mientras corre `gh pr list`.
+func (m RunModel) Init() tea.Cmd {
+	if m.Screen == ScreenInput && m.inputUI.repoMode && m.inputUI.ghLoading {
+		listKind := "pr"
+		if m.inputUI.kind == wizard.InputIssue {
+			listKind = "issue"
+		}
+		return loadGHListCmd(listKind)
+	}
+	return nil
+}
 
 // Update dispatchea segun la screen activa. Las teclas globales (esc, q,
 // ctrl+c) las maneja el handler de cada screen para poder distinguir
@@ -148,6 +158,20 @@ func (m RunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateDoneEditorReturn(er)
 		case ScreenFailed:
 			return m.updateFailedEditorReturn(er)
+		}
+		return m, nil
+	}
+	// ghListLoadedMsg llega cuando el goroutine de loadGHListCmd termina —
+	// solo aplica a R1 con picker. Lo manejamos antes del switch por
+	// screen porque es un async load, no un evento de teclado.
+	if loaded, ok := msg.(ghListLoadedMsg); ok {
+		if m.Screen == ScreenInput {
+			m.inputUI.ghLoading = false
+			if loaded.err != nil {
+				m.inputUI.ghLoadErr = loaded.err.Error()
+			} else {
+				m.inputUI.ghEntries = loaded.items
+			}
 		}
 		return m, nil
 	}

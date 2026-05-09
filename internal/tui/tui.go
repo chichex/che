@@ -19,6 +19,7 @@ type Action string
 const (
 	ActionMyPipelines    Action = "my-pipelines"
 	ActionCreatePipeline Action = "create-pipeline"
+	ActionAIGen          Action = "ai-gen"
 	ActionSeeSkills      Action = "see-skills"
 	ActionExit           Action = "exit"
 )
@@ -32,7 +33,8 @@ type item struct {
 var menu = []item{
 	{digit: "1", label: "My pipelines", action: ActionMyPipelines},
 	{digit: "2", label: "Create pipeline", action: ActionCreatePipeline},
-	{digit: "3", label: "See skills", action: ActionSeeSkills},
+	{digit: "3", label: "Crear pipeline con IA", action: ActionAIGen},
+	{digit: "4", label: "See skills", action: ActionSeeSkills},
 	{digit: "0", label: "Exit", action: ActionExit},
 }
 
@@ -116,7 +118,7 @@ func (m model) View() string {
 		}
 		b.WriteString("  " + digitStyle.Render(it.digit+".") + " " + itemStyle.Render(it.label) + "\n")
 	}
-	b.WriteString("\n" + hintStyle.Render("↑/↓ navigate · enter select · 0-3 jump · q quit") + "\n")
+	b.WriteString("\n" + hintStyle.Render("↑/↓ navigate · enter select · 0-4 jump · q quit") + "\n")
 	return b.String()
 }
 

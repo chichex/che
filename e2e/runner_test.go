@@ -101,7 +101,7 @@ func TestRunner_R0H1Skeleton(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 
@@ -236,7 +236,7 @@ func TestRunner_R1H2TextConfirm(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -397,7 +397,7 @@ func TestRunner_R1H2FileSelectAndConfirm(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -478,7 +478,7 @@ func TestRunner_R1H2IssueGHHappy(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -659,7 +659,7 @@ func TestRunner_R2H3AllGreenAdvances(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -758,7 +758,7 @@ func TestRunner_R2H3MissingSkillBlocks(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -830,7 +830,7 @@ func TestRunner_R2H3MissingSkillRetries(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -890,7 +890,7 @@ func TestRunner_R1H2NoneSkipsR1(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -1001,7 +1001,7 @@ func TestRunner_R3H4SpawnHappy(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -1096,7 +1096,7 @@ func TestRunner_R3H4SpawnFailExit1(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -1218,7 +1218,7 @@ func TestRunner_R3H4CancelAbort(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -1379,7 +1379,7 @@ func TestRunner_R3H5StreamJSONLines(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -1494,7 +1494,7 @@ func TestRunner_R3H5StreamJSONLargeLine(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -1595,7 +1595,7 @@ func TestRunner_R3H5StderrInterleaved(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -1755,7 +1755,7 @@ func TestRunner_R3H6MultiStepPreviousOutput(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -1896,7 +1896,7 @@ func TestRunner_R3H6MultiStepFailStops(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -2050,7 +2050,7 @@ func TestRunner_R3H7ValidatorOkFirstTry(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -2168,7 +2168,7 @@ func TestRunner_R3H7ValidatorFailMaxLoopsFail(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -2275,7 +2275,7 @@ func TestRunner_R3H7ValidatorNoVerdictBlock(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -2386,7 +2386,7 @@ func TestRunner_R3H7ValidatorPauseContinue(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -2495,7 +2495,7 @@ func TestRunner_R0H8RecoverInterruptedRun(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -2608,7 +2608,7 @@ func TestRunner_R3H8GCKeepsLatestN(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -2741,7 +2741,7 @@ steps:
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -2890,7 +2890,7 @@ func TestRunner_RCH9SigtermIgnoredEscalatesToKill(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -3028,7 +3028,7 @@ func TestRunner_RCH9RaceSubprocessExitsBeforeAbort(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -3164,7 +3164,7 @@ func TestRunner_R4H10ChipDoneInLister(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -3259,7 +3259,7 @@ func TestRunner_RFH10StderrInline(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -3379,7 +3379,7 @@ func TestRunner_R0H10RunHistoryListsRuns(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -3435,7 +3435,7 @@ func TestRunner_R0H10InterruptedChip(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -3537,7 +3537,7 @@ func TestRunner_R1RepoctxPickerWithRepo(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -3626,7 +3626,7 @@ func TestRunner_R2RepoctxPreflightFailWithoutRepo(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {

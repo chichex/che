@@ -26,6 +26,7 @@ const (
 	ScreenCollision                          // modal "el nombre ya existe"
 	ScreenDiscardWarn                        // confirmacion extra antes de discard
 	ScreenSummaryConfirmDelete               // modal confirm "borrar step" desde S3 (H7)
+	ScreenStepReview                         // modal "Review del prompt" (claude analiza el prompt antes de guardar)
 )
 
 // FieldFocus marca cual campo de S1 tiene el foco. tab/shift+tab cyclan
@@ -271,6 +272,30 @@ type stepEditState struct {
 
 	// error inline. Se limpia al tipear.
 	errMsg string
+
+	// Estado del modal "Review del prompt" (ScreenStepReview). Se dispara
+	// al confirmar el step (ctrl+s / ctrl+n / SaveFinish del modal de
+	// save choice) cuando kind=prompt + content no vacio. reviewLoading
+	// = true mientras claude corre; al volver, populamos review +
+	// reviewErr y queda en loading=false. pendingSaveAction guarda que
+	// camino tomar despues del modal: "finish" (ctrl+s) o "addanother"
+	// (ctrl+n).
+	reviewLoading     bool
+	review            promptReviewResult
+	reviewErr         string
+	pendingSaveAction string // "finish" | "addanother"
+}
+
+// promptReviewResult es el snapshot tipado del resultado de la review
+// que vive en stepEditState. Lo separamos del package promptreview.Review
+// para no cargar el import en model.go (los handlers del modal lo
+// llenan via type assertion).
+type promptReviewResult struct {
+	OK        bool
+	Issues    []string
+	Summary   string
+	Suggested string
+	Raw       string
 }
 
 // model es la unica struct viva en el bubbletea program. Cada screen lee

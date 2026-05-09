@@ -40,7 +40,7 @@ func TestTUI_MenuRoutesItem2ToWizard(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered after S1 esc\nsince mark:\n%s", p.Since(mark))
 	}
 

@@ -36,18 +36,15 @@ func withFakeGhList(t *testing.T, fn func(string) ([]GHListItem, error)) {
 }
 
 // TestInitInputUI_PRPickerWhenRepoActive valida que initInputUI activa el
-// picker (repoMode=true) cuando repoctx reporta repo + ghListFn devuelve
-// items, y los expone en ghEntries.
+// picker (repoMode=true) cuando repoctx reporta repo + arranca en estado
+// loading. El fetch real lo dispara RunModel.Init() async — initInputUI no
+// debe llamar a ghListFn (sino el alt-screen de tea.Program se queda en
+// blanco mientras gh corre).
 func TestInitInputUI_PRPickerWhenRepoActive(t *testing.T) {
 	repoctxSetForTest(t, repoctx.Info{InGitHubRepo: true, Repo: "chichex/che"})
 	withFakeGhList(t, func(kind string) ([]GHListItem, error) {
-		if kind != "pr" {
-			t.Errorf("ghListFn kind: got %q, want pr", kind)
-		}
-		return []GHListItem{
-			{Number: 10, Title: "first"},
-			{Number: 11, Title: "second"},
-		}, nil
+		t.Errorf("ghListFn should NOT be called from initInputUI (async via Init)")
+		return nil, nil
 	})
 
 	ui := initInputUI(wizard.InputPR)
@@ -57,14 +54,58 @@ func TestInitInputUI_PRPickerWhenRepoActive(t *testing.T) {
 	if ui.repo != "chichex/che" {
 		t.Errorf("repo: got %q, want chichex/che", ui.repo)
 	}
-	if len(ui.ghEntries) != 2 {
-		t.Fatalf("ghEntries len: got %d, want 2", len(ui.ghEntries))
+	if !ui.ghLoading {
+		t.Errorf("expected ghLoading=true at init (fetch is async)")
 	}
-	if ui.ghEntries[0].Number != 10 {
-		t.Errorf("first entry number: got %d, want 10", ui.ghEntries[0].Number)
+	if len(ui.ghEntries) != 0 {
+		t.Errorf("ghEntries should be empty until async load completes; got %+v", ui.ghEntries)
 	}
-	if ui.ghLoadErr != "" {
-		t.Errorf("expected no ghLoadErr, got %q", ui.ghLoadErr)
+}
+
+// TestRunModelInit_DispatchesGHListCmd valida que cuando R1 esta en modo
+// loading, RunModel.Init() devuelve un Cmd que ejecuta ghListFn y produce
+// un ghListLoadedMsg con los items. Este es el "loading async" que evita
+// el bloqueo del primer frame.
+func TestRunModelInit_DispatchesGHListCmd(t *testing.T) {
+	repoctxSetForTest(t, repoctx.Info{InGitHubRepo: true, Repo: "x/y"})
+	withFakeGhList(t, func(kind string) ([]GHListItem, error) {
+		if kind != "pr" {
+			t.Errorf("ghListFn kind: got %q, want pr", kind)
+		}
+		return []GHListItem{{Number: 7, Title: "hi"}}, nil
+	})
+
+	m := RunModel{
+		Pipeline: wizard.Pipeline{
+			Name:  "p",
+			Steps: []wizard.Step{{Name: "a", CLI: "claude", Kind: wizard.KindPrompt, Input: wizard.InputPR}},
+		},
+	}
+	m = m.enterFirstScreen()
+	cmd := m.Init()
+	if cmd == nil {
+		t.Fatalf("expected non-nil cmd from Init() in loading state")
+	}
+	msg := cmd()
+	loaded, ok := msg.(ghListLoadedMsg)
+	if !ok {
+		t.Fatalf("expected ghListLoadedMsg, got %T", msg)
+	}
+	if loaded.err != nil {
+		t.Fatalf("unexpected err: %v", loaded.err)
+	}
+	if len(loaded.items) != 1 || loaded.items[0].Number != 7 {
+		t.Errorf("items: got %+v", loaded.items)
+	}
+
+	// Aplicar el msg via Update y verificar que el state quedo poblado.
+	mAny, _ := m.Update(loaded)
+	m = mAny.(RunModel)
+	if m.inputUI.ghLoading {
+		t.Errorf("ghLoading should be false after load")
+	}
+	if len(m.inputUI.ghEntries) != 1 {
+		t.Errorf("ghEntries after load: got %+v", m.inputUI.ghEntries)
 	}
 }
 
@@ -87,21 +128,36 @@ func TestInitInputUI_PRTextFallbackNoRepo(t *testing.T) {
 	}
 }
 
-// TestInitInputUI_PRPickerSurfaceLoadError valida que un error de gh queda
-// expuesto en ghLoadErr para que renderGHPicker lo muestre. La lista igual
-// queda vacia + repoMode true.
-func TestInitInputUI_PRPickerSurfaceLoadError(t *testing.T) {
+// TestRunModelInit_PRPickerSurfaceLoadError valida que un error de gh queda
+// expuesto en ghLoadErr (post async load) para que renderGHPicker lo muestre.
+// La lista queda vacia + repoMode true + ghLoading false.
+func TestRunModelInit_PRPickerSurfaceLoadError(t *testing.T) {
 	repoctxSetForTest(t, repoctx.Info{InGitHubRepo: true, Repo: "x/y"})
 	withFakeGhList(t, func(string) ([]GHListItem, error) {
 		return nil, errors.New("gh not authed")
 	})
 
-	ui := initInputUI(wizard.InputPR)
-	if !ui.repoMode {
-		t.Errorf("expected repoMode=true even on error")
+	m := RunModel{
+		Pipeline: wizard.Pipeline{
+			Name:  "p",
+			Steps: []wizard.Step{{Name: "a", CLI: "claude", Kind: wizard.KindPrompt, Input: wizard.InputPR}},
+		},
 	}
-	if ui.ghLoadErr == "" {
+	m = m.enterFirstScreen()
+	if !m.inputUI.repoMode {
+		t.Errorf("expected repoMode=true even before load")
+	}
+	cmd := m.Init()
+	if cmd == nil {
+		t.Fatalf("expected Cmd")
+	}
+	mAny, _ := m.Update(cmd())
+	m = mAny.(RunModel)
+	if m.inputUI.ghLoadErr == "" {
 		t.Errorf("expected ghLoadErr to surface the error")
+	}
+	if m.inputUI.ghLoading {
+		t.Errorf("ghLoading should be false post-load even on error")
 	}
 }
 
@@ -137,6 +193,13 @@ func TestUpdateInputGHPicker_EnterTriggersResolveWithRef(t *testing.T) {
 	}
 	if !m.inputUI.repoMode {
 		t.Fatalf("expected repoMode=true")
+	}
+	// Disparar el cmd async de Init y aplicar el msg para poblar la lista
+	// — sin esto el picker arranca en estado loading y los keystrokes
+	// no operan sobre ghEntries vacios.
+	if cmd := m.Init(); cmd != nil {
+		mAny, _ := m.Update(cmd())
+		m = mAny.(RunModel)
 	}
 
 	// ↓ para mover al segundo item.

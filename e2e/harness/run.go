@@ -86,6 +86,11 @@ func (e *Env) buildEnv() []string {
 		"HOME=" + e.HomeDir,
 		"PATH=" + e.FakeBin + ":" + minimalPath(),
 		"CHE_FAKE_SCRIPT_DIR=" + e.ScriptDir,
+		// Desactiva la review automatica del prompt en S2 — el helper
+		// llama a `claude -p` y el fake no tiene matcher para esa
+		// invocacion. Cada test que quiera ejercitar la review puede
+		// override-ar via envOverrides.
+		"CHE_DISABLE_PROMPT_REVIEW=1",
 	}
 	if term := os.Getenv("TERM"); term != "" {
 		base = append(base, "TERM="+term)
