@@ -25,6 +25,7 @@ type Matcher struct {
 	TouchFiles    map[string]string `json:"touch_files,omitempty"`
 	BlockSeconds  int               `json:"block_seconds,omitempty"`
 	Stream        []StreamItem      `json:"stream,omitempty"`
+	IgnoreSigterm bool              `json:"ignore_sigterm,omitempty"`
 }
 
 // StreamItem es una entrada del Stream del matcher: una linea + opcional
@@ -150,6 +151,16 @@ func (b *ExpectBuilder) TouchFile(relPath, content string) *ExpectBuilder {
 // cuando el parent manda SIGTERM al process group el fake termina de una.
 func (b *ExpectBuilder) BlockSeconds(n int) *ExpectBuilder {
 	b.m.BlockSeconds = n
+	return b
+}
+
+// IgnoreSigterm hace que el fake instale un signal.Notify sobre SIGTERM y
+// descarte la senal (equivalente al "trap empty TERM" de bash). Combinado
+// con BlockSeconds, simula un CLI mal-comportado que el parent debe
+// SIGKILLear para terminar — patron usado por el test de H9 que valida la
+// escalada SIGTERM → SIGKILL del runner tras CHE_KILL_GRACE.
+func (b *ExpectBuilder) IgnoreSigterm() *ExpectBuilder {
+	b.m.IgnoreSigterm = true
 	return b
 }
 

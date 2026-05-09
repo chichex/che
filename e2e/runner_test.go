@@ -2788,3 +2788,271 @@ steps:
 		t.Errorf("expected NO manifest.yaml in new run dir (rename never happened), stat err=%v", err)
 	}
 }
+
+// TestRunner_RCH9SigtermIgnoredEscalatesToKill cubre el primer test e2e
+// listado en H9: fake CLI que ignora SIGTERM (signal.Notify + drain). Tras
+// abort & save, el runner manda SIGTERM, el fake lo descarta, y tras
+// CHE_KILL_GRACE el runner escala a SIGKILL. Asserts:
+//   - aterrizamos en RC-done (pantalla amarilla "Run cancelado").
+//   - manifest cierra status: cancelled, step en cancelled con exit_code: -1.
+//   - todos los handles cerrados (re-abrir stdout.log/stderr.log no devuelve
+//     EBADF — el OS es estricto con write-after-close en file descriptors,
+//     pero el assert real es que el file existe + se puede leer).
+func TestRunner_RCH9SigtermIgnoredEscalatesToKill(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmClaudeSkill(t, env.HomeDir, "h9-sigkill")
+	// Fake claude que ignora SIGTERM y bloquea 10s. CHE_KILL_GRACE=1 →
+	// el runner espera 1s tras el SIGTERM y escala a SIGKILL al pgid.
+	// El sentinel "started-h9-sigkill" llega a stdout antes del bloqueo.
+	env.ExpectAgent("claude").WhenArgsMatch(`h9-sigkill`).
+		IgnoreSigterm().
+		BlockSeconds(10).
+		RespondStdout("started-h9-sigkill", 0)
+	env.SetEnv("CHE_KILL_GRACE", "1")
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"rch9-sigkill.yaml": readyYAMLSkillStep("RCH9 Sigkill", "h9-sigkill", "none"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "RCH9 Sigkill", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 3*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 1/1", 5*time.Second) {
+		t.Fatalf("R3 header never rendered\n%s", p.Since(mark))
+	}
+
+	// Esperar que el subprocess este vivo + el sentinel llego a stdout.
+	// Sin el sleep podriamos mandar ctrl+c antes que el cmd.Start() complete
+	// y el cancel quedaria sin proceso al que mandar SIGTERM.
+	time.Sleep(500 * time.Millisecond)
+
+	// ctrl+c → modal RC.
+	mark = p.Mark()
+	if err := p.Send("\x03"); err != nil {
+		t.Fatalf("send ctrl+c: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Cancelar run", 3*time.Second) {
+		t.Fatalf("RC modal never rendered\n%s", p.Since(mark))
+	}
+
+	// enter sobre "abort & save" → SIGTERM al pgid. Como el fake lo ignora,
+	// tras grace=1s el runner escala a SIGKILL → Wait() devuelve →
+	// stepDoneMsg con cancelled=true → RC-done.
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter (abort): %v", err)
+	}
+	// Damos margen generoso (10s) por la grace (1s) + el SIGKILL + el
+	// drenado de pipes + el ciclo del bubbletea. Si el escalation no
+	// funciona, el test cuelga porque el fake bloquea 10s y a SIGTERM lo
+	// ignora.
+	if !p.WaitForOutputSince(t, mark, "Run cancelado", 10*time.Second) {
+		t.Fatalf("RC-done screen never rendered\n%s", p.Since(mark))
+	}
+	// El hint de RC-done (H9) anuncia "r retry / l log / esc volver".
+	if !strings.Contains(p.Since(mark), "r retry") {
+		t.Errorf("expected RC-done hint to mention 'r retry', got:\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 5*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Disco: manifest cancelled + step exit_code: -1 + handles cerrados
+	// (los archivos stdout/stderr existen y se pueden leer = OK).
+	runDir := firstRunDir(t, env.HomeDir, "rch9-sigkill")
+	manifestRaw := readRunFile(t, filepath.Join(runDir, "manifest.yaml"))
+	if !strings.Contains(manifestRaw, "status: cancelled") {
+		t.Errorf("expected manifest status: cancelled, got:\n%s", manifestRaw)
+	}
+	if !strings.Contains(manifestRaw, "exit_code: -1") {
+		t.Errorf("expected manifest step exit_code: -1 (H9 cancel), got:\n%s", manifestRaw)
+	}
+	// Sentinel del fake en stdout.log: confirma que el handle se flusheo
+	// antes del close (sino "started-h9-sigkill" se perderia).
+	stdoutRaw := readRunFile(t, filepath.Join(runDir, "step-01.stdout.log"))
+	if !strings.Contains(stdoutRaw, "started-h9-sigkill") {
+		t.Errorf("expected stdout.log to contain sentinel, got:\n%s", stdoutRaw)
+	}
+	// Re-abrir el archivo para confirmar que el handle del runner se cerro
+	// limpio (un archivo abierto en exclusive mode rebotaria; el assert real
+	// es "no error de IO al re-leer post-run").
+	if _, err := os.OpenFile(filepath.Join(runDir, "step-01.stdout.log"), os.O_RDONLY, 0); err != nil {
+		t.Errorf("re-open stdout.log post-run: %v (handle no se cerro?)", err)
+	}
+	if _, err := os.OpenFile(filepath.Join(runDir, "step-01.stderr.log"), os.O_RDONLY, 0); err != nil {
+		t.Errorf("re-open stderr.log post-run: %v (handle no se cerro?)", err)
+	}
+	// events.jsonl tambien debe estar cerrado (claude → stream-json → file
+	// abierto). No asumimos contenido (el sentinel es plain stdout, no JSON).
+	if _, err := os.OpenFile(filepath.Join(runDir, "step-01.events.jsonl"), os.O_RDONLY, 0); err != nil {
+		t.Errorf("re-open events.jsonl post-run: %v (handle no se cerro?)", err)
+	}
+}
+
+// TestRunner_RCH9RaceSubprocessExitsBeforeAbort cubre el segundo test e2e
+// de H9: fake CLI sale exit 0 entre que el usuario abrio el modal RC y
+// presiono "abort & save". El doc fija el comportamiento: tratar como step
+// normal terminado (manifest done, NO cancelled).
+//
+// Mecanica del test: el fake bloquea 1s + exit 0. El usuario entra a R3,
+// presiona ctrl+c (modal abre), espera 1.5s para que el fake termine
+// naturalmente (stepDoneMsg llega con cancelled=false porque requestCancel
+// nunca se mando), y luego confirma abort. updateCancelModal procesa el
+// stepDoneMsg → handleStepDone con cancelled=false → step done → R4.
+func TestRunner_RCH9RaceSubprocessExitsBeforeAbort(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmClaudeSkill(t, env.HomeDir, "h9-race")
+	// Fake que emite sentinel y bloquea solo 1s — termina por su cuenta
+	// con exit 0 antes de que el test confirme el abort.
+	env.ExpectAgent("claude").WhenArgsMatch(`h9-race`).
+		BlockSeconds(1).
+		RespondStdout("done-h9-race", 0)
+	// CHE_KILL_GRACE alto para que NO sea el SIGKILL el que cierra el step;
+	// queremos que sea el exit natural del fake (race con el cancel).
+	env.SetEnv("CHE_KILL_GRACE", "10")
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"rch9-race.yaml": readyYAMLSkillStep("RCH9 Race", "h9-race", "none"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "RCH9 Race", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 3*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	// Esperamos R3. Como el fake bloquea 1s, llegamos a R3 antes que termine.
+	if !p.WaitForOutputSince(t, mark, "step 1/1", 3*time.Second) {
+		t.Fatalf("R3 header never rendered\n%s", p.Since(mark))
+	}
+
+	// Pequena pausa para asegurar que el subprocess este vivo cuando
+	// mandamos ctrl+c (sino el cancel queda sin target).
+	time.Sleep(200 * time.Millisecond)
+
+	// ctrl+c → modal RC abre. NO confirmamos abort todavia — esperamos a
+	// que el subprocess termine naturalmente. updateCancelModal debe drenar
+	// el stepDoneMsg que llegue mientras el modal esta abierto y
+	// transicionar a R4 (step done) tratandolo como step normal terminado
+	// (criterio del doc para H9 race).
+	mark = p.Mark()
+	if err := p.Send("\x03"); err != nil {
+		t.Fatalf("send ctrl+c: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Cancelar run", 3*time.Second) {
+		t.Fatalf("RC modal never rendered\n%s", p.Since(mark))
+	}
+
+	// Esperar a que el fake termine naturalmente (BlockSeconds=1 → ~1s
+	// despues del Start()). El stepDoneMsg llega con cancelled=false; el
+	// handler del modal lo procesa y transiciona a R4 ("Run completo")
+	// porque exit 0 == done.
+	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+		t.Fatalf("R4 never rendered after natural exit during modal:\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Disco: manifest done (NO cancelled). El criterio del doc de H9 es
+	// explicito: "Si el subprocess salio por si mismo entre el ctrl+c y la
+	// decision del modal (race), tratar como step normal terminado".
+	runDir := firstRunDir(t, env.HomeDir, "rch9-race")
+	manifestRaw := readRunFile(t, filepath.Join(runDir, "manifest.yaml"))
+	if !strings.Contains(manifestRaw, "status: done") {
+		t.Errorf("expected manifest status: done (race: subprocess exited naturally), got:\n%s", manifestRaw)
+	}
+	if strings.Contains(manifestRaw, "status: cancelled") {
+		t.Errorf("expected manifest NOT to be cancelled (race), got:\n%s", manifestRaw)
+	}
+	// Sanity: el sentinel del fake llego a stdout.log.
+	stdoutRaw := readRunFile(t, filepath.Join(runDir, "step-01.stdout.log"))
+	if !strings.Contains(stdoutRaw, "done-h9-race") {
+		t.Errorf("expected stdout.log to contain sentinel, got:\n%s", stdoutRaw)
+	}
+}

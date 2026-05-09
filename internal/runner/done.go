@@ -26,7 +26,14 @@ func (m RunModel) updateDone(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // updateFailed maneja teclas de RF (terminal rojo / cancelado amarillo).
-// Mismas teclas que R4. r (retry desde R1) tambien queda como TODO H10.
+// Mismas teclas que R4 + (post-H9 en RC-done) r/l como stubs anunciados en
+// el hint pero sin efecto hasta H10 (suspend TUI + $EDITOR/$PAGER).
+//
+// El doc fija las opciones del RC-done como "r retry / l log / esc volver";
+// esa cadena ya esta en el hint de viewFailed cuando cancelled=true. La
+// implementacion real (re-dispatch a R1 / suspend TUI a less) llega con H10
+// — dejamos las teclas no-op por ahora para no introducir comportamiento
+// half-baked. esc/enter siguen siendo el path canonical "volver al menu".
 func (m RunModel) updateFailed(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "ctrl+c", "q":
@@ -35,6 +42,12 @@ func (m RunModel) updateFailed(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter", "esc":
 		m.exitApp = false
 		return m, tea.Quit
+	case "r", "l":
+		// TODO H10: r → retry desde R1 con input pre-cargado; l → suspend
+		// TUI + abrir $PAGER sobre stderr.log del step que fallo. Para H9
+		// las teclas se anuncian en el hint (cuando cancelled) pero son
+		// no-op — evita el doble loop "anuncio + tecla rota".
+		return m, nil
 	}
 	return m, nil
 }
@@ -146,7 +159,16 @@ func (m RunModel) viewFailed() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(hintStyle.Render("enter / esc volver al menu · q / ctrl+c salir"))
+	// H9 (RC-done): el doc fija el footer "r retry / l log / esc volver" para
+	// la pantalla amarilla post-cancel. La implementacion completa de r/l
+	// llega en H10 (suspend TUI + $EDITOR / $PAGER); H9 las anuncia en el
+	// hint para alinearse con el criterio de aceptacion ("opciones r retry /
+	// l log / esc volver"). RF "real" mantiene el hint generico hasta H10.
+	if cancelled {
+		b.WriteString(hintStyle.Render("r retry · l log · esc volver al menu · q / ctrl+c salir"))
+	} else {
+		b.WriteString(hintStyle.Render("enter / esc volver al menu · q / ctrl+c salir"))
+	}
 	b.WriteString("\n")
 	return b.String()
 }

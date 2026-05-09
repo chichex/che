@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -55,6 +56,14 @@ type matcher struct {
 	// el matcher lo emite y luego ignora Stdout / Stderr "estaticos" del
 	// matcher (TouchFiles / BlockSeconds / Exit siguen aplicando despues).
 	Stream []StreamItem `json:"stream,omitempty"`
+	// IgnoreSigterm hace que el fake instale un signal.Notify sobre SIGTERM
+	// y descarte la senal: equivalente a `trap '' TERM` en bash. Usado por
+	// el test de H9 que valida la escalada SIGTERM → SIGKILL: con
+	// IgnoreSigterm + BlockSeconds 10, el parent manda SIGTERM, el fake lo
+	// ignora, y el parent debe escalar a SIGKILL al pgid tras CHE_KILL_GRACE.
+	// El handler se instala ANTES de cualquier sleep para evitar la race
+	// "signal arrives before handler installed".
+	IgnoreSigterm bool `json:"ignore_sigterm,omitempty"`
 }
 
 // StreamItem es una entrada del Stream del matcher. Sirve para los tests
@@ -226,10 +235,26 @@ func main() {
 		DurationMs: time.Since(start).Milliseconds(),
 	})
 
+	if matched.IgnoreSigterm {
+		// Instalar handler antes del sleep para que SIGTERM no termine
+		// el proceso. signal.Notify con buffer 1 + drenado en goroutine
+		// "consume y olvida" — es lo mas cercano a `trap '' TERM` en Go.
+		// El parent debera escalar a SIGKILL para que el fake muera.
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGTERM)
+		go func() {
+			for range ch {
+				// no-op — descartamos la senal a proposito.
+			}
+		}()
+	}
+
 	if matched.BlockSeconds > 0 {
 		// Sleep interruptible: el handler default de Go para
 		// SIGTERM/SIGINT termina el proceso, así que el bloqueo se corta
-		// apenas el parent mata el pgid.
+		// apenas el parent mata el pgid. Cuando IgnoreSigterm=true el
+		// handler instalado arriba se queda con la senal y el sleep
+		// completa hasta el final (o hasta que el parent escale a SIGKILL).
 		time.Sleep(time.Duration(matched.BlockSeconds) * time.Second)
 	}
 

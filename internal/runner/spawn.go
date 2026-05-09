@@ -308,6 +308,13 @@ func runStep(step wizard.Step, payload string, runDir string, idx int, state *ru
 	// pgid; tras grace SIGKILL. Marcamos cancelled=true ANTES de
 	// signalCancel para evitar la race con Wait que puede retornar
 	// inmediatamente cuando el subprocess muere.
+	//
+	// H9 race: si el subprocess salio por su cuenta entre el ctrl+c y el
+	// abort del modal (waitDone se cierra primero), el select cae al case
+	// waitDone y NO seteamos cancelled. handleStepDone va a tratar el step
+	// como done/failed segun el ExitCode real del subprocess (criterio del
+	// doc: "Si el subprocess salio por si mismo entre el ctrl+c y la
+	// decision del modal, tratar como step normal terminado").
 	waitDone := make(chan struct{})
 	go func() {
 		select {
@@ -331,13 +338,26 @@ func runStep(step wizard.Step, payload string, runDir string, idx int, state *ru
 	// Goroutina del wait — al terminar emite stepDoneMsg y cierra el
 	// canal para que waitForLine devuelva un sentinel y el handler
 	// transicione a R4/RF.
+	//
+	// H9: Sync + Close de TODOS los handles (stdout/stderr/events) antes de
+	// emitir stepDoneMsg. El doc lo deja explicito como criterio de
+	// aceptacion de cancel ("Flush + close de stdout/stderr/events files")
+	// pero aplica a cualquier salida del subprocess: si el handler de R4/RF
+	// vuelve al lister, los logs en disco tienen que estar consistentes y
+	// el test tiene que poder re-abrir el archivo sin EBADF.
 	go func() {
 		teeWG.Wait()
 		waitErr := cmd.Wait()
 		close(waitDone)
+		// Sync antes de Close: el doc fija "Logs flusheados antes del exit".
+		// Errores ignorados — best-effort; un Close fallido no debe impedir
+		// emitir el stepDoneMsg porque el program quedaria colgado.
+		_ = stdoutFile.Sync()
 		_ = stdoutFile.Close()
+		_ = stderrFile.Sync()
 		_ = stderrFile.Close()
 		if eventsFile != nil {
+			_ = eventsFile.Sync()
 			_ = eventsFile.Close()
 		}
 		endedAt := time.Now()
@@ -358,6 +378,19 @@ func runStep(step wizard.Step, payload string, runDir string, idx int, state *ru
 		cancelled := state.cancelled
 		state.done = true
 		state.mu.Unlock()
+
+		// H9 acceptance: cuando el step se cancela, exit_code en disco es
+		// -1 (no el valor "real" devuelto por exec — que en SIGKILL es -1
+		// igual, pero en SIGTERM puede ser distinto segun el handler del
+		// subprocess). El doc lo deja explicito: "step en curso status:
+		// cancelled, exit_code: -1". Para detectar "cancel real" descartamos
+		// la race: si cancelled=true pero el subprocess salio limpio
+		// (waitErr==nil, exit 0) trataremos al step como done en
+		// handleStepDone — aca dejamos el ExitCode real para que el handler
+		// pueda decidir.
+		if cancelled && (waitErr != nil || exitCode != 0) {
+			exitCode = -1
+		}
 
 		bufMu.Lock()
 		stdoutCopy := stdoutBuf.String()

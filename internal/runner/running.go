@@ -379,9 +379,22 @@ func (m RunModel) handleStepDone(msg stepDoneMsg) (tea.Model, tea.Cmd) {
 	step.ExitCode = msg.ExitCode
 	step.SpawnError = msg.SpawnErr
 
+	// H9: race "subprocess salio entre ctrl+c y la decision del modal". Si
+	// cancelled=true PERO el subprocess salio limpio (exit 0, sin spawn
+	// error), tratamos al step como done — el doc lo fija explicito en RC:
+	// "Si el subprocess salio por si mismo entre el ctrl+c y la decision
+	// del modal (race), tratar como step normal terminado". El ExitCode ya
+	// quedo en el valor real (no -1) por el guard de spawn.go.
 	switch {
+	case msg.Cancelled && msg.SpawnErr == "" && msg.ExitCode == 0:
+		step.Status = StepStatusDone
 	case msg.Cancelled:
 		step.Status = StepStatusCancelled
+		// El doc fija "exit_code: -1" para steps cancelados; spawn.go ya
+		// reescribe el ExitCode a -1 en ese caso, pero dejamos el guard
+		// aca tambien (defensive — el manifest tiene que reflejar -1
+		// independientemente del valor que llego en el msg).
+		step.ExitCode = -1
 	case msg.SpawnErr != "" || msg.ExitCode != 0:
 		step.Status = StepStatusFailed
 	default:
