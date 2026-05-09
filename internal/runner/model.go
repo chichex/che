@@ -2,22 +2,28 @@
 // modales RC/RP). H1 entrega el skeleton minimo; H2 agrega R1 (InputPrompt)
 // con resolucion eager del input segun el kind del step 0 (text / pr / issue
 // / file / url / none); H3 agrega R2 (Preflight) con chequeos de CLI / skill
-// / gh auth / disk space.
+// / gh auth / disk space; H4 agrega R3 spawn basico (1 step, sin streaming),
+// R4 placeholder (resumen verde), RF placeholder (resumen rojo) y RC modal
+// (cancel) — el manifest minimo se escribe al iniciar y al cerrar el run.
 //
 // El struct RunModel sigue creciendo de a poco — el doc
 // (docs/pipeline-execution-flow.html, seccion "Modelo interno") lista el shape
-// completo (Steps, LogBuffers, modales, file handles), pero nada de eso vive
-// todavia. Cada H siguiente agrega los campos que necesita.
+// completo (LogBuffers, file handles, ValidatorRun.Pause), pero nada de eso
+// vive todavia en H4. Cada H siguiente agrega los campos que necesita.
 package runner
 
 import (
+	"time"
+
 	"github.com/chichex/che/internal/wizard"
 )
 
 // RunScreen identifica la pantalla actual del runner. H1 dejo solo
-// ScreenSkeleton; H2 agrego ScreenInput (R1); H3 reemplaza el placeholder
-// generico de "siguiente" por ScreenPreflight (R2 real) + un
-// ScreenRunningPlaceholder transitorio que H4 va a convertir en R3.
+// ScreenSkeleton; H2 agrego ScreenInput (R1); H3 agrego ScreenPreflight (R2);
+// H4 reemplaza el placeholder transitorio por ScreenRunning (R3 real) y
+// agrega ScreenDone (R4) + ScreenFailed (RF) como pantallas terminales. El
+// modal RC (cancel) vive como flag CancelModal sobre ScreenRunning (no es un
+// screen aparte) — sigue el patron del doc ("modal sobre R3").
 type RunScreen int
 
 const (
@@ -35,17 +41,66 @@ const (
 	// file readable defensivo si input=file, disk space ≥ 100 MB en
 	// ~/.che/runs (warning amarillo si no llega).
 	ScreenPreflight
-	// ScreenRunningPlaceholder es el destino "post-preflight ok" de H3.
-	// H4 lo reemplaza por ScreenRunning (R3) con spawn real, log pane,
-	// steps tracker, etc. Tener un screen explicito (en lugar de tea.Quit
-	// con un flag) deja la transicion de H3 testeable end-to-end sin
-	// implementar nada que H3 declare out of scope.
-	ScreenRunningPlaceholder
-	// TODO H4: ScreenRunning (R3) reemplaza ScreenRunningPlaceholder.
-	// TODO H4: ScreenDone (R4).
-	// TODO H4: ScreenFailed (RF).
-	// TODO H4: ScreenCancel (RC).
+	// ScreenRunning (R3) es el screen activo durante el spawn. H4 lo
+	// implementa con un solo step, blocking cmd.Run(), dump de logs al
+	// final (sin streaming — eso es H5). El layout sigue el mockup del
+	// doc: header con step N/M, steps tracker (1 row en H4), log pane
+	// con el dump del subprocess, footer con ctrl+c. RC (cancel modal)
+	// se renderea encima cuando m.CancelModal=true.
+	ScreenRunning
+	// ScreenDone (R4) es la pantalla terminal verde: resumen del run,
+	// duracion, lista de steps, path al run dir y al result.yaml. enter
+	// / esc vuelven al lister.
+	ScreenDone
+	// ScreenFailed (RF) es la pantalla terminal roja: muestra el step
+	// que fallo, exit_code, ultimas lineas de stderr/stdout, path al
+	// run dir. enter / esc vuelven al lister.
+	ScreenFailed
 	// TODO H7: ScreenPause (RP).
+)
+
+// StepStatus es el estado de cada step durante R3. H4 lo usa para los rows
+// del tracker + para escribir el manifest (mismo set de valores que el doc
+// fija para steps[].status).
+type StepStatus string
+
+const (
+	StepStatusPending   StepStatus = "pending"
+	StepStatusRunning   StepStatus = "running"
+	StepStatusDone      StepStatus = "done"
+	StepStatusFailed    StepStatus = "failed"
+	StepStatusCancelled StepStatus = "cancelled"
+)
+
+// StepRun es el snapshot vivo de un step en runtime. H4 popula Status /
+// StartedAt / FinishedAt / ExitCode; LogBuffer / Validator quedan como
+// stubs vacios (H5 / H7 los completan). Idx es 1-indexed para alinear con
+// los nombres de los archivos en disco (step-01.stdout.log).
+type StepRun struct {
+	Idx        int
+	Name       string
+	CLI        string
+	Kind       string
+	Status     StepStatus
+	StartedAt  time.Time
+	FinishedAt time.Time
+	ExitCode   int
+	// SpawnError captura cualquier error de exec.Cmd.Start() / Wait() que
+	// no sea un exit no-cero "normal". Sirve para diferenciar "el binario
+	// no se pudo arrancar" de "el binario corrio y devolvio ≠ 0" en RF.
+	SpawnError string
+}
+
+// CancelChoice indexa las opciones del modal RC. H4 expone tres opciones
+// (abort & save, back to run, exit che). El cero-value apunta a la primera
+// opcion para que el cursor inicial sea siempre el "destructivo" (matchea
+// el mockup donde abort esta arriba).
+type CancelChoice int
+
+const (
+	CancelChoiceAbort CancelChoice = iota
+	CancelChoiceBack
+	CancelChoiceExit
 )
 
 // InputState es el resultado de R1: que se pidio, que tipeo el usuario y
@@ -109,6 +164,52 @@ type RunModel struct {
 	// avanza a la screen siguiente. False en cualquier otro caso (todos
 	// verdes, algun rojo, o tras un retry con `r`).
 	preflightConfirm bool
+
+	// R3 / R4 / RF state — todo poblado por H4 al iniciar el run.
+	//
+	// RunID y RunDir se calculan al spawnear: RunID es el timestamp UTC
+	// formateado como "2006-01-02T15-04-05" (sortable, sin colons). RunDir
+	// es ~/.che/runs/<slug>/<RunID>/.
+	RunID  string
+	RunDir string
+
+	// Steps es el slice 1-indexed (Steps[0].Idx==1) que vive durante R3 +
+	// se renderea en R4/RF. H4 lo crea con un solo elemento (el step 0 del
+	// pipeline); H6 va a llenar con los N steps reales.
+	Steps []StepRun
+
+	// Active es el indice (0-based) del step en curso. H4 lo deja siempre
+	// en 0 — es 1 step por pipeline. H6 lo va a incrementar.
+	Active int
+
+	// LogDump guarda el stdout del step en curso (concat dump al final).
+	// H4 lo escribe entero al terminar el subprocess; H5 lo va a
+	// reemplazar por un ring buffer streaming.
+	LogDump string
+
+	// FailedStderr almacena el stderr del step que fallo, para que RF
+	// pueda mostrarlo en la pantalla terminal. H4 lo lee del archivo
+	// step-NN.stderr.log al detectar exit ≠ 0.
+	FailedStderr string
+
+	// MultiStepWarning = true cuando el pipeline tiene N>1 steps. R3 lo
+	// muestra como banner amarillo recordando que multi-step llega en H6;
+	// el run igual ejecuta solo el step 0 (defensive — el doc lo deja
+	// explicito como criterio de aceptacion de H4).
+	MultiStepWarning bool
+
+	// CancelModal indica si el modal RC esta abierto sobre R3. Mientras
+	// es true, las teclas se interpretan como navegacion del modal
+	// (up/down + enter), no del log pane.
+	CancelModal  bool
+	CancelChoice CancelChoice
+
+	// runState es el handle compartido (puntero) entre el modelo y la
+	// goroutine del spawn. Vive desde enterRunning hasta handleStepDone
+	// — el modelo se pasa por valor en bubbletea pero el puntero
+	// sobrevive las copias, asi cancel handler + spawn goroutine ven el
+	// mismo *exec.Cmd / canal de cancel. Lo limpia handleStepDone.
+	runState *runState
 
 	// exitApp = true si el usuario pidio salida total (q / ctrl+c). false
 	// significa "volver al lister" (esc).

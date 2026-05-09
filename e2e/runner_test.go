@@ -575,15 +575,20 @@ func preArmClaudeSkill(t *testing.T, home, skill string) {
 
 // TestRunner_R2H3AllGreenAdvances cubre el camino feliz de H3: pipeline con
 // CLI faked + skill pre-creada → R2 marca todos los chequeos verdes →
-// enter avanza a la R3 placeholder. Coincide con el primer test e2e
-// listado en H3 ("Tmp HOME con CLI faked + skill pre-creada; assert: R2
-// todos verdes, enter avanza").
+// enter avanza a R3. Coincide con el primer test e2e listado en H3
+// ("Tmp HOME con CLI faked + skill pre-creada; assert: R2 todos verdes,
+// enter avanza"). Post-H4 R3 spawnea de verdad — scripteamos el fake
+// claude para que devuelva ok rapido y el run termine en R4.
 func TestRunner_R2H3AllGreenAdvances(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
 
 	// Skill instalada en la home tmp del test.
 	preArmClaudeSkill(t, env.HomeDir, "h3-green")
+
+	// Fake claude responde con "ok" para el step h3-green. H4 spawnea
+	// blocking — sin esto el test colgaria en R3.
+	env.ExpectAgent("claude").WhenArgsMatch(`h3-green`).RespondStdout("ok h3-green", 0)
 
 	// Pipeline con kind=skill apuntando a la skill que acabamos de crear,
 	// e input=none para no tener que pasar por R1 (mas simple) y para
@@ -629,16 +634,17 @@ func TestRunner_R2H3AllGreenAdvances(t *testing.T) {
 		t.Errorf("expected no remedios when all green, got:\n%s", p.Since(mark))
 	}
 
-	// enter avanza al R3 placeholder.
+	// enter avanza a R3 (post-H4 con spawn real → fake claude responde
+	// "ok h3-green" y aterrizamos en R4 "Run completo").
 	mark = p.Mark()
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "spawn pendiente — H4 implementa R3", 3*time.Second) {
-		t.Fatalf("R3 placeholder never rendered after enter\n%s", p.Since(mark))
+	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+		t.Fatalf("R4 Run completo never rendered after enter\n%s", p.Since(mark))
 	}
 
-	// Cleanup — esc (R2→lister), esc (lister→menu), q (menu→exit). Cada
+	// Cleanup — esc (R4→lister), esc (lister→menu), q (menu→exit). Cada
 	// esc necesita esperar al re-render antes del proximo send para que
 	// el debounce interno de bubbletea no las merge en una sola.
 	mark = p.Mark()
@@ -663,10 +669,12 @@ func TestRunner_R2H3AllGreenAdvances(t *testing.T) {
 		t.Fatalf("expected exit 0, got %d", res.ExitCode)
 	}
 
-	// Sin tocar disco: H3 todavia no escribe el run-dir (eso es H4).
+	// Post-H4 R3 escribe ~/.che/runs/<slug>/<run-id>/manifest.yaml. El
+	// dir tiene que existir tras un run exitoso (H3 no escribia disco;
+	// H4 si).
 	runsDir := filepath.Join(env.HomeDir, ".che", "runs")
-	if _, err := os.Stat(runsDir); !os.IsNotExist(err) {
-		t.Errorf("expected ~/.che/runs/ to not exist post-R2 ok, stat err=%v", err)
+	if _, err := os.Stat(runsDir); err != nil {
+		t.Errorf("expected ~/.che/runs/ to exist post-R3 spawn, stat err=%v", err)
 	}
 }
 
@@ -717,16 +725,16 @@ func TestRunner_R2H3MissingSkillBlocks(t *testing.T) {
 		t.Errorf("expected 'enter bloqueado' footer when red row present, got:\n%s", p.Since(mark))
 	}
 
-	// enter no debe transicionar a R3 placeholder.
+	// enter no debe transicionar a R3.
 	mark = p.Mark()
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
 	// Pequena espera para que cualquier transicion (incorrecta) tenga
 	// chance de renderear. El assert principal es que el sentinel R3
-	// NO aparezca.
+	// (header "step N/M" del runner real) NO aparezca.
 	time.Sleep(200 * time.Millisecond)
-	if strings.Contains(p.Since(mark), "spawn pendiente") {
+	if strings.Contains(p.Since(mark), "step 1/1") {
 		t.Errorf("R2 should NOT advance to R3 with a failed check, got:\n%s", p.Since(mark))
 	}
 	// Aseguramos que seguimos en R2 (el footer "enter bloqueado" sigue
@@ -890,5 +898,346 @@ func TestRunner_R1H2NoneSkipsR1(t *testing.T) {
 	res := p.Wait(t, 3*time.Second)
 	if res.ExitCode != 0 {
 		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
+// firstRunDir devuelve el unico run-dir creado bajo ~/.che/runs/<slug>/.
+// H4 escribe un dir por run; los tests asumen que solo corrio uno y
+// fallan ruidosamente si encuentran 0 o >1 (cualquier estado distinto es
+// bug del runner o del harness).
+func firstRunDir(t *testing.T, home, slug string) string {
+	t.Helper()
+	slugDir := filepath.Join(home, ".che", "runs", slug)
+	entries, err := os.ReadDir(slugDir)
+	if err != nil {
+		t.Fatalf("read %s: %v", slugDir, err)
+	}
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	if len(dirs) != 1 {
+		t.Fatalf("expected exactly 1 run dir under %s, got %v", slugDir, dirs)
+	}
+	return filepath.Join(slugDir, dirs[0])
+}
+
+// readRunFile es un helper para leer + assertar contenido de un archivo
+// del run dir. Falla el test si no existe o si tiene un read error.
+func readRunFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}
+
+// TestRunner_R3H4SpawnHappy cubre el camino feliz de H4: pipeline 1 step
+// con un fake claude que devuelve "ok-h4-happy" y exit 0. El runner
+// arranca R3, ejecuta blocking, escribe manifest + result.yaml, y aterriza
+// en R4 ("Run completo"). Coincide con el primer test e2e listado en H4.
+func TestRunner_R3H4SpawnHappy(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmClaudeSkill(t, env.HomeDir, "h4-happy")
+	// Fake claude que matchea cuando el arg incluye la skill h4-happy y
+	// emite el sentinel "ok-h4-happy" en stdout. exit 0 → done.
+	env.ExpectAgent("claude").WhenArgsMatch(`h4-happy`).RespondStdout("ok-h4-happy", 0)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h4-happy.yaml": readyYAMLSkillStep("R3H4 Happy", "h4-happy", "none"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H4 Happy", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight de R3H4 Happy", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 3*time.Second) {
+		t.Fatalf("preflight verdict never reached 'todo listo':\n%s", p.Since(mark))
+	}
+
+	// enter avanza a R3; el spawn corre y aterrizamos en R4.
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+		t.Fatalf("R4 'Run completo' never rendered\n%s", p.Since(mark))
+	}
+	if !strings.Contains(p.Since(mark), "R3H4 Happy") {
+		t.Errorf("R4 should mention pipeline name, got:\n%s", p.Since(mark))
+	}
+
+	// Cleanup antes de leer disco — esc → lister, esc → menu, q → exit.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered after esc\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d\nout:\n%s", res.ExitCode, res.Stdout)
+	}
+
+	// Asserts en disco: manifest done, result.yaml con output="ok-h4-happy".
+	runDir := firstRunDir(t, env.HomeDir, "r3h4-happy")
+	manifestRaw := readRunFile(t, filepath.Join(runDir, "manifest.yaml"))
+	if !strings.Contains(manifestRaw, "status: done") {
+		t.Errorf("expected manifest status: done, got:\n%s", manifestRaw)
+	}
+	resultRaw := readRunFile(t, filepath.Join(runDir, "step-01.result.yaml"))
+	if !strings.Contains(resultRaw, "ok-h4-happy") {
+		t.Errorf("expected result.yaml to contain ok-h4-happy, got:\n%s", resultRaw)
+	}
+	if !strings.Contains(resultRaw, "exit_code: 0") {
+		t.Errorf("expected result.yaml exit_code: 0, got:\n%s", resultRaw)
+	}
+
+	// Invocacion del fake llego (sanity: si el subprocess no corrio, no
+	// habria nada en _invocations.jsonl).
+	calls := env.Invocations().For("claude")
+	if len(calls) != 1 {
+		t.Errorf("expected 1 invocation of claude, got %d", len(calls))
+	}
+}
+
+// TestRunner_R3H4SpawnFailExit1 cubre el camino de error: fake claude
+// devuelve stderr "boom-h4" + exit 1 → R3 transiciona a RF, manifest
+// failed, stderr.log contiene "boom-h4". Coincide con el segundo test
+// e2e listado en H4.
+func TestRunner_R3H4SpawnFailExit1(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmClaudeSkill(t, env.HomeDir, "h4-fail")
+	env.ExpectAgent("claude").WhenArgsMatch(`h4-fail`).RespondExitWithError(1, "boom-h4 went wrong")
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h4-fail.yaml": readyYAMLSkillStep("R3H4 Fail", "h4-fail", "none"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H4 Fail", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight de R3H4 Fail", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 3*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run fallo", 5*time.Second) {
+		t.Fatalf("RF 'Run fallo' never rendered\n%s", p.Since(mark))
+	}
+	if !strings.Contains(p.Since(mark), "exit_code: 1") {
+		t.Errorf("RF should mention exit_code: 1, got:\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Disco: manifest failed + stderr.log con boom-h4.
+	runDir := firstRunDir(t, env.HomeDir, "r3h4-fail")
+	manifestRaw := readRunFile(t, filepath.Join(runDir, "manifest.yaml"))
+	if !strings.Contains(manifestRaw, "status: failed") {
+		t.Errorf("expected manifest status: failed, got:\n%s", manifestRaw)
+	}
+	stderrRaw := readRunFile(t, filepath.Join(runDir, "step-01.stderr.log"))
+	if !strings.Contains(stderrRaw, "boom-h4") {
+		t.Errorf("expected stderr.log to contain boom-h4, got:\n%s", stderrRaw)
+	}
+}
+
+// TestRunner_R3H4CancelAbort cubre el modal RC: fake claude que bloquea
+// (BlockSeconds 15) → ctrl+c abre el modal → enter sobre "abort & save"
+// → SIGTERM al subprocess → manifest cancelled, run dir conserva los logs
+// parciales. Coincide con el tercer test e2e listado en H4.
+func TestRunner_R3H4CancelAbort(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmClaudeSkill(t, env.HomeDir, "h4-cancel")
+	// Fake que emite sentinel "started" antes de bloquear, asi el test
+	// puede esperar a que el subprocess este vivo antes de mandar ctrl+c
+	// (sin esto la senal podria llegar antes del Start() y el cancel
+	// quedaria con un proceso no nato).
+	env.ExpectAgent("claude").WhenArgsMatch(`h4-cancel`).
+		BlockSeconds(15).
+		RespondStdout("started-h4-cancel", 0)
+	// Acortar la grace para no esperar 5s por el SIGKILL si el fake
+	// ignora SIGTERM.
+	env.SetEnv("CHE_KILL_GRACE", "1")
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h4-cancel.yaml": readyYAMLSkillStep("R3H4 Cancel", "h4-cancel", "none"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H4 Cancel", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight de R3H4 Cancel", 3*time.Second) {
+		t.Fatalf("R2 never rendered\n%s", p.Since(mark))
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 3*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+
+	// enter → R3. Esperamos el header de R3 ("step 1/1") como sentinel.
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "step 1/1", 5*time.Second) {
+		t.Fatalf("R3 header never rendered\n%s", p.Since(mark))
+	}
+
+	// Esperar a que el subprocess este vivo. Sin un sentinel claro del
+	// Start() podriamos mandar ctrl+c antes — un sleep corto cubre el
+	// gap (la goroutine del spawn arranca en el siguiente tick).
+	time.Sleep(500 * time.Millisecond)
+
+	// ctrl+c abre el modal RC.
+	mark = p.Mark()
+	if err := p.Send("\x03"); err != nil {
+		t.Fatalf("send ctrl+c: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Cancelar run", 3*time.Second) {
+		t.Fatalf("RC modal never rendered\n%s", p.Since(mark))
+	}
+	if !strings.Contains(p.Since(mark), "abort & save") {
+		t.Errorf("RC modal should list 'abort & save', got:\n%s", p.Since(mark))
+	}
+
+	// El cursor inicial esta sobre "abort & save" → enter dispara el
+	// cancel.
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter (abort): %v", err)
+	}
+	// Tras el cancel, la goroutine SIGTERMea al fake; con
+	// CHE_KILL_GRACE=1 a lo sumo 1s + grace SIGKILL → el msg done llega
+	// rapido y aterrizamos en RF (tono cancelled).
+	if !p.WaitForOutputSince(t, mark, "Run cancelado", 8*time.Second) {
+		t.Fatalf("RF cancelled screen never rendered\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 5*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Disco: manifest cancelled + run dir conserva logs parciales (el
+	// stdout sentinel "started-h4-cancel" que el fake emitio antes del
+	// bloqueo tiene que estar en step-01.stdout.log).
+	runDir := firstRunDir(t, env.HomeDir, "r3h4-cancel")
+	manifestRaw := readRunFile(t, filepath.Join(runDir, "manifest.yaml"))
+	if !strings.Contains(manifestRaw, "status: cancelled") {
+		t.Errorf("expected manifest status: cancelled, got:\n%s", manifestRaw)
+	}
+	stdoutRaw := readRunFile(t, filepath.Join(runDir, "step-01.stdout.log"))
+	if !strings.Contains(stdoutRaw, "started-h4-cancel") {
+		t.Errorf("expected partial stdout to contain started-h4-cancel, got:\n%s", stdoutRaw)
 	}
 }

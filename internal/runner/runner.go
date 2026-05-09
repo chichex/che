@@ -92,8 +92,14 @@ func (m RunModel) Init() tea.Cmd { return nil }
 // Update dispatchea segun la screen activa. Las teclas globales (esc, q,
 // ctrl+c) las maneja el handler de cada screen para poder distinguir
 // "volver al lister" vs "salida total" segun el contexto (p.ej. en R1 ctrl+c
-// sale total, esc vuelve al lister).
+// sale total, esc vuelve al lister). H4 agrega ScreenRunning (que tambien
+// procesa stepDoneMsg, no solo teclas) y los terminales R4/RF.
 func (m RunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// ScreenRunning recibe ademas de KeyMsg el stepDoneMsg de la goroutine
+	// del spawn — por eso pasamos el msg crudo, no el key.
+	if m.Screen == ScreenRunning {
+		return m.updateRunning(msg)
+	}
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
@@ -103,8 +109,10 @@ func (m RunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateInput(key)
 	case ScreenPreflight:
 		return m.updatePreflight(key)
-	case ScreenRunningPlaceholder:
-		return m.updateRunningPlaceholder(key)
+	case ScreenDone:
+		return m.updateDone(key)
+	case ScreenFailed:
+		return m.updateFailed(key)
 	}
 	// ScreenSkeleton (legacy) o cualquier otro: comportamiento heredado de
 	// H1 — esc vuelve al lister, q/ctrl+c salen total.
@@ -119,18 +127,22 @@ func (m RunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// View dispatchea segun la screen activa. H3 cubre R1 + R2 (preflight real)
-// + R3 placeholder; el fallback es la screen skeleton heredada de H1 (no se
-// usa en el flow real pero la dejamos como red de seguridad si una
-// transicion futura olvida setear Screen).
+// View dispatchea segun la screen activa. H4 cubre R1 / R2 / R3 / R4 / RF;
+// el fallback es la screen skeleton heredada de H1 (no se usa en el flow
+// real pero la dejamos como red de seguridad si una transicion futura
+// olvida setear Screen).
 func (m RunModel) View() string {
 	switch m.Screen {
 	case ScreenInput:
 		return m.viewInput()
 	case ScreenPreflight:
 		return m.viewPreflight()
-	case ScreenRunningPlaceholder:
-		return m.viewRunningPlaceholder()
+	case ScreenRunning:
+		return m.viewRunning()
+	case ScreenDone:
+		return m.viewDone()
+	case ScreenFailed:
+		return m.viewFailed()
 	}
 	return m.viewSkeleton()
 }
@@ -147,46 +159,6 @@ func (m RunModel) viewSkeleton() string {
 	b.WriteString("\n\n")
 	b.WriteString(dimStyle.Render("runner pendiente — H3+ implementa preflight/running/done"))
 	b.WriteString("\n\n")
-	b.WriteString(hintStyle.Render("esc volver · q salir"))
-	b.WriteString("\n")
-	return b.String()
-}
-
-// updateRunningPlaceholder maneja teclas en el placeholder de R3 (post-
-// preflight ok). H3 lo deja minimal: esc vuelve al lister, q/ctrl+c salen
-// total. H4 lo reemplaza por el handler real de R3 con spawn del
-// subprocess + RC modal para ctrl+c.
-func (m RunModel) updateRunningPlaceholder(key tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch key.String() {
-	case "ctrl+c", "q":
-		m.exitApp = true
-		return m, tea.Quit
-	case "esc":
-		m.exitApp = false
-		return m, tea.Quit
-	}
-	return m, nil
-}
-
-// viewRunningPlaceholder renderiza el placeholder de R3 que aparece cuando
-// preflight cierra OK (o el usuario confirma los warnings amarillos).
-// Texto literal "spawn pendiente — H4 implementa R3" — los tests de H3 lo
-// usan como sentinel para asegurar la transicion. H4 reemplaza esta
-// funcion por el render real de R3.
-func (m RunModel) viewRunningPlaceholder() string {
-	name := m.Pipeline.Name
-	if name == "" {
-		name = "(sin nombre)"
-	}
-	var b strings.Builder
-	b.WriteString(titleStyle.Render("Run · " + name))
-	b.WriteString("\n\n")
-	b.WriteString(dimStyle.Render("spawn pendiente — H4 implementa R3 (running)"))
-	b.WriteString("\n\n")
-	if m.Input.Kind != wizard.InputNone && m.Input.Kind != "" {
-		b.WriteString(dimStyle.Render(fmt.Sprintf("input resuelto: kind=%s · %d bytes", m.Input.Kind, len(m.Input.ResolvedPayload))))
-		b.WriteString("\n\n")
-	}
 	b.WriteString(hintStyle.Render("esc volver · q salir"))
 	b.WriteString("\n")
 	return b.String()

@@ -467,11 +467,11 @@ func (m RunModel) updatePreflight(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.preflightConfirm = true
 				return m, nil
 			}
-			m.Screen = ScreenRunningPlaceholder
-			return m, nil
+			next, cmd := enterRunning(m)
+			return next, cmd
 		case preflightVerdictAllOK:
-			m.Screen = ScreenRunningPlaceholder
-			return m, nil
+			next, cmd := enterRunning(m)
+			return next, cmd
 		}
 	}
 	return m, nil
