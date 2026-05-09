@@ -32,6 +32,15 @@ func (m RunModel) updateCancelModal(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.CancelModal = false
 			return m.handleStepDone(doneMsg)
 		}
+		// validatorDoneMsg (H7): mismo criterio que stepDoneMsg — si
+		// llego mientras el modal RC seguia visible, lo procesamos para
+		// transicionar (la goroutine del validator no escucha
+		// requestCancel directamente, pero el SIGTERM al pgid igual
+		// la mata).
+		if vMsg, ok := msg.(validatorDoneMsg); ok {
+			m.CancelModal = false
+			return m.handleValidatorDone(vMsg)
+		}
 		// stepLineMsg puede seguir llegando del subprocess hasta que el
 		// SIGTERM corte la salida. Drenamos appendeando al ring buffer
 		// (el log pane queda actualizado por debajo del modal) y

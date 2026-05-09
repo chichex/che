@@ -56,7 +56,6 @@ const (
 	// que fallo, exit_code, ultimas lineas de stderr/stdout, path al
 	// run dir. enter / esc vuelven al lister.
 	ScreenFailed
-	// TODO H7: ScreenPause (RP).
 )
 
 // StepStatus es el estado de cada step durante R3. H4 lo usa para los rows
@@ -73,9 +72,9 @@ const (
 )
 
 // StepRun es el snapshot vivo de un step en runtime. H4 popula Status /
-// StartedAt / FinishedAt / ExitCode; LogBuffer / Validator quedan como
-// stubs vacios (H5 / H7 los completan). Idx es 1-indexed para alinear con
-// los nombres de los archivos en disco (step-01.stdout.log).
+// StartedAt / FinishedAt / ExitCode; H7 agrega Validator (cuando el step
+// declara un bloque validator). Idx es 1-indexed para alinear con los
+// nombres de los archivos en disco (step-01.stdout.log).
 type StepRun struct {
 	Idx        int
 	Name       string
@@ -89,6 +88,77 @@ type StepRun struct {
 	// no sea un exit no-cero "normal". Sirve para diferenciar "el binario
 	// no se pudo arrancar" de "el binario corrio y devolvio ≠ 0" en RF.
 	SpawnError string
+	// Validator es el snapshot del cross-review del step (H7). nil si el
+	// step no declaro bloque validator. Se popula apenas el subprocess
+	// del step termina con exit 0 y se detecta validator no-nil; cada
+	// loop incrementa LoopsRun y sobrescribe LastFeedback. FinalVerdict
+	// se setea al salir del loop (ok | fail | human-override).
+	Validator *ValidatorRun
+}
+
+// ValidatorRun es el estado vivo del loop del validator de un step. Sigue
+// el shape del doc (seccion "Modelo interno"): LoopsRun crece en cada
+// iteracion, MaxLoops y OnMaxLoops vienen del bloque validator del step,
+// FinalVerdict queda vacio mientras el loop sigue activo y se setea al
+// resolver (ok | fail | human-override).
+type ValidatorRun struct {
+	CLI          string
+	LoopsRun     int
+	MaxLoops     int
+	OnMaxLoops   string
+	FinalVerdict string
+	LastFeedback string
+}
+
+// Final verdict values registrados en manifest.steps[i].validator.final_verdict.
+// Los 3 estados terminales del loop del validator (H7).
+const (
+	// FinalVerdictOk indica que el validator emitio verdict: ok en algun
+	// loop antes de agotar max_loops. El step se considera valido y el
+	// pipeline avanza al siguiente.
+	FinalVerdictOk = "ok"
+	// FinalVerdictFail indica que el validator agoto max_loops sin ok y
+	// on_max_loops=fail (o el modal RP eligio abort). El run termina en RF.
+	FinalVerdictFail = "fail"
+	// FinalVerdictFailButContinued indica que se agoto max_loops y
+	// on_max_loops=continue: el pipeline acepto el ultimo output y
+	// avanzo al siguiente step. El doc lo deja explicito como valor
+	// distinto a "fail" (asi el manifest queda auditable).
+	FinalVerdictFailButContinued = "fail-but-continued"
+	// FinalVerdictHumanOverride indica que el modal RP eligio "continuar":
+	// el humano acepto el ultimo output a pesar del fail del validator.
+	FinalVerdictHumanOverride = "human-override"
+)
+
+// PauseChoice indexa las opciones del modal RP. H7 expone tres opciones:
+// continuar (acepta el ultimo output, manifest registra
+// final_verdict=human-override), retry (resetea el contador y pide otra
+// pasada de loops), abort (equivalente a fail → RF). El cero-value apunta a
+// "continuar" para que el cursor inicial sea la opcion que tipicamente el
+// usuario quiere despues de revisar el feedback (matchea el orden del doc).
+type PauseChoice int
+
+const (
+	PauseChoiceContinue PauseChoice = iota
+	PauseChoiceRetry
+	PauseChoiceAbort
+)
+
+// PauseState es el estado del modal RP (Paused). Vive en RunModel.PauseModal
+// como puntero — nil cuando el modal no esta activo. Cuando el validator
+// agota max_loops con on_max_loops=pause, handleValidatorDone lo crea con
+// el ultimo feedback + el step que lo gatillo, y la screen sigue siendo
+// ScreenRunning (el modal se renderea encima — patron del doc).
+type PauseState struct {
+	// StepIdx es el idx (0-based) del step que agoto los loops. El handler
+	// lo usa para retomar el flow segun la decision del usuario.
+	StepIdx int
+	// LastFeedback es el feedback del ultimo verdict.fail (string crudo
+	// del campo `feedback` del verdict.yaml). Se renderea en el modal
+	// como "ultimo feedback del validator".
+	LastFeedback string
+	// Choice es la opcion seleccionada actualmente en el modal (cursor).
+	Choice PauseChoice
 }
 
 // CancelChoice indexa las opciones del modal RC. H4 expone tres opciones
@@ -228,6 +298,23 @@ type RunModel struct {
 	// (up/down + enter), no del log pane.
 	CancelModal  bool
 	CancelChoice CancelChoice
+
+	// PauseModal es el estado del modal RP (Paused). nil cuando no hay
+	// pause activa; no-nil cuando el validator agoto max_loops con
+	// on_max_loops=pause y esperamos decision humana. Cuando es no-nil,
+	// las teclas se interpretan como navegacion del modal (up/down +
+	// enter), igual que CancelModal. No coexisten — el doc fija que RC
+	// y RP son mutuamente exclusivos (no se abre uno mientras el otro
+	// esta visible).
+	PauseModal *PauseState
+
+	// ValidatorActive = true mientras el subprocess del validator esta
+	// vivo (entre el spawn y el validatorDoneMsg). El renderer lo usa para
+	// mostrar "loop K/max" en el row del step y para que el ring buffer
+	// del paso muestre "validating..." mientras tanto. Cuando la
+	// transicion del loop manda otro spawn (re-run del step o nuevo
+	// validator), se reactiva.
+	ValidatorActive bool
 
 	// runState es el handle compartido (puntero) entre el modelo y la
 	// goroutine del spawn. Vive desde enterRunning hasta handleStepDone

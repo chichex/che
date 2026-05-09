@@ -31,18 +31,36 @@ type Manifest struct {
 }
 
 // ManifestStep es la entrada por step del manifest. H4 la usa para registrar
-// el step 0 (status / exit_code / timestamps); H6 va a agregar validator y
-// los steps adicionales.
+// el step 0 (status / exit_code / timestamps); H7 agrega Validator (bloque
+// opcional cuando el step declara cross-review).
 type ManifestStep struct {
-	Idx        int       `yaml:"idx"`
-	Name       string    `yaml:"name"`
-	CLI        string    `yaml:"cli,omitempty"`
-	Kind       string    `yaml:"kind,omitempty"`
-	Status     string    `yaml:"status"`
-	ExitCode   int       `yaml:"exit_code"`
-	StartedAt  time.Time `yaml:"started_at,omitempty"`
-	FinishedAt time.Time `yaml:"finished_at,omitempty"`
-	Error      string    `yaml:"error,omitempty"`
+	Idx        int                `yaml:"idx"`
+	Name       string             `yaml:"name"`
+	CLI        string             `yaml:"cli,omitempty"`
+	Kind       string             `yaml:"kind,omitempty"`
+	Status     string             `yaml:"status"`
+	ExitCode   int                `yaml:"exit_code"`
+	StartedAt  time.Time          `yaml:"started_at,omitempty"`
+	FinishedAt time.Time          `yaml:"finished_at,omitempty"`
+	Error      string             `yaml:"error,omitempty"`
+	Validator  *ManifestValidator `yaml:"validator,omitempty"`
+}
+
+// ManifestValidator es el bloque persistido en manifest.steps[i].validator
+// cuando el step declara cross-review (H7). Sigue el shape del doc
+// (seccion "Schema del manifest.yaml"): cli, loops_run, max_loops,
+// on_max_loops, final_verdict y last_feedback.
+//
+// Solo se serializa cuando el step efectivamente corrio el validator (al
+// menos un loop cerrado) — si el step fallo antes de llegar al validator,
+// Validator queda nil y el bloque no aparece.
+type ManifestValidator struct {
+	CLI          string `yaml:"cli,omitempty"`
+	LoopsRun     int    `yaml:"loops_run"`
+	MaxLoops     int    `yaml:"max_loops"`
+	OnMaxLoops   string `yaml:"on_max_loops,omitempty"`
+	FinalVerdict string `yaml:"final_verdict,omitempty"`
+	LastFeedback string `yaml:"last_feedback,omitempty"`
 }
 
 // Status values del manifest a nivel run (status del top-level). Los del
@@ -117,8 +135,27 @@ func closeManifest(runDir string, m Manifest, status string, steps []StepRun) er
 			StartedAt:  s.StartedAt,
 			FinishedAt: s.FinishedAt,
 			Error:      s.SpawnError,
+			Validator:  manifestValidatorFromRun(s.Validator),
 		}
 		m.Steps = append(m.Steps, entry)
 	}
 	return writeManifest(runDir, m)
+}
+
+// manifestValidatorFromRun convierte el snapshot vivo (StepRun.Validator) en
+// el shape persistido (ManifestValidator). Devuelve nil si no hay validator
+// — asi el yaml omite el bloque entero (omitempty del puntero) y el
+// manifest queda limpio para steps sin cross-review.
+func manifestValidatorFromRun(v *ValidatorRun) *ManifestValidator {
+	if v == nil {
+		return nil
+	}
+	return &ManifestValidator{
+		CLI:          v.CLI,
+		LoopsRun:     v.LoopsRun,
+		MaxLoops:     v.MaxLoops,
+		OnMaxLoops:   v.OnMaxLoops,
+		FinalVerdict: v.FinalVerdict,
+		LastFeedback: v.LastFeedback,
+	}
 }

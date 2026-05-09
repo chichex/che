@@ -1951,3 +1951,458 @@ func TestRunner_R3H6MultiStepFailStops(t *testing.T) {
 			len(calls), calls)
 	}
 }
+
+// validatorYAMLStep arma un YAML de pipeline con UN solo step (gemini text)
+// que tiene bloque validator (gemini text tambien). Usado por los tests de
+// H7 — todas las variantes (ok / fail / no-block / pause) reusan la misma
+// shape, lo unico que cambia es el response del fake gemini.
+//
+// El step usa input=none (no hay input previo a resolver), kind=prompt
+// (el content es la prompt cruda — evitamos el path de skills para no
+// requerir skills pre-armadas en cada test). El validator usa kind=skill
+// para que el fake matchee args /<skill> y podamos diferenciar invocacion
+// de step vs invocacion de validator en los logs.
+func validatorYAMLStep(name, stepPrompt, validatorSkill string, maxLoops int, onMaxLoops string) string {
+	return fmt.Sprintf(`name: %s
+description: ready desc
+steps:
+- name: alpha
+  cli: gemini
+  kind: prompt
+  content: %s
+  input: none
+  validator:
+    cli: gemini
+    kind: skill
+    content: %s
+  max_loops: %d
+  on_max_loops: %s
+`, name, stepPrompt, validatorSkill, maxLoops, onMaxLoops)
+}
+
+// TestRunner_R3H7ValidatorOkFirstTry cubre el primer test e2e listado en
+// H7: "Validator fake con verdict ok primer try; assert: manifest
+// loops_run=1, final_verdict=ok."
+//
+// Pipeline 1 step (prompt) con validator gemini skill, max_loops=3,
+// on_max_loops=fail. El fake del step emite output cualquiera + exit 0; el
+// fake del validator (skill h7-ok-validator) emite "verdict: ok" → ningun
+// retry, run aterriza en R4 con final_verdict=ok y loops_run=1.
+func TestRunner_R3H7ValidatorOkFirstTry(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	// Skill del validator (gemini kind=skill → /h7-ok-validator).
+	preArmCLISkill(t, env.HomeDir, "gemini", "h7-ok-validator")
+
+	// Step principal: gemini -p "step output content" → emite sentinel.
+	// Args matcheamos por el prompt para no colisionar con el validator.
+	env.ExpectAgent("gemini").WhenArgsMatch(`step-h7-ok-prompt`).
+		RespondStdout("step1-output-h7-ok", 0)
+	// Validator: gemini /h7-ok-validator → emite verdict ok.
+	env.ExpectAgent("gemini").WhenArgsMatch(`/h7-ok-validator`).
+		RespondStdout("verdict: ok\n", 0)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h7-ok.yaml": validatorYAMLStep("R3H7 Ok", "step-h7-ok-prompt", "h7-ok-validator", 3, "fail"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H7 Ok", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight de R3H7 Ok", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run completo", 8*time.Second) {
+		t.Fatalf("R4 'Run completo' never rendered\n%s", p.Since(mark))
+	}
+
+	// Cleanup ordenado.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Asserts en disco.
+	runDir := firstRunDir(t, env.HomeDir, "r3h7-ok")
+
+	// Manifest done con loops_run: 1 + final_verdict: ok dentro del bloque
+	// validator del step. El yaml del manifest serializa el bloque como
+	// "validator:" con sub-campos indentados.
+	manifestRaw := readRunFile(t, filepath.Join(runDir, "manifest.yaml"))
+	if !strings.Contains(manifestRaw, "status: done") {
+		t.Errorf("expected manifest status: done, got:\n%s", manifestRaw)
+	}
+	if !strings.Contains(manifestRaw, "validator:") {
+		t.Errorf("expected manifest to contain validator block, got:\n%s", manifestRaw)
+	}
+	if !strings.Contains(manifestRaw, "loops_run: 1") {
+		t.Errorf("expected loops_run: 1, got:\n%s", manifestRaw)
+	}
+	if !strings.Contains(manifestRaw, "final_verdict: ok") {
+		t.Errorf("expected final_verdict: ok, got:\n%s", manifestRaw)
+	}
+
+	// verdict.yaml del loop 1 existe.
+	verdictRaw := readRunFile(t, filepath.Join(runDir, "step-01.validator.01.verdict.yaml"))
+	if !strings.Contains(verdictRaw, "verdict: ok") {
+		t.Errorf("expected verdict.yaml to contain 'verdict: ok', got:\n%s", verdictRaw)
+	}
+
+	// El step se invoco 1 vez + el validator se invoco 1 vez = 2 invocaciones
+	// de gemini en total.
+	calls := env.Invocations().For("gemini")
+	if len(calls) != 2 {
+		t.Errorf("expected 2 invocations of gemini (1 step + 1 validator), got %d: %+v",
+			len(calls), calls)
+	}
+}
+
+// TestRunner_R3H7ValidatorFailMaxLoopsFail cubre el segundo test e2e
+// listado en H7: "Validator fake con verdict fail siempre, on_max_loops=
+// fail; assert: RF, loops_run=max_loops, final_verdict=fail."
+//
+// Pipeline 1 step con validator que SIEMPRE devuelve verdict: fail.
+// max_loops=2 (mas chico que el default 3 para que el test sea rapido).
+// on_max_loops=fail → tras agotar los loops el run cae a RF con
+// final_verdict=fail.
+//
+// Cantidad esperada de invocaciones del fake gemini:
+//   - step: corre 2 veces (loop 1 + retry tras fail)
+//   - validator: corre 2 veces (1 por cada vuelta del step)
+//   - total: 4
+func TestRunner_R3H7ValidatorFailMaxLoopsFail(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmCLISkill(t, env.HomeDir, "gemini", "h7-fail-validator")
+
+	env.ExpectAgent("gemini").WhenArgsMatch(`step-h7-fail-prompt`).
+		RespondStdout("step1-output-h7-fail", 0)
+	env.ExpectAgent("gemini").WhenArgsMatch(`/h7-fail-validator`).
+		RespondStdout("verdict: fail\nfeedback: nope\n", 0)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h7-fail.yaml": validatorYAMLStep("R3H7 Fail", "step-h7-fail-prompt", "h7-fail-validator", 2, "fail"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H7 Fail", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight de R3H7 Fail", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	// Tras agotar max_loops con on_max_loops=fail, R3 transiciona a RF.
+	if !p.WaitForOutputSince(t, mark, "Run fallo", 10*time.Second) {
+		t.Fatalf("RF 'Run fallo' never rendered\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	runDir := firstRunDir(t, env.HomeDir, "r3h7-fail")
+
+	manifestRaw := readRunFile(t, filepath.Join(runDir, "manifest.yaml"))
+	if !strings.Contains(manifestRaw, "status: failed") {
+		t.Errorf("expected manifest status: failed, got:\n%s", manifestRaw)
+	}
+	if !strings.Contains(manifestRaw, "loops_run: 2") {
+		t.Errorf("expected loops_run: 2 (=max_loops), got:\n%s", manifestRaw)
+	}
+	if !strings.Contains(manifestRaw, "final_verdict: fail") {
+		t.Errorf("expected final_verdict: fail, got:\n%s", manifestRaw)
+	}
+
+	// Ambos verdict.yaml existen.
+	if _, err := os.Stat(filepath.Join(runDir, "step-01.validator.01.verdict.yaml")); err != nil {
+		t.Errorf("expected verdict 01.yaml to exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "step-01.validator.02.verdict.yaml")); err != nil {
+		t.Errorf("expected verdict 02.yaml to exist: %v", err)
+	}
+
+	// Invocaciones del fake: 2 del step + 2 del validator = 4.
+	calls := env.Invocations().For("gemini")
+	if len(calls) != 4 {
+		t.Errorf("expected 4 gemini invocations (2 step + 2 validator), got %d: %+v",
+			len(calls), calls)
+	}
+}
+
+// TestRunner_R3H7ValidatorNoVerdictBlock cubre el tercer test e2e listado
+// en H7: "Validator que devuelve un YAML sin bloque verdict; assert:
+// comportamiento equivalente a fail con feedback 'no verdict block'."
+//
+// El validator emite stdout que NO contiene bloque verdict (texto crudo
+// sin yaml). max_loops=1 + on_max_loops=fail → tras un solo intento que
+// el parser trata como fail, el run cae a RF. El verdict.yaml debe
+// registrar feedback="no verdict block".
+func TestRunner_R3H7ValidatorNoVerdictBlock(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmCLISkill(t, env.HomeDir, "gemini", "h7-noblock-validator")
+
+	env.ExpectAgent("gemini").WhenArgsMatch(`step-h7-noblock-prompt`).
+		RespondStdout("step1-output-h7-noblock", 0)
+	// Validator emite texto sin bloque YAML con clave verdict.
+	env.ExpectAgent("gemini").WhenArgsMatch(`/h7-noblock-validator`).
+		RespondStdout("aca no hay nada que parezca yaml\nsolo prosa libre\n", 0)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h7-noblock.yaml": validatorYAMLStep("R3H7 NoBlock", "step-h7-noblock-prompt", "h7-noblock-validator", 1, "fail"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H7 NoBlock", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight de R3H7 NoBlock", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run fallo", 8*time.Second) {
+		t.Fatalf("RF 'Run fallo' never rendered\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	runDir := firstRunDir(t, env.HomeDir, "r3h7-noblock")
+
+	// El verdict.yaml registra el feedback sintetico 'no verdict block'.
+	verdictRaw := readRunFile(t, filepath.Join(runDir, "step-01.validator.01.verdict.yaml"))
+	if !strings.Contains(verdictRaw, "verdict: fail") {
+		t.Errorf("expected verdict.yaml to contain 'verdict: fail', got:\n%s", verdictRaw)
+	}
+	if !strings.Contains(verdictRaw, "no verdict block") {
+		t.Errorf("expected feedback 'no verdict block' in verdict.yaml, got:\n%s", verdictRaw)
+	}
+
+	manifestRaw := readRunFile(t, filepath.Join(runDir, "manifest.yaml"))
+	if !strings.Contains(manifestRaw, "status: failed") {
+		t.Errorf("expected manifest status: failed, got:\n%s", manifestRaw)
+	}
+	if !strings.Contains(manifestRaw, "final_verdict: fail") {
+		t.Errorf("expected final_verdict: fail, got:\n%s", manifestRaw)
+	}
+}
+
+// TestRunner_R3H7ValidatorPauseContinue cubre el cuarto test e2e listado
+// en H7: "on_max_loops=pause; stdin que selecciona 'continuar' en RP;
+// assert: R4, final_verdict=human-override."
+//
+// El validator siempre falla → tras agotar max_loops (=1) el modal RP
+// aparece. El test envia "enter" (cursor inicial = continuar) → run
+// avanza al final con final_verdict=human-override y aterriza en R4.
+func TestRunner_R3H7ValidatorPauseContinue(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmCLISkill(t, env.HomeDir, "gemini", "h7-pause-validator")
+
+	env.ExpectAgent("gemini").WhenArgsMatch(`step-h7-pause-prompt`).
+		RespondStdout("step1-output-h7-pause", 0)
+	env.ExpectAgent("gemini").WhenArgsMatch(`/h7-pause-validator`).
+		RespondStdout("verdict: fail\nfeedback: feedback-de-pause\n", 0)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h7-pause.yaml": validatorYAMLStep("R3H7 Pause", "step-h7-pause-prompt", "h7-pause-validator", 1, "pause"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H7 Pause", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight de R3H7 Pause", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+
+	// Esperar el modal RP — se renderea con titulo "Validator agoto
+	// max_loops" + el feedback en la lista.
+	if !p.WaitForOutputSince(t, mark, "Validator agoto max_loops", 8*time.Second) {
+		t.Fatalf("RP modal never rendered\n%s", p.Since(mark))
+	}
+	if !strings.Contains(p.Since(mark), "feedback-de-pause") {
+		t.Errorf("RP modal should show last feedback, got:\n%s", p.Since(mark))
+	}
+
+	// Cursor inicial = continuar (PauseChoiceContinue=0). enter elige.
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter (continuar): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+		t.Fatalf("R4 'Run completo' never rendered after continuar\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	runDir := firstRunDir(t, env.HomeDir, "r3h7-pause")
+	manifestRaw := readRunFile(t, filepath.Join(runDir, "manifest.yaml"))
+	if !strings.Contains(manifestRaw, "status: done") {
+		t.Errorf("expected manifest status: done, got:\n%s", manifestRaw)
+	}
+	if !strings.Contains(manifestRaw, "final_verdict: human-override") {
+		t.Errorf("expected final_verdict: human-override, got:\n%s", manifestRaw)
+	}
+}

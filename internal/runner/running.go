@@ -231,7 +231,18 @@ func resolvePayloadForStep(m RunModel, idx int) (string, error) {
 //   - done + hay siguiente → arranca el step siguiente (startStep).
 //   - done + ultimo step   → R4.
 //   - failed / cancelled   → RF inmediato (stop-on-error).
+//
+// validatorDoneMsg (H7) lo emite la goroutine del validator subprocess al
+// terminar — handleValidatorDone decide la transicion (siguiente step /
+// re-run del step / RF / RP modal) segun verdict + on_max_loops.
 func (m RunModel) updateRunning(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// PauseModal tiene prioridad sobre cancel — mientras hay una pausa
+	// activa, el modal RP se queda abierto hasta que el humano elija. RC
+	// y RP son mutuamente exclusivos por construccion (no se abre uno
+	// mientras el otro esta visible).
+	if m.PauseModal != nil {
+		return m.updatePauseModal(msg)
+	}
 	if m.CancelModal {
 		return m.updateCancelModal(msg)
 	}
@@ -306,6 +317,8 @@ func (m RunModel) updateRunning(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case stepDoneMsg:
 		return m.handleStepDone(msg)
+	case validatorDoneMsg:
+		return m.handleValidatorDone(msg)
 	}
 	return m, nil
 }
@@ -320,12 +333,14 @@ func (m RunModel) activeBuffer() *RingBuffer {
 	return m.LogBuffers[m.LogFocus]
 }
 
-// handleStepDone procesa el mensaje de fin del subprocess. Escribe el
-// result.yaml del step + actualiza el manifest, y decide la transicion:
+// handleStepDone procesa el mensaje de fin del subprocess del step. Escribe
+// el result.yaml del step + actualiza el manifest, y decide la transicion:
 //
 //   - failed / cancelled       → RF inmediato (stop-on-error de H6).
-//   - done + hay step siguiente → arranca el siguiente via startStep.
-//   - done + ultimo step       → R4.
+//   - done + validator nil     → H6 path: avanza al siguiente step (o R4 si
+//     era el ultimo).
+//   - done + validator declared → H7 path: spawnea el validator (loop K=
+//     LoopsRun+1) y espera validatorDoneMsg.
 //
 // Manifest se reescribe en cada step (no atomico hasta H8) para que un crash
 // mid-pipeline deje el estado en disco coherente con lo ya ejecutado.
@@ -399,20 +414,231 @@ func (m RunModel) handleStepDone(msg stepDoneMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Step done. Multi-step: si hay un siguiente step, arrancarlo.
+	// H7: si el step tiene bloque validator, dejamos el step done pero NO
+	// avanzamos — spawneamos el validator en su proximo loop.
+	// handleValidatorDone (al recibir validatorDoneMsg) decide si el step
+	// se considera validado (ok → siguiente step) o si necesita re-correr
+	// (fail + loops < max). El step queda en status done en el manifest
+	// hasta que el loop se resuelva (es lo que el doc fija — el
+	// subprocess del step si termino, lo que sigue es la auditoria).
+	//
+	// IMPORTANTE: el ValidatorRun se inicializa SOLO la primera vez (cuando
+	// es nil). En las re-vueltas del step (rerunStepWithFeedback) volvemos
+	// aca con el mismo ValidatorRun ya poblado — startValidator incrementa
+	// LoopsRun para reflejar la nueva vuelta. Si reseteasemos el bloque
+	// aca, el contador nunca avanzaria y el loop seria infinito.
+	pipelineStep := m.Pipeline.Steps[idx]
+	if pipelineStep.Validator != nil {
+		if m.Steps[idx].Validator == nil {
+			m.Steps[idx].Validator = newValidatorRun(pipelineStep)
+		}
+		_ = writeManifest(m.RunDir, manifestRunningSnapshot(m, msg.StartedAt))
+		return startValidator(m, idx, msg.Stdout)
+	}
+
+	return m.advanceAfterValidator(idx, msg.StartedAt)
+}
+
+// advanceAfterValidator es el path comun de "step OK, listo para avanzar".
+// Lo invoca handleStepDone cuando el step no tiene validator y
+// handleValidatorDone (o resolvePauseChoice) cuando el validator termino
+// con ok / human-override / fail-but-continued. fallbackStart es el
+// timestamp del primer step.StartedAt (para el header del manifest).
+func (m RunModel) advanceAfterValidator(idx int, fallbackStart time.Time) (RunModel, tea.Cmd) {
 	nextIdx := idx + 1
 	if nextIdx < len(m.Pipeline.Steps) {
 		// Persistimos el manifest "en progreso" con el step recien cerrado
 		// + los pendientes intactos antes de spawnear el proximo. Asi un
 		// crash entre dos steps deja el manifest reflejando lo real.
-		_ = writeManifest(m.RunDir, manifestRunningSnapshot(m, msg.StartedAt))
+		_ = writeManifest(m.RunDir, manifestRunningSnapshot(m, fallbackStart))
 		return startStep(m, nextIdx)
 	}
 
 	// Ultimo step done → cerrar manifest done + transicionar a R4.
-	_ = closeManifest(m.RunDir, baseManifestForRun(m, msg.StartedAt), ManifestStatusDone, m.Steps)
+	_ = closeManifest(m.RunDir, baseManifestForRun(m, fallbackStart), ManifestStatusDone, m.Steps)
 	m.Screen = ScreenDone
 	return m, nil
+}
+
+// newValidatorRun arma el ValidatorRun inicial al detectar que el step
+// declaro validator. MaxLoops cae a 1 si el yaml no lo define (defensive
+// — el wizard fuerza 1..5 con default 3 pero un yaml editado a mano
+// podria omitir el campo). OnMaxLoops cae a "fail" por el mismo motivo.
+func newValidatorRun(step wizard.Step) *ValidatorRun {
+	max := step.MaxLoops
+	if max <= 0 {
+		max = 1
+	}
+	on := step.OnMaxLoops
+	if on == "" {
+		on = wizard.OnMaxLoopsFail
+	}
+	return &ValidatorRun{
+		CLI:        step.Validator.CLI,
+		MaxLoops:   max,
+		OnMaxLoops: on,
+	}
+}
+
+// startValidator dispara el subprocess del validator del step idx (0-based)
+// con stepStdout como input (criterio del doc: "spawn validator con el
+// output del step + un preambulo que pide bloque YAML verdict"). Marca
+// ValidatorActive=true (el render muestra "loop K/max" en el row del step)
+// y devuelve el (model, cmd) listo para que el program drene el lineCh
+// hasta el validatorDoneMsg.
+func startValidator(m RunModel, idx int, stepStdout string) (RunModel, tea.Cmd) {
+	step := m.Pipeline.Steps[idx]
+	if step.Validator == nil || m.Steps[idx].Validator == nil {
+		// Defensive: handleStepDone deberia haberlo prevenido. Si llega
+		// igual, caemos al advance "limpio".
+		return m.advanceAfterValidator(idx, m.Steps[idx].StartedAt)
+	}
+	m.Steps[idx].Validator.LoopsRun++
+	loop := m.Steps[idx].Validator.LoopsRun
+
+	m.Active = idx
+	m.LogFocus = idx
+	m.ValidatorActive = true
+
+	m.runState = &runState{requestCancel: make(chan struct{}, 1)}
+	cmd := runValidator(step, stepStdout, m.RunDir, idx+1, loop, m.runState)
+	return m, cmd
+}
+
+// handleValidatorDone procesa el msg de fin del subprocess del validator.
+// Escribe el verdict.yaml + actualiza el ValidatorRun del step, y decide
+// la siguiente transicion segun verdict.Status + on_max_loops:
+//
+//   - verdict ok                              → final_verdict=ok, advanceAfterValidator.
+//   - verdict fail + loops < max              → re-spawn del step con feedback.
+//   - hit max + on_max_loops=fail             → final_verdict=fail, RF.
+//   - hit max + on_max_loops=continue         → final_verdict=fail-but-continued, advance.
+//   - hit max + on_max_loops=pause            → modal RP, espera decision humana.
+func (m RunModel) handleValidatorDone(msg validatorDoneMsg) (tea.Model, tea.Cmd) {
+	idx := msg.StepIdx - 1
+	if idx < 0 || idx >= len(m.Steps) {
+		return m, nil
+	}
+	if m.Steps[idx].Validator == nil {
+		// Defensive: ValidatorRun deberia existir si llegamos aca.
+		return m.advanceAfterValidator(idx, m.Steps[idx].StartedAt)
+	}
+
+	m.ValidatorActive = false
+	m.runState = nil
+
+	// Persistir verdict.yaml + actualizar feedback en el ValidatorRun.
+	_ = writeVerdict(m.RunDir, VerdictRecord{
+		StepIdx:   msg.StepIdx,
+		Loop:      msg.Loop,
+		Verdict:   msg.Verdict.Status,
+		Feedback:  msg.Verdict.Feedback,
+		RawStdout: truncateForRecord(msg.RawStdout),
+	})
+	m.Steps[idx].Validator.LastFeedback = msg.Verdict.Feedback
+
+	if msg.Verdict.Status == VerdictOk {
+		m.Steps[idx].Validator.FinalVerdict = FinalVerdictOk
+		return m.advanceAfterValidator(idx, m.Steps[idx].StartedAt)
+	}
+
+	// verdict: fail.
+	val := m.Steps[idx].Validator
+	if val.LoopsRun < val.MaxLoops {
+		// Retry: re-correr EL STEP (no el validator) con el feedback como
+		// contexto extra. El loop counter no se resetea — la siguiente
+		// vuelta del step incrementa al validator.LoopsRun via
+		// startValidator.
+		return rerunStepWithFeedback(m, idx)
+	}
+
+	// Hit max_loops — decidir segun on_max_loops.
+	switch val.OnMaxLoops {
+	case wizard.OnMaxLoopsContinue:
+		val.FinalVerdict = FinalVerdictFailButContinued
+		return m.advanceAfterValidator(idx, m.Steps[idx].StartedAt)
+	case wizard.OnMaxLoopsPause:
+		// Modal RP — espera decision humana. NO escribimos manifest
+		// terminal aca: resolvePauseChoice se encarga segun la opcion.
+		m.PauseModal = &PauseState{
+			StepIdx:      idx,
+			LastFeedback: val.LastFeedback,
+			Choice:       PauseChoiceContinue,
+		}
+		_ = writeManifest(m.RunDir, manifestRunningSnapshot(m, m.Steps[idx].StartedAt))
+		return m, nil
+	default:
+		// fail (default + valor desconocido — defensive).
+		val.FinalVerdict = FinalVerdictFail
+		m.Steps[idx].Status = StepStatusFailed
+		m.FailedStderr = "validator agoto max_loops · " + val.LastFeedback
+		_ = closeManifest(m.RunDir, baseManifestForRun(m, m.Steps[idx].StartedAt), ManifestStatusFailed, m.Steps[:idx+1])
+		m.Screen = ScreenFailed
+		return m, nil
+	}
+}
+
+// rerunStepWithFeedback re-spawnea el step idx (0-based) con el ultimo
+// feedback del validator appendeado al payload original. El payload original
+// se re-resuelve con resolvePayloadForStep (mismo path que la primera vuelta
+// — para step 0 viene de R1, para step ≥ 1 viene de previous_output).
+//
+// El status del step vuelve a "running" + StartedAt se re-setea (auditoria:
+// la duracion final reflejara la ULTIMA vuelta exitosa, no la suma de todas
+// — el doc lo deja explicito como criterio v1). El ring buffer se limpia
+// para que el log pane muestre solo el output de la nueva vuelta.
+func rerunStepWithFeedback(m RunModel, idx int) (RunModel, tea.Cmd) {
+	step := m.Pipeline.Steps[idx]
+	basePayload, perr := resolvePayloadForStep(m, idx)
+	if perr != nil {
+		// Mismo manejo que startStep: sin payload no podemos arrancar.
+		m.Steps[idx].Status = StepStatusFailed
+		m.Steps[idx].FinishedAt = time.Now()
+		m.Steps[idx].SpawnError = perr.Error()
+		_ = closeManifest(m.RunDir, baseManifestForRun(m, m.Steps[idx].StartedAt), ManifestStatusFailed, m.Steps[:idx+1])
+		m.Screen = ScreenFailed
+		m.FailedStderr = perr.Error()
+		return m, nil
+	}
+
+	feedback := ""
+	if m.Steps[idx].Validator != nil {
+		feedback = m.Steps[idx].Validator.LastFeedback
+	}
+	payload := mergeFeedbackIntoPayload(basePayload, feedback)
+
+	m.Active = idx
+	m.LogFocus = idx
+	m.StickyBottom = true
+	m.LogScrollOffset = 0
+	if idx < len(m.LogBuffers) && m.LogBuffers[idx] != nil {
+		m.LogBuffers[idx].Clear()
+	}
+	m.Steps[idx].Status = StepStatusRunning
+	m.Steps[idx].StartedAt = time.Now()
+	m.Steps[idx].FinishedAt = time.Time{}
+	m.Steps[idx].ExitCode = 0
+	m.Steps[idx].SpawnError = ""
+
+	m.runState = &runState{requestCancel: make(chan struct{}, 1)}
+	cmd := runStep(step, payload, m.RunDir, idx+1, m.runState)
+	return m, cmd
+}
+
+// mergeFeedbackIntoPayload prependea un bloque "FEEDBACK del validator" al
+// payload original para que el modelo del step lo consuma como contexto
+// extra al re-correr. Si no hay feedback, devuelve el payload tal cual.
+func mergeFeedbackIntoPayload(payload, feedback string) string {
+	feedback = strings.TrimSpace(feedback)
+	if feedback == "" {
+		return payload
+	}
+	var b strings.Builder
+	b.WriteString("--- FEEDBACK del validator (intenta corregir esto): ---\n")
+	b.WriteString(feedback)
+	b.WriteString("\n--- FIN FEEDBACK ---\n\n")
+	b.WriteString(payload)
+	return b.String()
 }
 
 // baseManifestForRun arma el header del manifest con los campos que no
@@ -451,6 +677,7 @@ func manifestRunningSnapshot(m RunModel, fallbackStart time.Time) Manifest {
 			StartedAt:  s.StartedAt,
 			FinishedAt: s.FinishedAt,
 			Error:      s.SpawnError,
+			Validator:  manifestValidatorFromRun(s.Validator),
 		})
 	}
 	return mf
@@ -489,13 +716,19 @@ func (m RunModel) viewRunning() string {
 	b.WriteString("\n\n")
 
 	// Steps tracker — un row por step del pipeline. Marcamos el activo
-	// con icono segun status.
+	// con icono segun status. Cuando el validator del step activo esta
+	// corriendo (H7), el row appendea " · loop K/max".
 	for i, step := range m.Pipeline.Steps {
 		var run StepRun
 		if i < len(m.Steps) {
 			run = m.Steps[i]
 		}
-		b.WriteString(renderStepRow(i+1, step, run, i == m.Active))
+		row := renderStepRow(i+1, step, run, i == m.Active)
+		if i == m.Active && m.ValidatorActive && run.Validator != nil {
+			row += dimStyle.Render(fmt.Sprintf("  · loop %d/%d",
+				run.Validator.LoopsRun, run.Validator.MaxLoops))
+		}
+		b.WriteString(row)
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
@@ -515,6 +748,11 @@ func (m RunModel) viewRunning() string {
 	if m.CancelModal {
 		b.WriteString("\n")
 		b.WriteString(viewCancelModal(m))
+		b.WriteString("\n")
+	}
+	if m.PauseModal != nil {
+		b.WriteString("\n")
+		b.WriteString(viewPauseModal(m))
 		b.WriteString("\n")
 	}
 	return b.String()
