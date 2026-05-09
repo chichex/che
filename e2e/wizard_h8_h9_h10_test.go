@@ -149,7 +149,7 @@ EOF`)
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter S4→menu: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -201,7 +201,7 @@ func TestWizard_S3H8EditorInvalidYAML(t *testing.T) {
 		t.Fatalf("send 1: %v", err)
 	}
 	mark = p.Mark()
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {

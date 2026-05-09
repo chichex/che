@@ -25,7 +25,7 @@ func (m model) updateSaved(key tea.KeyMsg) (model, tea.Cmd) {
 // queremos competir visualmente con el menu al que vuelve.
 func (m model) viewSaved() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Pipeline guardado"))
+	b.WriteString(breadcrumb("Create pipeline", "Pipeline guardado"))
 	b.WriteString("\n\n")
 	b.WriteString(mutedItem.Render(m.pipeline.Name))
 	b.WriteString("\n")

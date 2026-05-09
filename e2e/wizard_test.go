@@ -98,7 +98,7 @@ func TestWizard_S1PersistsDraft(t *testing.T) {
 	if err := p.Send("1"); err != nil {
 		t.Fatalf("send 1: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 
@@ -176,21 +176,14 @@ func TestWizard_S1Collision(t *testing.T) {
 		t.Errorf("pre-existing file got mutated:\n%s", got)
 	}
 
-	// Salir via SC keep (sin path, no toca disco).
+	// Salir directo via esc en S1 sin path — el modal SC no aparece
+	// (nada que guardar, nada que descartar) y caemos directo al menu.
 	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
-		t.Fatalf("SC modal never opened\n%s", p.Since(mark))
-	}
-	if err := p.Send("1"); err != nil {
-		t.Fatalf("send 1: %v", err)
-	}
-
-	mark = p.Mark()
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
-		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered after S1 esc\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
 		t.Fatalf("send q: %v", err)
@@ -270,7 +263,7 @@ func TestWizard_S1DiscardRemovesDraft(t *testing.T) {
 	}
 
 	mark = p.Mark()
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		// best-effort: si el menu no rerenders en este wait, igual el
 		// proceso debe terminar al mandar q
 	}
@@ -359,7 +352,7 @@ func TestWizard_S2H3CreateFirstStep(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered after enter\n%s", p.Since(mark))
 	}
 
@@ -497,7 +490,7 @@ func TestWizard_S2H4ValidatorOn(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 
@@ -597,7 +590,7 @@ func TestWizard_S2H4ValidatorOff(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 
@@ -724,7 +717,7 @@ func TestWizard_S2H5LoopTwoSteps(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 
@@ -859,7 +852,7 @@ func TestWizard_S2H5BackFromStep2(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 
@@ -963,7 +956,7 @@ func TestWizard_S2H3BackToInfo(t *testing.T) {
 	if err := p.Send("1"); err != nil {
 		t.Fatalf("send 1: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered after keep\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -1189,7 +1182,7 @@ func TestWizard_S2YAMLCombinations(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 
@@ -1409,7 +1402,7 @@ func TestWizard_S3SummarySavesReady(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter (S4→menu): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered after S4\n%s", p.Since(mark))
 	}
 
@@ -1565,7 +1558,7 @@ func TestWizard_S3InvalidStays(t *testing.T) {
 	if err := p.Send("1"); err != nil {
 		t.Fatalf("send 1 (keep): %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered after keep\n%s", p.Since(mark))
 	}
 
@@ -1644,7 +1637,7 @@ func TestWizard_S3EscNoChangesExitsDirect(t *testing.T) {
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered after esc\n%s", p.Since(mark))
 	}
 	if strings.Contains(p.Since(mark), "Salir del wizard") {
@@ -1850,7 +1843,7 @@ func TestWizard_S3H7EditStep(t *testing.T) {
 		t.Fatalf("send 1: %v", err)
 	}
 	mark = p.Mark()
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -1937,7 +1930,7 @@ func TestWizard_S3H7DeleteStep(t *testing.T) {
 		t.Fatalf("send 1: %v", err)
 	}
 	mark = p.Mark()
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -2029,7 +2022,7 @@ func TestWizard_S3H7ReorderStep(t *testing.T) {
 		t.Fatalf("send 1: %v", err)
 	}
 	mark = p.Mark()
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -2122,7 +2115,7 @@ func TestWizard_S3H7AppendStep(t *testing.T) {
 		t.Fatalf("send 1: %v", err)
 	}
 	mark = p.Mark()
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
@@ -2294,7 +2287,7 @@ func TestWizard_S3H7DeleteBreaksPrevDep(t *testing.T) {
 		t.Fatalf("send 1: %v", err)
 	}
 	mark = p.Mark()
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
 		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {

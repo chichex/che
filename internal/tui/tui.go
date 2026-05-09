@@ -19,6 +19,7 @@ type Action string
 const (
 	ActionMyPipelines    Action = "my-pipelines"
 	ActionCreatePipeline Action = "create-pipeline"
+	ActionAIGen          Action = "ai-gen"
 	ActionSeeSkills      Action = "see-skills"
 	ActionExit           Action = "exit"
 )
@@ -32,7 +33,8 @@ type item struct {
 var menu = []item{
 	{digit: "1", label: "My pipelines", action: ActionMyPipelines},
 	{digit: "2", label: "Create pipeline", action: ActionCreatePipeline},
-	{digit: "3", label: "See skills", action: ActionSeeSkills},
+	{digit: "3", label: "Crear pipeline con IA", action: ActionAIGen},
+	{digit: "4", label: "See skills", action: ActionSeeSkills},
 	{digit: "0", label: "Exit", action: ActionExit},
 }
 
@@ -83,12 +85,32 @@ var (
 	cursorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF79C6")).Bold(true)
 	itemStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#F8F8F2"))
 	digitStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4"))
+	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4"))
 	hintStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4")).Italic(true)
 )
 
+// breadcrumb arma el header "che › ... › <pantalla>" para el View() de
+// cada screen del paquete tui (home menu + see skills). El ultimo
+// segmento se renderea en titleStyle (cyan bold dracula); los previos +
+// separadores van en dimStyle (gris dracula) para que el usuario perciba
+// "donde esta" sin perder el resto del path. parts NO incluye el root
+// "che" — lo prependeamos aca.
+func breadcrumb(parts ...string) string {
+	all := append([]string{"che"}, parts...)
+	if len(all) == 1 {
+		return titleStyle.Render(all[0])
+	}
+	sep := dimStyle.Render(" › ")
+	prefix := make([]string, 0, len(all)-1)
+	for _, p := range all[:len(all)-1] {
+		prefix = append(prefix, dimStyle.Render(p))
+	}
+	return strings.Join(prefix, sep) + sep + titleStyle.Render(all[len(all)-1])
+}
+
 func (m model) View() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("che") + "\n\n")
+	b.WriteString(breadcrumb() + "\n\n")
 	for i, it := range menu {
 		if i == m.cursor {
 			b.WriteString(cursorStyle.Render("> "+it.digit+". "+it.label) + "\n")
@@ -96,7 +118,7 @@ func (m model) View() string {
 		}
 		b.WriteString("  " + digitStyle.Render(it.digit+".") + " " + itemStyle.Render(it.label) + "\n")
 	}
-	b.WriteString("\n" + hintStyle.Render("↑/↓ navigate · enter select · 0-3 jump · q quit") + "\n")
+	b.WriteString("\n" + hintStyle.Render("↑/↓ navigate · enter select · 0-4 jump · q quit") + "\n")
 	return b.String()
 }
 
@@ -104,7 +126,7 @@ func (m model) View() string {
 // si el usuario salio (ctrl+c, q, esc, o item 0). El error solo aparece si
 // bubbletea no pudo arrancar (p.ej. stdout no es TTY).
 func Run() (Action, error) {
-	final, err := tea.NewProgram(model{}).Run()
+	final, err := tea.NewProgram(model{}, tea.WithAltScreen()).Run()
 	if err != nil {
 		return ActionExit, err
 	}

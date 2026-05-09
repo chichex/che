@@ -162,7 +162,6 @@ func (m skillsModel) back() skillsModel {
 }
 
 var (
-	skillsTitleStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#00D7FF"))
 	skillsCursorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF79C6")).Bold(true)
 	skillsItemStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#F8F8F2"))
 	skillsMutedStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4"))
@@ -188,7 +187,7 @@ func (m skillsModel) View() string {
 
 func (m skillsModel) viewCLIs() string {
 	var b strings.Builder
-	b.WriteString(skillsTitleStyle.Render("Skills") + "\n")
+	b.WriteString(breadcrumb("See skills") + "\n")
 	b.WriteString(skillsMutedStyle.Render("Skills detected across the CLIs che orchestrates.") + "\n\n")
 
 	for i, c := range m.clis {
@@ -213,7 +212,7 @@ func (m skillsModel) viewCLIs() string {
 func (m skillsModel) viewSkills() string {
 	c := m.clis[m.cliIdx]
 	var b strings.Builder
-	b.WriteString(skillsTitleStyle.Render("Skills · "+c.Name) + "\n")
+	b.WriteString(breadcrumb("See skills", c.Name) + "\n")
 	b.WriteString(skillsMutedStyle.Render(c.BinPath) + "\n\n")
 
 	if len(c.Skills) == 0 {
@@ -245,7 +244,7 @@ func (m skillsModel) viewDetail() string {
 	c := m.clis[m.cliIdx]
 	s := c.Skills[m.cursor]
 	var b strings.Builder
-	b.WriteString(skillsTitleStyle.Render("Skill · "+c.Name+" · "+s.Name) + "\n\n")
+	b.WriteString(breadcrumb("See skills", c.Name, s.Name) + "\n\n")
 	b.WriteString(skillsHeaderStyle.Render("Scope") + "        " + scopeBadge(s.Scope) + "\n")
 	b.WriteString(skillsHeaderStyle.Render("Source") + "       " + skillsMutedStyle.Render(s.Source) + "\n\n")
 	if s.Description != "" {
@@ -314,7 +313,7 @@ func truncate(s string, n int) string {
 // menu principal. El error solo aparece si bubbletea no pudo arrancar.
 func RunSkills(cwd string) (bool, error) {
 	clis := skills.Detect(cwd)
-	final, err := tea.NewProgram(skillsModel{clis: clis}).Run()
+	final, err := tea.NewProgram(skillsModel{clis: clis}, tea.WithAltScreen()).Run()
 	if err != nil {
 		return false, err
 	}

@@ -21,6 +21,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleEditorReturn(em)
 	}
 
+	if ws, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width = ws.Width
+		return m, nil
+	}
+
+	if pr, ok := msg.(promptReviewMsg); ok {
+		// Solo aplicar si seguimos en el modal — si el usuario lo cancelo
+		// con esc mientras claude corria, ignoramos el resultado tardio.
+		if m.screen == ScreenStepReview {
+			mm, cmd := m.handlePromptReviewResult(pr)
+			return mm, cmd
+		}
+		return m, nil
+	}
+
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
@@ -31,6 +46,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateInfo(key)
 	case ScreenStep:
 		return m.updateStep(key)
+	case ScreenStepReview:
+		return m.updateStepReview(key)
 	case ScreenSummary:
 		return m.updateSummary(key)
 	case ScreenSaved:
@@ -54,6 +71,8 @@ func (m model) View() string {
 		return m.viewInfo()
 	case ScreenStep:
 		return m.viewStep()
+	case ScreenStepReview:
+		return m.viewStepReview()
 	case ScreenSummary:
 		return m.viewSummary()
 	case ScreenSaved:
@@ -100,7 +119,7 @@ func runWithHome(home string) (bool, error) {
 // del modelo final. Lo usan Run / RunResume / RunEditReady para no duplicar
 // la logica del cast + fallback.
 func runProgram(m model) (bool, error) {
-	final, err := tea.NewProgram(m).Run()
+	final, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if err != nil {
 		return false, err
 	}

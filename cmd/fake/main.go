@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -27,17 +28,17 @@ import (
 )
 
 type matcher struct {
-	ID            string            `json:"id"`
-	ArgsRegex     string            `json:"args_regex,omitempty"`
-	StdinContains string            `json:"stdin_contains,omitempty"`
-	Consume       bool              `json:"consume,omitempty"`
-	CaptureStdin  bool              `json:"capture_stdin,omitempty"`
-	Stdout        string            `json:"stdout,omitempty"`
-	StdoutFile    string            `json:"stdout_file,omitempty"`
-	Stderr        string            `json:"stderr,omitempty"`
-	Exit          int               `json:"exit,omitempty"`
-	Passthrough   bool              `json:"passthrough,omitempty"` // reserved for git passthrough mode
-	PassthroughTo string            `json:"passthrough_to,omitempty"`
+	ID            string `json:"id"`
+	ArgsRegex     string `json:"args_regex,omitempty"`
+	StdinContains string `json:"stdin_contains,omitempty"`
+	Consume       bool   `json:"consume,omitempty"`
+	CaptureStdin  bool   `json:"capture_stdin,omitempty"`
+	Stdout        string `json:"stdout,omitempty"`
+	StdoutFile    string `json:"stdout_file,omitempty"`
+	Stderr        string `json:"stderr,omitempty"`
+	Exit          int    `json:"exit,omitempty"`
+	Passthrough   bool   `json:"passthrough,omitempty"` // reserved for git passthrough mode
+	PassthroughTo string `json:"passthrough_to,omitempty"`
 	// TouchFiles lista paths (relativos al cwd donde se ejecutó el fake) que
 	// el fake debe crear con el contenido dado al matchear. Usado por tests
 	// de execute para simular que el agente modificó archivos en el worktree.
@@ -47,6 +48,37 @@ type matcher struct {
 	// simular un agente que tarda (el parent manda SIGTERM y el default
 	// handler de Go termina el proceso, interrumpiendo el sleep).
 	BlockSeconds int `json:"block_seconds,omitempty"`
+	// Stream lista items que el fake emite en orden, cada uno a un stream
+	// (stdout/stderr) con un delay opcional entre items. Usado por los
+	// tests de H5 (streaming): permite simular un CLI que va emitiendo
+	// lineas con sleeps cortos, intercalar stderr+stdout, o enviar lineas
+	// > 64 KiB para validar el buffer del scanner. Si Stream esta poblado,
+	// el matcher lo emite y luego ignora Stdout / Stderr "estaticos" del
+	// matcher (TouchFiles / BlockSeconds / Exit siguen aplicando despues).
+	Stream []StreamItem `json:"stream,omitempty"`
+	// IgnoreSigterm hace que el fake instale un signal.Notify sobre SIGTERM
+	// y descarte la senal: equivalente a `trap '' TERM` en bash. Usado por
+	// el test de H9 que valida la escalada SIGTERM → SIGKILL: con
+	// IgnoreSigterm + BlockSeconds 10, el parent manda SIGTERM, el fake lo
+	// ignora, y el parent debe escalar a SIGKILL al pgid tras CHE_KILL_GRACE.
+	// El handler se instala ANTES de cualquier sleep para evitar la race
+	// "signal arrives before handler installed".
+	IgnoreSigterm bool `json:"ignore_sigterm,omitempty"`
+}
+
+// StreamItem es una entrada del Stream del matcher. Sirve para los tests
+// que validan streaming de H5: cada item se escribe a stdout o stderr,
+// flusheado, con un delay opcional antes (FlushSync evita que el parent
+// scanner espere al EOF para ver la linea).
+type StreamItem struct {
+	// Stream indica el destino: "stdout" (default) o "stderr".
+	Stream string `json:"stream,omitempty"`
+	// Text es la linea a emitir. El fake appendea "\n" automaticamente
+	// (el caller no debe incluirlo).
+	Text string `json:"text"`
+	// DelayMs es el sleep ANTES de emitir esta linea. Usado para simular
+	// un CLI que tarda entre eventos del stream.
+	DelayMs int `json:"delay_ms,omitempty"`
 }
 
 type script struct {
@@ -166,6 +198,22 @@ func main() {
 		_ = os.WriteFile(relPath, []byte(content), 0o644)
 	}
 
+	// Stream items: se emiten en orden, cada uno con su delay y su stream
+	// destino. Sirve para los tests de H5 (streaming linea por linea).
+	// Si Stream esta poblado, el Stdout/Stderr "estaticos" igual se
+	// emiten DESPUES (caso comun: header estatico + body streamed).
+	for _, item := range matched.Stream {
+		if item.DelayMs > 0 {
+			time.Sleep(time.Duration(item.DelayMs) * time.Millisecond)
+		}
+		dst := os.Stdout
+		if item.Stream == "stderr" {
+			dst = os.Stderr
+		}
+		_, _ = io.WriteString(dst, item.Text+"\n")
+		_ = dst.Sync()
+	}
+
 	_, _ = io.WriteString(os.Stdout, stdoutBody)
 	_, _ = io.WriteString(os.Stderr, matched.Stderr)
 	// Flush explícito: si el matcher bloquea después, el parent necesita
@@ -187,10 +235,26 @@ func main() {
 		DurationMs: time.Since(start).Milliseconds(),
 	})
 
+	if matched.IgnoreSigterm {
+		// Instalar handler antes del sleep para que SIGTERM no termine
+		// el proceso. signal.Notify con buffer 1 + drenado en goroutine
+		// "consume y olvida" — es lo mas cercano a `trap '' TERM` en Go.
+		// El parent debera escalar a SIGKILL para que el fake muera.
+		ch := make(chan os.Signal, 1)
+		signal.Notify(ch, syscall.SIGTERM)
+		go func() {
+			for range ch {
+				// no-op — descartamos la senal a proposito.
+			}
+		}()
+	}
+
 	if matched.BlockSeconds > 0 {
 		// Sleep interruptible: el handler default de Go para
 		// SIGTERM/SIGINT termina el proceso, así que el bloqueo se corta
-		// apenas el parent mata el pgid.
+		// apenas el parent mata el pgid. Cuando IgnoreSigterm=true el
+		// handler instalado arriba se queda con la senal y el sleep
+		// completa hasta el final (o hasta que el parent escale a SIGKILL).
 		time.Sleep(time.Duration(matched.BlockSeconds) * time.Second)
 	}
 

@@ -2,6 +2,7 @@ package wizard
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -411,22 +412,29 @@ func (m model) stepHandleContentKey(key tea.KeyMsg) (model, tea.Cmd) {
 // literal "ignora cambios" del spec encerraba al usuario en previous_output
 // sin un atajo de salida (la unica via era editar el step desde S3, que
 // todavia no existe).
+//
+// Excepcion: las opciones cubiertas por inputDisabled (hoy pr/issue cuando
+// el cwd no esta dentro de un repo de github) se saltan en navegacion
+// ←/→/h/l y se rechazan al hacer 1-9. Sin esto el cursor podria aterrizar
+// en una pill que el runner no puede ofrecer (el preflight ya bloquea, pero
+// es preferible que la senal aparezca temprano en el wizard).
 func (m model) stepHandleInputKey(key tea.KeyMsg) (model, tea.Cmd) {
 	options := inputsForStepIdx(m.stepEdit.idx)
 	switch key.String() {
 	case "left", "h":
-		m.stepEdit.input = stepNeighbor(options, m.stepEdit.input, -1)
+		m.stepEdit.input = stepNeighborSkipDisabled(options, m.stepEdit.input, -1)
 		m.stepEdit.errMsg = ""
 		return m, nil
 	case "right", "l":
-		m.stepEdit.input = stepNeighbor(options, m.stepEdit.input, +1)
+		m.stepEdit.input = stepNeighborSkipDisabled(options, m.stepEdit.input, +1)
 		m.stepEdit.errMsg = ""
 		return m, nil
 	}
-	// digito 1..N: jump directo
+	// digito 1..N: jump directo. Si la opcion esta disabled (pr/issue sin
+	// repo) el jump es no-op — coherente con el cyclado que la salta.
 	if key.String() >= "1" && key.String() <= "9" {
 		idx := int(key.String()[0] - '1')
-		if idx >= 0 && idx < len(options) {
+		if idx >= 0 && idx < len(options) && !inputDisabled(options[idx]) {
 			m.stepEdit.input = options[idx]
 			m.stepEdit.errMsg = ""
 		}
@@ -647,11 +655,24 @@ func (m model) stepBack() (model, tea.Cmd) {
 	return m.enterSummary()
 }
 
-// stepSaveAndAddAnother: ctrl+n en S2 mode=create. Valida el step actual,
-// lo pushea a pipeline.Steps, persiste con status.step_idx avanzado y
-// reabre S2 vacio para step idx+1. mode=edit no expone ctrl+n — H7
-// agregara "+ nuevo step al final" desde S3.
+// stepSaveAndAddAnother: ctrl+n en S2 mode=create. Si kind=prompt + content
+// no vacio, primero dispara la review automatica con claude (modal
+// ScreenStepReview). El skip de review (con o sin sugerencia aplicada)
+// llama a stepSaveAndAddAnotherSkippingReview directamente.
 func (m model) stepSaveAndAddAnother() (model, tea.Cmd) {
+	if m.stepEdit.mode != "create" {
+		return m, nil
+	}
+	if shouldRunPromptReview(m) {
+		return m.startPromptReview("addanother")
+	}
+	return m.stepSaveAndAddAnotherSkippingReview()
+}
+
+// stepSaveAndAddAnotherSkippingReview es el path original (pre-review):
+// build + save + enterStepCreate del siguiente. El modal de review llama
+// aca despues de aplicar (o no) la sugerencia.
+func (m model) stepSaveAndAddAnotherSkippingReview() (model, tea.Cmd) {
 	if m.stepEdit.mode != "create" {
 		return m, nil
 	}
@@ -679,14 +700,46 @@ func (m model) stepSaveAndAddAnother() (model, tea.Cmd) {
 	return m.enterStepCreate(m.stepEdit.idx + 1)
 }
 
-// stepSaveAndFinish: ctrl+s en S2.
-//
-// Valida el step actual; si pasa lo pushea (mode=create) o lo reemplaza
-// (mode=edit) en pipeline.Steps, persiste con stage=step, y transiciona
-// a S3 (enterSummary) que ya re-persiste con stage=summary. La doble
-// escritura en quick succession es intencional: si enterSummary falla por
-// algun motivo el archivo en disco refleja el step recien guardado.
+// stepSaveAndFinish: ctrl+s en S2 (y SaveFinish del modal de save choice).
+// Si kind=prompt + content no vacio, dispara la review automatica con
+// claude (modal ScreenStepReview). La aprobacion del modal (con o sin
+// sugerencia aplicada) llama stepSaveAndFinishSkippingReview directamente.
 func (m model) stepSaveAndFinish() (model, tea.Cmd) {
+	if shouldRunPromptReview(m) {
+		return m.startPromptReview("finish")
+	}
+	return m.stepSaveAndFinishSkippingReview()
+}
+
+// shouldRunPromptReview reporta si el step actual amerita pasar por la
+// review automatica de prompt: kind=prompt, content no-blank, y todavia
+// no estamos volviendo del modal (pendingSaveAction vacio). Si el usuario
+// abrio el modal y ya decidio (guardar igual / aplicar sugerencia), saltea
+// para no entrar en loop.
+//
+// CHE_DISABLE_PROMPT_REVIEW=1 desactiva el feature entero — lo usa el
+// harness e2e (claude esta fakeado y no tiene matcher para la review;
+// pedir uno por cada test seria ruido). En produccion no esta seteado.
+func shouldRunPromptReview(m model) bool {
+	if os.Getenv("CHE_DISABLE_PROMPT_REVIEW") == "1" {
+		return false
+	}
+	if m.stepEdit.kind != KindPrompt {
+		return false
+	}
+	if strings.TrimSpace(m.stepEdit.contentInput.Value()) == "" {
+		return false
+	}
+	if m.stepEdit.pendingSaveAction != "" {
+		return false
+	}
+	return true
+}
+
+// stepSaveAndFinishSkippingReview es el path original (pre-review): valida,
+// pushea/reemplaza el step en pipeline.Steps, persiste con stage=step y
+// transiciona a S3. El modal de review llama aca despues de aprobar.
+func (m model) stepSaveAndFinishSkippingReview() (model, tea.Cmd) {
 	step, err := m.buildStep()
 	if err != nil {
 		m.stepEdit.errMsg = err.Error()
@@ -776,6 +829,14 @@ func (m model) buildStep() (Step, error) {
 	allowed := inputsForStepIdx(m.stepEdit.idx)
 	if !contains(allowed, in) {
 		return Step{}, fmt.Errorf("input %q no es valido para el step %d", in, m.stepEdit.idx+1)
+	}
+	// Coherencia con el render disabled: si el contexto no soporta pr/issue
+	// (sin repo de github en el cwd), rechazamos el guardado con un hint
+	// claro. El cyclado ya salta esas opciones, asi que llegar aca implica
+	// que el wizard arranco con repo y se "perdio" antes del save (raro,
+	// pero la red defensiva lo cubre).
+	if inputDisabled(in) {
+		return Step{}, fmt.Errorf("input %q requiere un repo de github en el cwd", in)
 	}
 
 	step := Step{
@@ -972,6 +1033,41 @@ func (m *model) stepIsLastFocus() bool {
 	return m.stepEdit.focus == order[len(order)-1]
 }
 
+// stepNeighborSkipDisabled es como stepNeighbor pero salta las opciones
+// reportadas por inputDisabled. Si todas las opciones estan disabled (caso
+// patologico — text/file/url/none nunca lo estan), devuelve current sin
+// tocar para no entrar en loop.
+func stepNeighborSkipDisabled(options []string, current string, delta int) string {
+	if len(options) == 0 {
+		return current
+	}
+	idx := -1
+	for i, o := range options {
+		if o == current {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		// current desaparecio de la lista; arrancar en el primer enabled.
+		for i, o := range options {
+			if !inputDisabled(o) {
+				return options[i]
+			}
+		}
+		return options[0]
+	}
+	n := len(options)
+	for step := 1; step <= n; step++ {
+		next := options[((idx+delta*step)%n+n)%n]
+		if !inputDisabled(next) {
+			return next
+		}
+	}
+	// Todas disabled — no cambiar.
+	return current
+}
+
 // stepNeighbor devuelve el elemento adyacente (con wrap) en una lista.
 func stepNeighbor(options []string, current string, delta int) string {
 	if len(options) == 0 {
@@ -1017,8 +1113,8 @@ func neighborInt(options []int, current, delta int) int {
 // viewStep renderiza S2.
 func (m model) viewStep() string {
 	var b strings.Builder
-	title := fmt.Sprintf("Create pipeline · paso 2/3 · step %d (%s)", m.stepEdit.idx+1, m.stepEdit.mode)
-	b.WriteString(titleStyle.Render(title))
+	last := fmt.Sprintf("paso 2/3 · step %d (%s)", m.stepEdit.idx+1, m.stepEdit.mode)
+	b.WriteString(breadcrumb("Create pipeline", last))
 	b.WriteString("\n")
 	if name := m.pipeline.Name; name != "" {
 		// Linea de contexto: "Pipeline: <name>" dimmed para que el usuario
@@ -1031,7 +1127,7 @@ func (m model) viewStep() string {
 	b.WriteString("\n")
 
 	// nombre
-	b.WriteString(renderLabeledField("Nombre del step", m.stepEdit.nameInput, m.stepEdit.focus == StepFocusName))
+	b.WriteString(renderLabeledField("Nombre del step", m.stepEdit.nameInput, m.stepEdit.focus == StepFocusName, m.width))
 	b.WriteString("\n")
 
 	// cli pills
@@ -1263,7 +1359,26 @@ func renderContent(m model) string {
 		label += dimStyle.Render("  ← foco · shift+enter / alt+enter para newline")
 	}
 	body := m.stepEdit.contentInput.view(focused)
+	if inner := contentInnerWidth(m.width); inner > 0 {
+		body = wrapText(body, inner)
+		style = style.Width(inner)
+	}
 	return label + "\n" + style.Render(body)
+}
+
+// contentInnerWidth devuelve el ancho disponible (en columnas) dentro de
+// la caja de input — ya descontados border (2) + padding (2) + un margen
+// de seguridad. Devuelve 0 cuando todavia no recibimos un WindowSizeMsg
+// (signal "no wrappear, dejar al terminal").
+func contentInnerWidth(termWidth int) int {
+	if termWidth <= 0 {
+		return 0
+	}
+	inner := termWidth - 6
+	if inner < 20 {
+		return 0
+	}
+	return inner
 }
 
 func renderInputPills(m model) string {
@@ -1271,6 +1386,13 @@ func renderInputPills(m model) string {
 	focused := m.stepEdit.focus == StepFocusInput
 	var parts []string
 	for _, o := range options {
+		// pr/issue sin repo activo se rinden con sufijo "·off" (mismo patron
+		// visual que un CLI no instalado en S2). dim + off comunica "esta
+		// opcion existe pero el contexto no la habilita".
+		if inputDisabled(o) {
+			parts = append(parts, dimStyle.Render(" "+o+" ·off "))
+			continue
+		}
 		switch {
 		case o == m.stepEdit.input && focused:
 			parts = append(parts, selectedItem.Render("["+o+"]"))
@@ -1422,6 +1544,10 @@ func renderValContent(m model) string {
 		label += dimStyle.Render("  ← foco · shift+enter / alt+enter para newline")
 	}
 	body := m.stepEdit.valContentInput.view(focused)
+	if inner := contentInnerWidth(m.width); inner > 0 {
+		body = wrapText(body, inner)
+		style = style.Width(inner)
+	}
 	return label + "\n" + style.Render(body)
 }
 

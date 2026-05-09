@@ -8,6 +8,7 @@ package wizard
 import (
 	"time"
 
+	"github.com/chichex/che/internal/repoctx"
 	"github.com/chichex/che/internal/skills"
 )
 
@@ -25,6 +26,7 @@ const (
 	ScreenCollision                          // modal "el nombre ya existe"
 	ScreenDiscardWarn                        // confirmacion extra antes de discard
 	ScreenSummaryConfirmDelete               // modal confirm "borrar step" desde S3 (H7)
+	ScreenStepReview                         // modal "Review del prompt" (claude analiza el prompt antes de guardar)
 )
 
 // FieldFocus marca cual campo de S1 tiene el foco. tab/shift+tab cyclan
@@ -87,10 +89,10 @@ type Pipeline struct {
 // Status es el bloque opcional que marca donde quedo el wizard. Solo
 // aparece en archivos draft.
 type Status struct {
-	Stage         string    `yaml:"stage"`
-	StepIdx       int       `yaml:"step_idx,omitempty"`
-	StepMode      string    `yaml:"step_mode,omitempty"`
-	LastSavedAt   time.Time `yaml:"last_saved_at"`
+	Stage       string    `yaml:"stage"`
+	StepIdx     int       `yaml:"step_idx,omitempty"`
+	StepMode    string    `yaml:"step_mode,omitempty"`
+	LastSavedAt time.Time `yaml:"last_saved_at"`
 }
 
 // Stage values del bloque status.
@@ -197,6 +199,40 @@ func inputsForStepIdx(idx int) []string {
 	return append([]string{InputPreviousOutput}, base...)
 }
 
+// inputNeedsRepo reporta si la opcion de input depende de que `gh` reconozca
+// el cwd como un repo de github (pr / issue). Se usa para deshabilitar las
+// pills cuando repoctx.Detect().InGitHubRepo == false — ofrecer "elegi un PR
+// del repo" sin repo actual no tiene sentido y termina rebotando en el
+// runner.
+func inputNeedsRepo(opt string) bool {
+	return opt == InputPR || opt == InputIssue
+}
+
+// inputDisabled reporta si la pill `opt` debe rendirse deshabilitada (dim,
+// cursor la salta) en el contexto actual del proceso. Hoy solo se aplica a
+// pr/issue cuando el cwd no esta dentro de un repo conocido por gh; el resto
+// es false. La deteccion se cachea en repoctx, asi llamarlo en el render no
+// dispara un fork por keystroke.
+func inputDisabled(opt string) bool {
+	if !inputNeedsRepo(opt) {
+		return false
+	}
+	return !repoctx.Detect().InGitHubRepo
+}
+
+// pipelineNeedsRepo reporta si el pipeline tiene algun step cuyo input
+// dependa del repo (pr / issue). El lister + el preflight lo usan para
+// chipear / sumar el row "git repo context" sin hardcodear la lista de
+// inputs en cada caller.
+func PipelineNeedsRepo(p Pipeline) bool {
+	for _, st := range p.Steps {
+		if inputNeedsRepo(st.Input) {
+			return true
+		}
+	}
+	return false
+}
+
 // stepEditState es el estado UI especifico de S2. Vive como sub-struct del
 // model y se reinicia cada vez que entramos a un step (mode=create) o
 // cargamos un step existente (mode=edit).
@@ -236,6 +272,30 @@ type stepEditState struct {
 
 	// error inline. Se limpia al tipear.
 	errMsg string
+
+	// Estado del modal "Review del prompt" (ScreenStepReview). Se dispara
+	// al confirmar el step (ctrl+s / ctrl+n / SaveFinish del modal de
+	// save choice) cuando kind=prompt + content no vacio. reviewLoading
+	// = true mientras claude corre; al volver, populamos review +
+	// reviewErr y queda en loading=false. pendingSaveAction guarda que
+	// camino tomar despues del modal: "finish" (ctrl+s) o "addanother"
+	// (ctrl+n).
+	reviewLoading     bool
+	review            promptReviewResult
+	reviewErr         string
+	pendingSaveAction string // "finish" | "addanother"
+}
+
+// promptReviewResult es el snapshot tipado del resultado de la review
+// que vive en stepEditState. Lo separamos del package promptreview.Review
+// para no cargar el import en model.go (los handlers del modal lo
+// llenan via type assertion).
+type promptReviewResult struct {
+	OK        bool
+	Issues    []string
+	Summary   string
+	Suggested string
+	Raw       string
 }
 
 // model es la unica struct viva en el bubbletea program. Cada screen lee
@@ -311,6 +371,11 @@ type model struct {
 	// exitApp = true si el wizard pidio salida total al menu (q / ctrl+c
 	// confirmados). false significa "volver al menu principal".
 	exitApp bool
+
+	// width es el ancho del terminal en columnas, refrescado via
+	// tea.WindowSizeMsg. Se usa para wrappear inputs de texto largos
+	// (prompt del step) y evitar overflow horizontal.
+	width int
 }
 
 // installedCLIs returns the names of the detected CLIs that are installed.

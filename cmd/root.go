@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/chichex/che/internal/runner"
 	"github.com/chichex/che/internal/tui"
 	"github.com/chichex/che/internal/wizard"
 	"github.com/spf13/cobra"
@@ -51,6 +52,14 @@ var rootCmd = &cobra.Command{
 				if exit {
 					return nil
 				}
+			case tui.ActionAIGen:
+				exit, err := tui.RunAIGen()
+				if err != nil {
+					return err
+				}
+				if exit {
+					return nil
+				}
 			case tui.ActionMyPipelines:
 				if err := runMyPipelines(); err != nil {
 					return err
@@ -84,6 +93,11 @@ func Execute() {
 // flujo "abrir → cancelar → ver lista actualizada" no necesita pasar por el
 // menu principal cada vez.
 func runMyPipelines() error {
+	// H8 recovery: al boot del lister, reescribir a `interrupted` los
+	// manifests con status:running y started_at > 1h. Best-effort — un
+	// error en la recovery NO debe frenar el lister (el usuario sigue
+	// pudiendo ver / borrar / re-correr pipelines).
+	_ = runner.RecoverInterruptedRuns("")
 	for {
 		action, target, exitApp, err := wizard.RunList()
 		if err != nil {
@@ -109,6 +123,19 @@ func runMyPipelines() error {
 			exit, err := wizard.RunEditReady(target)
 			if err != nil {
 				return err
+			}
+			if exit {
+				os.Exit(0)
+			}
+		case wizard.ListActionRun:
+			// H1 del flow de runner: ejecutar un pipeline ready abre el
+			// runner skeleton. Tras esc volvemos al lister; tras q salida
+			// total. Errores de load/IsValid se imprimen y volvemos al
+			// lister — H2+ hara el toast inline; H1 deja el surface al
+			// caller para no inflar el contrato.
+			exit, err := runner.Run(target)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
 			}
 			if exit {
 				os.Exit(0)

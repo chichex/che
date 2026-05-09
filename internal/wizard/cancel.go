@@ -118,7 +118,7 @@ func (m model) applyCancelChoice() (model, tea.Cmd) {
 // viewCancel renderiza el modal SC.
 func (m model) viewCancel() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("Salir del wizard"))
+	b.WriteString(breadcrumb("Create pipeline", "Salir del wizard"))
 	b.WriteString("\n\n")
 	b.WriteString("¿Que querés hacer con el progreso actual?\n\n")
 
@@ -144,7 +144,7 @@ func (m model) viewCancel() string {
 	for _, o := range options {
 		line := "  " + o.digit + ". " + o.label + "  " + dimStyle.Render(o.hint)
 		if m.cancelCursor == o.choice {
-			line = selectedItem.Render("> " + o.digit + ". " + o.label) + "  " + dimStyle.Render(o.hint)
+			line = selectedItem.Render("> "+o.digit+". "+o.label) + "  " + dimStyle.Render(o.hint)
 		}
 		b.WriteString(line)
 		b.WriteString("\n")
@@ -195,7 +195,7 @@ func (m model) applyCollision() (model, tea.Cmd) {
 
 func (m model) viewCollision() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render("El nombre ya existe"))
+	b.WriteString(breadcrumb("Create pipeline", "El nombre ya existe"))
 	b.WriteString("\n\n")
 	slug := Slug(m.nameInput.Value())
 	b.WriteString("Ya hay un pipeline en ")
@@ -214,7 +214,7 @@ func (m model) viewCollision() string {
 	for _, o := range options {
 		line := "  " + o.digit + ". " + o.label + "  " + dimStyle.Render(o.hint)
 		if m.collisionCursor == o.choice {
-			line = selectedItem.Render("> " + o.digit + ". " + o.label) + "  " + dimStyle.Render(o.hint)
+			line = selectedItem.Render("> "+o.digit+". "+o.label) + "  " + dimStyle.Render(o.hint)
 		}
 		b.WriteString(line)
 		b.WriteString("\n")

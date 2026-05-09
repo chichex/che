@@ -34,23 +34,14 @@ func TestTUI_MenuRoutesItem2ToWizard(t *testing.T) {
 		t.Fatalf("S1 PipelineInfo never rendered\nsince mark:\n%s", p.Since(mark))
 	}
 
-	// esc abre el modal SC.
+	// esc en S1 sin path skipea el modal SC (no hay nada que keep ni
+	// que discardear): cae directo al menu.
 	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
-		t.Fatalf("cancel modal never opened\nsince mark:\n%s", p.Since(mark))
-	}
-
-	// "1" en el modal = keep & exit. Sin path (todavia no escribimos
-	// nombre), keep no toca disco; el wizard cierra y el menu se redibuja.
-	mark = p.Mark()
-	if err := p.Send("1"); err != nil {
-		t.Fatalf("send 1: %v", err)
-	}
-	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
-		t.Fatalf("menu never re-rendered after cancel\nsince mark:\n%s", p.Since(mark))
+	if !p.WaitForOutputSince(t, mark, "0-4 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered after S1 esc\nsince mark:\n%s", p.Since(mark))
 	}
 
 	if err := p.Send("q"); err != nil {
