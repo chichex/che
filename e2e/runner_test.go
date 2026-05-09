@@ -1634,3 +1634,320 @@ func TestRunner_R3H5StderrInterleaved(t *testing.T) {
 		t.Errorf("events.jsonl should NOT exist for gemini (text mode), stat err=%v", err)
 	}
 }
+
+// multiStepYAML arma un pipeline de N steps. Cada step es {name, cli, kind,
+// content, input}. H6 lo necesita para ejercitar pipelines reales con
+// previous_output entre steps. Mantenemos kind=skill para que preflight
+// chequee que el skill existe (los tests pre-arman las skills relevantes).
+type multiStep struct {
+	Name    string
+	CLI     string
+	Kind    string
+	Content string
+	Input   string
+}
+
+func multiStepYAML(name string, steps []multiStep) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "name: %s\n", name)
+	fmt.Fprintf(&b, "description: ready desc\n")
+	b.WriteString("steps:\n")
+	for _, s := range steps {
+		fmt.Fprintf(&b, "- name: %s\n", s.Name)
+		fmt.Fprintf(&b, "  cli: %s\n", s.CLI)
+		fmt.Fprintf(&b, "  kind: %s\n", s.Kind)
+		fmt.Fprintf(&b, "  content: %s\n", s.Content)
+		fmt.Fprintf(&b, "  input: %s\n", s.Input)
+	}
+	return b.String()
+}
+
+// readCapturedStdin lee el archivo stdin capturado por el fake (CaptureStdin).
+// El path es <ScriptDir>/stdins/<seq>.bin. seq lo asigna chefake en orden de
+// invocacion global (ver cmd/fake/main.go.nextSeq), no por bin — los tests
+// derivan el seq de env.Invocations() cuando necesitan correlacionar.
+func readCapturedStdin(t *testing.T, scriptDir string, seq int) string {
+	t.Helper()
+	path := filepath.Join(scriptDir, "stdins", fmt.Sprintf("%d.bin", seq))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read captured stdin %s: %v", path, err)
+	}
+	return string(data)
+}
+
+// TestRunner_R3H6MultiStepPreviousOutput cubre el primer test e2e listado
+// en H6: "Pipeline 2 steps con fake CLIs predecibles. Assert: payload del
+// step 2 es exactamente el output del step 1."
+//
+// Arrancamos un pipeline con 2 steps (input=none + input=previous_output).
+// El step 1 emite un sentinel conocido y exit 0. El step 2 captura el stdin
+// que recibe — el assert principal es que ese stdin == el stdout del step 1
+// (lo que el runner escribe en step-01.result.yaml/output).
+func TestRunner_R3H6MultiStepPreviousOutput(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	// Skills pre-armadas para que preflight pase verde.
+	preArmCLISkill(t, env.HomeDir, "gemini", "h6-step1")
+	preArmCLISkill(t, env.HomeDir, "gemini", "h6-step2")
+
+	// Step 1 (gemini text mode): emite un sentinel unico en stdout y exit 0.
+	// Usamos gemini para evitar el parser stream-json de claude — el output
+	// "limpio" es mas facil de igualar contra el stdin capturado del step 2.
+	step1Output := "step1-output-payload-h6"
+	env.ExpectAgent("gemini").WhenArgsMatch(`/h6-step1`).
+		RespondStdout(step1Output, 0)
+	// Step 2: captura stdin y emite "step2-done". CaptureStdin escribe el
+	// payload en stdins/<seq>.bin para que el test pueda assertarlo.
+	env.ExpectAgent("gemini").WhenArgsMatch(`/h6-step2`).
+		CaptureStdin().
+		RespondStdout("step2-done-h6", 0)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h6-multi.yaml": multiStepYAML("R3H6 Multi", []multiStep{
+			{Name: "alpha", CLI: "gemini", Kind: "skill", Content: "h6-step1", Input: "none"},
+			{Name: "beta", CLI: "gemini", Kind: "skill", Content: "h6-step2", Input: "previous_output"},
+		}),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H6 Multi", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight de R3H6 Multi", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	// El run ejecuta los 2 steps en orden y aterriza en R4 ("Run completo").
+	if !p.WaitForOutputSince(t, mark, "Run completo", 8*time.Second) {
+		t.Fatalf("R4 'Run completo' never rendered\n%s", p.Since(mark))
+	}
+
+	// Cleanup ordenado.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Asserts en disco.
+	runDir := firstRunDir(t, env.HomeDir, "r3h6-multi")
+
+	// Manifest done con 2 steps done.
+	manifestRaw := readRunFile(t, filepath.Join(runDir, "manifest.yaml"))
+	if !strings.Contains(manifestRaw, "status: done") {
+		t.Errorf("expected manifest status: done, got:\n%s", manifestRaw)
+	}
+	// Ambos steps deberian estar como status done en el manifest.
+	if strings.Count(manifestRaw, "status: done") < 3 {
+		// 1 (run-level) + 2 (steps) = 3 ocurrencias minimas.
+		t.Errorf("expected manifest to record both steps done, got:\n%s", manifestRaw)
+	}
+
+	// step-01.result.yaml tiene el output del step 1.
+	step1Result := readRunFile(t, filepath.Join(runDir, "step-01.result.yaml"))
+	if !strings.Contains(step1Result, step1Output) {
+		t.Errorf("expected step-01.result.yaml to contain %q, got:\n%s", step1Output, step1Result)
+	}
+
+	// step-02.result.yaml existe (criterio del doc: "step-NN.result.yaml
+	// existe por cada step").
+	if _, err := os.Stat(filepath.Join(runDir, "step-02.result.yaml")); err != nil {
+		t.Errorf("expected step-02.result.yaml to exist: %v", err)
+	}
+
+	// El stdin del step 2 (capturado por el fake) tiene que contener el
+	// output del step 1. El fake escribe el archivo bajo
+	// <ScriptDir>/stdins/<seq>.bin — buscamos el seq del invocation con
+	// args matcheando "h6-step2".
+	calls := env.Invocations().For("gemini")
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 invocations of gemini, got %d", len(calls))
+	}
+	var step2Seq int
+	for _, c := range calls {
+		args := strings.Join(c.Args, " ")
+		if strings.Contains(args, "h6-step2") {
+			step2Seq = c.Seq
+			break
+		}
+	}
+	if step2Seq == 0 {
+		t.Fatalf("could not find seq of step 2 invocation; calls=%+v", calls)
+	}
+	stdin2 := readCapturedStdin(t, env.ScriptDir, step2Seq)
+	// El runner escribe el output crudo del step previo (step1Output) +
+	// posiblemente un newline trailing del scanner del tee. Asertamos
+	// contains, no equals, para no engancharnos en trimming.
+	if !strings.Contains(stdin2, step1Output) {
+		t.Errorf("expected step 2 stdin to contain step 1 output %q, got:\n%q",
+			step1Output, stdin2)
+	}
+}
+
+// TestRunner_R3H6MultiStepFailStops cubre el segundo test e2e listado en
+// H6: "Step 2 fake con exit 1; assert: RF, manifest steps[0].status=done,
+// steps[1].status=failed, steps[2] no existe en el array."
+//
+// Pipeline de 3 steps; el segundo falla → el runner transiciona a RF
+// inmediatamente y el step 3 nunca se invoca (no hay step-03.* en el
+// run dir, y el fake no registra una tercer invocacion).
+func TestRunner_R3H6MultiStepFailStops(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmCLISkill(t, env.HomeDir, "gemini", "h6-fail-step1")
+	preArmCLISkill(t, env.HomeDir, "gemini", "h6-fail-step2")
+	preArmCLISkill(t, env.HomeDir, "gemini", "h6-fail-step3")
+
+	env.ExpectAgent("gemini").WhenArgsMatch(`/h6-fail-step1`).
+		RespondStdout("step1-ok", 0)
+	env.ExpectAgent("gemini").WhenArgsMatch(`/h6-fail-step2`).
+		RespondExitWithError(1, "boom-h6-step2")
+	// Step 3 esta scripteado pero no deberia matchear nunca — si lo hace,
+	// el assert sobre count de invocaciones falla.
+	env.ExpectAgent("gemini").WhenArgsMatch(`/h6-fail-step3`).
+		RespondStdout("step3-should-not-run", 0)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h6-fail.yaml": multiStepYAML("R3H6 Fail", []multiStep{
+			{Name: "alpha", CLI: "gemini", Kind: "skill", Content: "h6-fail-step1", Input: "none"},
+			{Name: "beta", CLI: "gemini", Kind: "skill", Content: "h6-fail-step2", Input: "previous_output"},
+			{Name: "gamma", CLI: "gemini", Kind: "skill", Content: "h6-fail-step3", Input: "previous_output"},
+		}),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H6 Fail", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight de R3H6 Fail", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run fallo", 8*time.Second) {
+		t.Fatalf("RF 'Run fallo' never rendered\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	runDir := firstRunDir(t, env.HomeDir, "r3h6-fail")
+
+	// Manifest: status failed; steps[0]=done, steps[1]=failed, steps[2] no
+	// debe estar listado (criterio del doc — el step nunca arranco).
+	manifestRaw := readRunFile(t, filepath.Join(runDir, "manifest.yaml"))
+	if !strings.Contains(manifestRaw, "status: failed") {
+		t.Errorf("expected manifest status: failed, got:\n%s", manifestRaw)
+	}
+	// Step alpha (1) done, beta (2) failed — buscamos por nombre del step
+	// para no depender del pretty-printing del yaml.
+	if !strings.Contains(manifestRaw, "name: alpha") {
+		t.Errorf("expected manifest to list step alpha, got:\n%s", manifestRaw)
+	}
+	if !strings.Contains(manifestRaw, "name: beta") {
+		t.Errorf("expected manifest to list step beta, got:\n%s", manifestRaw)
+	}
+	if strings.Contains(manifestRaw, "name: gamma") {
+		t.Errorf("manifest should NOT include step gamma (nunca arranco), got:\n%s", manifestRaw)
+	}
+
+	// step-01.result.yaml existe (alpha corrio); step-02.result.yaml existe
+	// (beta corrio aunque haya fallado — el doc fija que result.yaml se
+	// escribe siempre); step-03.* NO debe existir (gamma nunca arranco).
+	if _, err := os.Stat(filepath.Join(runDir, "step-01.result.yaml")); err != nil {
+		t.Errorf("expected step-01.result.yaml to exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "step-02.result.yaml")); err != nil {
+		t.Errorf("expected step-02.result.yaml to exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "step-03.result.yaml")); !os.IsNotExist(err) {
+		t.Errorf("step-03.result.yaml should NOT exist (step 3 nunca arranco), stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "step-03.stdout.log")); !os.IsNotExist(err) {
+		t.Errorf("step-03.stdout.log should NOT exist, stat err=%v", err)
+	}
+
+	// El fake debe haber sido invocado exactamente 2 veces (alpha + beta);
+	// gamma nunca llego a spawnearse.
+	calls := env.Invocations().For("gemini")
+	if len(calls) != 2 {
+		t.Errorf("expected 2 invocations of gemini (step 3 nunca arranca), got %d: %+v",
+			len(calls), calls)
+	}
+}

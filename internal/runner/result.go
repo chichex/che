@@ -35,3 +35,23 @@ func writeStepResult(runDir string, r StepResult) error {
 	}
 	return nil
 }
+
+// readStepResult lee el step-NN.result.yaml del step idx (1-indexed) en
+// runDir. H6 lo usa para resolver `input: previous_output` del step N+1: el
+// payload del subprocess siguiente es el campo Output del result anterior.
+//
+// Si el archivo no existe o no parsea, devuelve error — el caller decide si
+// es fatal (R3 lo trata como fatal y va a RF: no podemos arrancar el step
+// sin el input que pidio).
+func readStepResult(runDir string, idx int) (StepResult, error) {
+	path := filepath.Join(runDir, fmt.Sprintf("step-%02d.result.yaml", idx))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return StepResult{}, fmt.Errorf("result: read %s: %w", path, err)
+	}
+	var r StepResult
+	if err := yaml.Unmarshal(data, &r); err != nil {
+		return StepResult{}, fmt.Errorf("result: parse %s: %w", path, err)
+	}
+	return r, nil
+}

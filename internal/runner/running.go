@@ -70,15 +70,20 @@ func initRunDir(p wizard.Pipeline) (string, string, error) {
 }
 
 // enterRunning es la transicion R2 → R3 (post-preflight ok / warn confirmado).
-// Inicializa el run dir + manifest, prepara el slice de Steps, y devuelve un
-// tea.Cmd que arranca el spawn del step 0. H4 solo soporta 1 step — si el
-// pipeline tiene N>1 mostramos el banner MultiStepWarning pero igual corremos
-// SOLO el step 0 (defensive, segun el criterio de aceptacion del doc).
+// Inicializa el run dir + manifest, prepara el slice de Steps con TODOS los
+// steps del pipeline en estado pending, y delega a startStep para arrancar
+// el primero. H6 reemplaza el "single-step" de H4 por multi-step en serie:
+// tras handleStepDone, si el step termino done y hay siguiente, el handler
+// llama a startStep(idx+1) y resuelve el payload via previous_output.
 func enterRunning(m RunModel) (RunModel, tea.Cmd) {
 	m.Screen = ScreenRunning
 	m.CancelModal = false
 	m.LogDump = ""
 	m.FailedStderr = ""
+	// MultiStepWarning ya no aplica post-H6 — multi-step esta soportado.
+	// Lo dejamos en false explicitamente por si una transicion previa lo
+	// dejo true.
+	m.MultiStepWarning = false
 
 	id, runDir, err := initRunDir(m.Pipeline)
 	if err != nil {
@@ -92,20 +97,28 @@ func enterRunning(m RunModel) (RunModel, tea.Cmd) {
 	m.RunID = id
 	m.RunDir = runDir
 
-	// Steps slice: H4 solo el step 0. Idx empieza en 1 (1-indexed para
-	// alinear con los nombres de archivo step-01.*).
+	// Steps slice: H6 inicializa TODOS los steps del pipeline en pending +
+	// crea el ring buffer correspondiente para cada uno (LogBuffers idx
+	// alineado con Steps idx). Idx empieza en 1 (1-indexed para alinear
+	// con los nombres de archivo step-01.*).
 	stepRuns := make([]StepRun, 0, len(m.Pipeline.Steps))
-	step0 := m.Pipeline.Steps[0]
-	stepRuns = append(stepRuns, StepRun{
-		Idx:    1,
-		Name:   step0.Name,
-		CLI:    step0.CLI,
-		Kind:   step0.Kind,
-		Status: StepStatusPending,
-	})
+	buffers := make([]*RingBuffer, 0, len(m.Pipeline.Steps))
+	for i, ps := range m.Pipeline.Steps {
+		stepRuns = append(stepRuns, StepRun{
+			Idx:    i + 1,
+			Name:   ps.Name,
+			CLI:    ps.CLI,
+			Kind:   ps.Kind,
+			Status: StepStatusPending,
+		})
+		buffers = append(buffers, NewRingBuffer(2000))
+	}
 	m.Steps = stepRuns
+	m.LogBuffers = buffers
 	m.Active = 0
-	m.MultiStepWarning = len(m.Pipeline.Steps) > 1
+	m.LogFocus = 0
+	m.StickyBottom = true
+	m.LogScrollOffset = 0
 
 	if _, err := initManifest(m.Pipeline, id, runDir, m.path, m.Input.Kind, m.Input.Value, stepRuns); err != nil {
 		m.Screen = ScreenFailed
@@ -115,23 +128,90 @@ func enterRunning(m RunModel) (RunModel, tea.Cmd) {
 		return m, nil
 	}
 
-	// Marcamos el step 0 como running antes de spawnear (el render del
-	// tracker refleja "⏳ running" mientras el subprocess esta vivo).
-	m.Steps[0].Status = StepStatusRunning
-	m.Steps[0].StartedAt = time.Now()
+	return startStep(m, 0)
+}
 
-	// H5: ring buffers por step (2000 lineas / step segun el doc). Solo
-	// inicializamos el del step 0 (H6 va a sumar el resto). LogFocus = 0
-	// (renderea el step activo); StickyBottom = true (auto-scroll).
-	m.LogBuffers = []*RingBuffer{NewRingBuffer(2000)}
-	m.LogFocus = 0
+// startStep arranca el subprocess del step en idx (0-based). Resuelve el
+// payload segun el input del step (R1 para el step 0, previous_output para
+// idx ≥ 1) y emite el spawn. Si la resolucion falla, marca el step como
+// failed con SpawnError + transiciona a RF (no podemos arrancar el step sin
+// su input). Devuelve el (model, cmd) listo para que el caller (enterRunning
+// o handleStepDone) lo encadene.
+func startStep(m RunModel, idx int) (RunModel, tea.Cmd) {
+	if idx < 0 || idx >= len(m.Pipeline.Steps) {
+		// Defensive: idx fuera de rango — no deberia pasar (handleStepDone
+		// solo invoca cuando hay siguiente). Lo tratamos como done para
+		// caer al render terminal.
+		m.Screen = ScreenDone
+		return m, nil
+	}
+	step := m.Pipeline.Steps[idx]
+
+	payload, perr := resolvePayloadForStep(m, idx)
+	if perr != nil {
+		// Sin payload no podemos spawnear — marcamos el step como failed +
+		// vamos a RF directo. Manifest se cierra con failed para que el
+		// estado en disco refleje el problema.
+		m.Steps[idx].Status = StepStatusFailed
+		m.Steps[idx].StartedAt = time.Now()
+		m.Steps[idx].FinishedAt = time.Now()
+		m.Steps[idx].ExitCode = -1
+		m.Steps[idx].SpawnError = perr.Error()
+		m.Active = idx
+		m.LogFocus = idx
+		_ = closeManifest(m.RunDir, Manifest{
+			RunID:        m.RunID,
+			Pipeline:     m.Pipeline.Name,
+			StartedAt:    time.Now().UTC(),
+			PipelinePath: m.path,
+			InputKind:    m.Input.Kind,
+			InputValue:   m.Input.Value,
+		}, ManifestStatusFailed, m.Steps[:idx+1])
+		m.Screen = ScreenFailed
+		m.FailedStderr = perr.Error()
+		return m, nil
+	}
+
+	// Marcar el step activo + ponerlo en running antes de spawnear (el
+	// tracker refleja "⏳ running" mientras el subprocess vive).
+	m.Active = idx
+	m.LogFocus = idx
 	m.StickyBottom = true
 	m.LogScrollOffset = 0
+	m.Steps[idx].Status = StepStatusRunning
+	m.Steps[idx].StartedAt = time.Now()
 
-	// runState compartido entre Update + spawn goroutine (cancel handler).
+	// runState fresco por step (cancel + lineCh exclusivos del subprocess
+	// actual). Sobreescribe cualquier remanente del step anterior — ese ya
+	// fue limpiado por handleStepDone.
 	m.runState = &runState{requestCancel: make(chan struct{}, 1)}
-	cmd := runStep(step0, m.Input.ResolvedPayload, runDir, 1, m.runState)
+	cmd := runStep(step, payload, m.RunDir, idx+1, m.runState)
 	return m, cmd
+}
+
+// resolvePayloadForStep devuelve el payload (stdin del subprocess) segun el
+// input del step. Para step 0 es el ResolvedPayload de R1 (lo mismo que H4
+// hacia ya). Para step ≥ 1:
+//   - input == previous_output → leer step-(N-1).result.yaml/output.
+//   - cualquier otro kind → defensive: el wizard fuerza previous_output como
+//     default para steps ≥ 1; si llegara otro, reusamos el ResolvedPayload
+//     de R1 (raro pero no fatal segun el doc).
+func resolvePayloadForStep(m RunModel, idx int) (string, error) {
+	if idx == 0 {
+		return m.Input.ResolvedPayload, nil
+	}
+	step := m.Pipeline.Steps[idx]
+	if step.Input != wizard.InputPreviousOutput {
+		// Defensive: no deberia pasar — wizard.IsValid + el flow de R1
+		// solo dejan previous_output (o uno equivalente "consumido") para
+		// steps ≥ 1. Caemos al payload original de R1 para no abortar.
+		return m.Input.ResolvedPayload, nil
+	}
+	prev, err := readStepResult(m.RunDir, idx) // idx 1-based para el archivo (step-NN)
+	if err != nil {
+		return "", fmt.Errorf("previous_output del step %d: %w", idx+1, err)
+	}
+	return prev.Output, nil
 }
 
 // updateRunning maneja teclas + msgs durante R3. Las transiciones:
@@ -140,10 +220,17 @@ func enterRunning(m RunModel) (RunModel, tea.Cmd) {
 //   - ↑/↓ / k/j    → scroll del log pane (desactiva sticky).
 //   - g            → re-stick al fondo + reset scroll.
 //   - ctrl+l       → limpia el ring buffer del step activo (no toca disco).
+//   - tab          → cyclea LogFocus entre los steps del pipeline. El log
+//     pane pasa a renderear los logs del step seleccionado
+//     (sin frenar el subprocess en curso). H6 lo agrega
+//     porque multi-step necesita ver logs de steps ya
+//     terminados o pendientes.
 //
-// stepLineMsg appendea al ring buffer del step indicado (H5: solo el
-// activo) y vuelve a issuear waitForLine. stepDoneMsg cierra el step y
-// transiciona a R4/RF.
+// stepLineMsg appendea al ring buffer del step indicado y vuelve a issuear
+// waitForLine. stepDoneMsg cierra el step y, segun el resultado:
+//   - done + hay siguiente → arranca el step siguiente (startStep).
+//   - done + ultimo step   → R4.
+//   - failed / cancelled   → RF inmediato (stop-on-error).
 func (m RunModel) updateRunning(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.CancelModal {
 		return m.updateCancelModal(msg)
@@ -185,6 +272,15 @@ func (m RunModel) updateRunning(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.LogScrollOffset = 0
 			m.StickyBottom = true
 			return m, nil
+		case "tab":
+			// Cycle LogFocus entre 0..N-1. Solo aplica si hay >1 step
+			// (con 1 solo el cycle es no-op y evita un re-render inutil).
+			if len(m.Pipeline.Steps) > 1 {
+				m.LogFocus = (m.LogFocus + 1) % len(m.Pipeline.Steps)
+				m.LogScrollOffset = 0
+				m.StickyBottom = true
+			}
+			return m, nil
 		}
 		return m, nil
 	case stepLineMsg:
@@ -225,8 +321,14 @@ func (m RunModel) activeBuffer() *RingBuffer {
 }
 
 // handleStepDone procesa el mensaje de fin del subprocess. Escribe el
-// result.yaml del step + el manifest cerrado, y transiciona a R4 / RF segun
-// exit_code + cancelled. Es el unico punto donde se decide R4 vs RF en H4.
+// result.yaml del step + actualiza el manifest, y decide la transicion:
+//
+//   - failed / cancelled       → RF inmediato (stop-on-error de H6).
+//   - done + hay step siguiente → arranca el siguiente via startStep.
+//   - done + ultimo step       → R4.
+//
+// Manifest se reescribe en cada step (no atomico hasta H8) para que un crash
+// mid-pipeline deje el estado en disco coherente con lo ya ejecutado.
 func (m RunModel) handleStepDone(msg stepDoneMsg) (tea.Model, tea.Cmd) {
 	// Update del slice de Steps con el resultado.
 	idx := msg.Idx - 1
@@ -247,7 +349,10 @@ func (m RunModel) handleStepDone(msg stepDoneMsg) (tea.Model, tea.Cmd) {
 		step.Status = StepStatusDone
 	}
 
-	// LogDump para el render terminal — concat stdout+stderr resumido.
+	// LogDump para el render terminal — concat stdout+stderr resumido del
+	// step que acaba de terminar. Para multi-step done, se va sobreescribiendo
+	// en cada step; el render terminal R4 lo usa para el bloque "ultimas
+	// lineas" del ultimo step ejecutado.
 	m.LogDump = msg.Stdout
 	if msg.Stderr != "" {
 		// stderr indented + prefix `! ` para distinguirlo en R4/RF.
@@ -255,9 +360,8 @@ func (m RunModel) handleStepDone(msg stepDoneMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// result.yaml siempre se escribe — el doc fija que `output` queda con
-	// lo que haya en stdout incluso en exit ≠ 0. Ignoramos el error de
-	// write: si falla, el screen RF/R4 igual va a renderear; el manifest
-	// posterior captura el mismo problema.
+	// lo que haya en stdout incluso en exit ≠ 0. H6 lo necesita ademas
+	// para resolver previous_output del step siguiente.
 	_ = writeStepResult(m.RunDir, StepResult{
 		StepIdx:  step.Idx,
 		StepName: step.Name,
@@ -265,48 +369,91 @@ func (m RunModel) handleStepDone(msg stepDoneMsg) (tea.Model, tea.Cmd) {
 		Output:   msg.Stdout,
 	})
 
-	// Manifest cerrado con el status terminal del run. Para H4 (1 step)
-	// el run-status = el status del unico step.
-	runStatus := ManifestStatusDone
-	switch step.Status {
-	case StepStatusFailed:
-		runStatus = ManifestStatusFailed
-	case StepStatusCancelled:
-		runStatus = ManifestStatusCancelled
-	}
-	currentManifest := Manifest{
-		RunID:        m.RunID,
-		Pipeline:     m.Pipeline.Name,
-		StartedAt:    msg.StartedAt,
-		PipelinePath: m.path,
-		InputKind:    m.Input.Kind,
-		InputValue:   m.Input.Value,
-	}
-	_ = closeManifest(m.RunDir, currentManifest, runStatus, m.Steps)
-
 	// Limpieza del runState — el handle ya no es vivo.
 	m.runState = nil
 
-	// Transicion segun status.
+	// Decision de transicion. Stop-on-error: cualquier failed / cancelled
+	// corta el pipeline; los steps subsiguientes nunca se inician y quedan
+	// en pending en el manifest.
 	switch step.Status {
 	case StepStatusFailed:
-		m.Screen = ScreenFailed
 		m.FailedStderr = msg.Stderr
 		if step.SpawnError != "" && m.FailedStderr == "" {
 			m.FailedStderr = step.SpawnError
 		}
-	case StepStatusCancelled:
-		// El doc dice "tono amarillo, screen tipo RF". Para H4 caemos a
-		// ScreenFailed marcando que fue cancel via SpawnError; el view
-		// usa ese flag para el banner.
+		// Stop-on-error: solo persistimos en el manifest los steps que
+		// efectivamente arrancaron (m.Steps[:idx+1]). Los siguientes nunca
+		// se ejecutan y el doc explicita en el test e2e de H6 que NO
+		// aparecen en el array — el run dir no tiene step-NN.* files
+		// para ellos tampoco.
+		_ = closeManifest(m.RunDir, baseManifestForRun(m, msg.StartedAt), ManifestStatusFailed, m.Steps[:idx+1])
 		m.Screen = ScreenFailed
+		return m, nil
+	case StepStatusCancelled:
 		if m.FailedStderr == "" {
 			m.FailedStderr = "run cancelado por el usuario"
 		}
-	default:
-		m.Screen = ScreenDone
+		// Mismo criterio que failed: solo los steps que llegaron a correr.
+		_ = closeManifest(m.RunDir, baseManifestForRun(m, msg.StartedAt), ManifestStatusCancelled, m.Steps[:idx+1])
+		m.Screen = ScreenFailed
+		return m, nil
 	}
+
+	// Step done. Multi-step: si hay un siguiente step, arrancarlo.
+	nextIdx := idx + 1
+	if nextIdx < len(m.Pipeline.Steps) {
+		// Persistimos el manifest "en progreso" con el step recien cerrado
+		// + los pendientes intactos antes de spawnear el proximo. Asi un
+		// crash entre dos steps deja el manifest reflejando lo real.
+		_ = writeManifest(m.RunDir, manifestRunningSnapshot(m, msg.StartedAt))
+		return startStep(m, nextIdx)
+	}
+
+	// Ultimo step done → cerrar manifest done + transicionar a R4.
+	_ = closeManifest(m.RunDir, baseManifestForRun(m, msg.StartedAt), ManifestStatusDone, m.Steps)
+	m.Screen = ScreenDone
 	return m, nil
+}
+
+// baseManifestForRun arma el header del manifest con los campos que no
+// cambian a lo largo del run. closeManifest le pisa Status/FinishedAt y
+// regenera Steps[] desde m.Steps. startedAt se toma del primer stepDoneMsg
+// que llego — no es exacto (puede haber un gap entre initRunDir y el primer
+// Start) pero alcanza para H6; H8 va a popular un timestamp del enterRunning.
+func baseManifestForRun(m RunModel, fallbackStart time.Time) Manifest {
+	return Manifest{
+		RunID:        m.RunID,
+		Pipeline:     m.Pipeline.Name,
+		StartedAt:    fallbackStart,
+		PipelinePath: m.path,
+		InputKind:    m.Input.Kind,
+		InputValue:   m.Input.Value,
+	}
+}
+
+// manifestRunningSnapshot arma el shape "en curso" con steps actualizados +
+// status running. Lo escribimos entre steps para que si el proceso muere
+// inesperadamente, el manifest refleje los steps cerrados (done/failed) y
+// los pendientes (pending) — no quede el snapshot inicial obsoleto. H8
+// reemplazara el write directo por tmp+rename atomico.
+func manifestRunningSnapshot(m RunModel, fallbackStart time.Time) Manifest {
+	mf := baseManifestForRun(m, fallbackStart)
+	mf.Status = ManifestStatusRunning
+	mf.Steps = make([]ManifestStep, 0, len(m.Steps))
+	for _, s := range m.Steps {
+		mf.Steps = append(mf.Steps, ManifestStep{
+			Idx:        s.Idx,
+			Name:       s.Name,
+			CLI:        s.CLI,
+			Kind:       s.Kind,
+			Status:     string(s.Status),
+			ExitCode:   s.ExitCode,
+			StartedAt:  s.StartedAt,
+			FinishedAt: s.FinishedAt,
+			Error:      s.SpawnError,
+		})
+	}
+	return mf
 }
 
 // indentStderr prefija cada linea con `! ` para que el dump del log pane
@@ -339,13 +486,7 @@ func (m RunModel) viewRunning() string {
 	var b strings.Builder
 	header := fmt.Sprintf("Run · %s    step %d/%d", name, m.Active+1, len(m.Pipeline.Steps))
 	b.WriteString(titleStyle.Render(header))
-	b.WriteString("\n")
-
-	if m.MultiStepWarning {
-		b.WriteString(warnStyle.Render(fmt.Sprintf("multi-step viene en H6 — corriendo solo el step 1/%d", len(m.Pipeline.Steps))))
-		b.WriteString("\n")
-	}
-	b.WriteString("\n")
+	b.WriteString("\n\n")
 
 	// Steps tracker — un row por step del pipeline. Marcamos el activo
 	// con icono segun status.
@@ -364,7 +505,11 @@ func (m RunModel) viewRunning() string {
 	// caemos al placeholder "ejecutando ...".
 	b.WriteString(renderLogPane(m))
 	b.WriteString("\n")
-	b.WriteString(hintStyle.Render("ctrl+c cancelar · ↑/↓ scroll · g fondo · ctrl+l clear"))
+	hint := "ctrl+c cancelar · ↑/↓ scroll · g fondo · ctrl+l clear"
+	if len(m.Pipeline.Steps) > 1 {
+		hint += " · tab cambiar logs"
+	}
+	b.WriteString(hintStyle.Render(hint))
 	b.WriteString("\n")
 
 	if m.CancelModal {
@@ -381,31 +526,51 @@ func (m RunModel) viewRunning() string {
 // terminal estandar sin ahogar el header + tracker + footer.
 const logViewportLines = 18
 
-// renderLogPane dibuja el viewport del log pane: header del step activo +
-// las ultimas N lineas del ring buffer (segun StickyBottom / LogScrollOffset).
-// Lineas de stderr en rojo dimmed, intercaladas con stdout (criterio del
-// doc para H5).
+// renderLogPane dibuja el viewport del log pane: header del step en LogFocus
+// + las ultimas N lineas del ring buffer del mismo step (segun StickyBottom
+// / LogScrollOffset). Lineas de stderr en rojo dimmed, intercaladas con
+// stdout (criterio del doc para H5). H6 desacopla LogFocus de Active: tab
+// cyclea LogFocus para que el usuario pueda inspeccionar logs de steps ya
+// terminados o pendientes mientras el subprocess activo sigue.
 func renderLogPane(m RunModel) string {
 	var b strings.Builder
-	if m.Active < len(m.Pipeline.Steps) {
-		step := m.Pipeline.Steps[m.Active]
+	focus := m.LogFocus
+	if focus < 0 || focus >= len(m.Pipeline.Steps) {
+		focus = m.Active
+	}
+	if focus < len(m.Pipeline.Steps) {
+		step := m.Pipeline.Steps[focus]
 		head := fmt.Sprintf("[%d/%d] %s (%s / %s)",
-			m.Active+1, len(m.Pipeline.Steps), step.Name, step.CLI, step.Kind)
+			focus+1, len(m.Pipeline.Steps), step.Name, step.CLI, step.Kind)
 		b.WriteString(labelStyle.Render(head))
+		if focus != m.Active {
+			b.WriteString("  ")
+			b.WriteString(dimStyle.Render("· viendo logs (tab para cycle)"))
+		}
 		b.WriteString("\n")
 	}
 	rb := m.activeBuffer()
 	if rb == nil || rb.Len() == 0 {
-		// Sin lineas todavia: placeholder igual que H4.
-		cli := ""
-		if m.Active < len(m.Pipeline.Steps) {
-			cli = m.Pipeline.Steps[m.Active].CLI
-		}
-		if cli != "" {
-			b.WriteString(dimStyle.Render("> ejecutando " + cli + "..."))
+		// Sin lineas todavia: placeholder igual que H4. Para steps no
+		// activos (focus != Active) el placeholder explicita el motivo
+		// (pendiente / sin output) para evitar la ilusion de "ejecutando".
+		var placeholder string
+		if focus < len(m.Pipeline.Steps) {
+			cli := m.Pipeline.Steps[focus].CLI
+			switch {
+			case focus < m.Active:
+				placeholder = "> step ya terminado · sin lineas en buffer"
+			case focus > m.Active:
+				placeholder = "> step pendiente · todavia no arranco"
+			case cli != "":
+				placeholder = "> ejecutando " + cli + "..."
+			default:
+				placeholder = "> ejecutando..."
+			}
 		} else {
-			b.WriteString(dimStyle.Render("> ejecutando..."))
+			placeholder = "> ejecutando..."
 		}
+		b.WriteString(dimStyle.Render(placeholder))
 		b.WriteString("\n")
 		return b.String()
 	}
