@@ -1,0 +1,1717 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>che — ejecución de pipelines · flow diagram</title>
+<style>
+  :root {
+    --bg: #fafaf9;
+    --bg-alt: #f4f4f2;
+    --surface: #ffffff;
+    --ink: #18181b;
+    --ink-soft: #52525b;
+    --ink-mute: #71717a;
+    --line: #e4e4e7;
+    --line-strong: #d4d4d8;
+    --accent: #4338ca;
+    --accent-soft: #eef2ff;
+    --ok: #15803d;
+    --ok-soft: #ecfdf5;
+    --warn: #b45309;
+    --warn-soft: #fef3c7;
+    --fail: #b91c1c;
+    --fail-soft: #fef2f2;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 1080px; margin: 0 auto; padding: 80px 32px 120px; }
+  section + section { margin-top: 64px; }
+  h1 { font-size: 40px; line-height: 1.15; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 16px; }
+  h2 { font-size: 24px; line-height: 1.25; font-weight: 650; letter-spacing: -0.01em; margin: 0 0 16px; }
+  h3 { font-size: 17px; font-weight: 600; margin: 28px 0 8px; letter-spacing: -0.005em; }
+  p { margin: 0 0 14px; color: var(--ink-soft); }
+  p strong, li strong { color: var(--ink); font-weight: 600; }
+  .eyebrow { font-size: 12px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--accent); font-weight: 600; margin-bottom: 16px; }
+  .lede { font-size: 18px; color: var(--ink-soft); max-width: 760px; }
+  .rule { height: 1px; background: var(--line); margin: 0; border: 0; }
+  ul, ol { margin: 0 0 14px; padding-left: 22px; color: var(--ink-soft); }
+  ul li, ol li { margin-bottom: 6px; }
+  code { font-family: var(--mono); font-size: 13px; background: var(--bg-alt); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; color: var(--ink); }
+
+  table { width: 100%; border-collapse: collapse; margin: 12px 0 18px; font-size: 14.5px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--ink); }
+  th { font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-mute); background: var(--bg-alt); }
+  td code { font-size: 12.5px; }
+
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; }
+  .card.accent { background: var(--accent-soft); border-color: #c7d2fe; color: var(--ink); }
+  .card.warn { background: var(--warn-soft); border-color: #fde68a; }
+  .card.fail { background: var(--fail-soft); border-color: #fecaca; }
+
+  .diagram-wrap {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 30px 24px;
+    overflow-x: auto;
+  }
+  .diagram-wrap svg { display: block; margin: 0 auto; }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    margin-top: 16px;
+    font-size: 13px;
+    color: var(--ink-mute);
+    font-family: var(--mono);
+  }
+  .legend .swatch {
+    display: inline-block; width: 14px; height: 14px; border-radius: 3px; vertical-align: middle; margin-right: 6px; border: 1px solid var(--line-strong);
+  }
+
+  .state-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 20px 22px;
+    margin-bottom: 16px;
+  }
+  .state-card .state-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 10px;
+    flex-wrap: wrap;
+  }
+  .state-card .state-id {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid #c7d2fe;
+    border-radius: 4px;
+    padding: 2px 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .state-card h3 { margin: 0; font-size: 18px; font-weight: 600; color: var(--ink); }
+  .state-card .state-sub { font-size: 13px; color: var(--ink-mute); margin-left: auto; font-family: var(--mono); }
+  .state-card .grid { display: grid; grid-template-columns: 160px 1fr; gap: 10px 16px; margin-top: 8px; font-size: 14.5px; }
+  .state-card .grid dt { color: var(--ink-mute); font-family: var(--mono); font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.06em; }
+  .state-card .grid dd { margin: 0; color: var(--ink); }
+  .state-card .grid dd code { background: var(--bg-alt); }
+  .state-card ul.tight { margin: 4px 0 0; padding-left: 20px; }
+  .state-card ul.tight li { margin-bottom: 4px; }
+
+  .branch {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
+    padding: 12px 16px;
+    margin: 12px 0;
+    border-radius: 0 6px 6px 0;
+    font-size: 14px;
+    color: var(--ink);
+  }
+  .branch .lbl {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-right: 8px;
+  }
+
+  .chip {
+    display: inline-block; background: var(--bg-alt); border: 1px solid var(--line);
+    border-radius: 4px; padding: 1px 8px; font-family: var(--mono); font-size: 12px;
+    margin: 0 2px; color: var(--ink);
+  }
+  .chip.accent { background: var(--accent-soft); color: var(--accent); border-color: #c7d2fe; }
+  .chip.warn { background: var(--warn-soft); color: var(--warn); border-color: #fde68a; }
+  .chip.ok { background: var(--ok-soft); color: var(--ok); border-color: #bbf7d0; }
+  .chip.fail { background: var(--fail-soft); color: var(--fail); border-color: #fecaca; }
+  .chip.muted { background: var(--bg-alt); color: var(--ink-mute); border-color: var(--line); }
+
+  pre.code {
+    background: #1e1e2e; color: #cdd6f4; padding: 20px 22px; border-radius: 10px;
+    overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
+    margin: 14px 0;
+  }
+  pre.code .k { color: #cba6f7; }
+  pre.code .s { color: #a6e3a1; }
+  pre.code .c { color: #6c7086; font-style: italic; }
+  pre.code .t { color: #f9e2af; }
+  pre.code .n { color: #fab387; }
+
+  .mockup {
+    background: #1e1e2e; color: #cdd6f4; padding: 18px 22px; border-radius: 10px;
+    overflow-x: auto; font-family: var(--mono); font-size: 12.5px; line-height: 1.45;
+    margin: 14px 0; white-space: pre;
+  }
+
+  footer { margin-top: 100px; padding-top: 20px; border-top: 1px solid var(--line); color: var(--ink-mute); font-size: 13px; font-family: var(--mono); }
+
+  .story {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 22px 24px;
+    margin-bottom: 18px;
+  }
+  .story .story-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .story .story-id {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid #c7d2fe;
+    border-radius: 4px;
+    padding: 3px 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 600;
+  }
+  .story h3 { margin: 0; font-size: 18px; font-weight: 600; color: var(--ink); }
+  .story .deps {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--ink-mute);
+  }
+  .story .deps .chip { font-size: 11px; }
+  .story .as-a {
+    background: var(--bg-alt);
+    border-left: 3px solid var(--accent);
+    padding: 12px 16px;
+    border-radius: 0 6px 6px 0;
+    font-size: 14.5px;
+    color: var(--ink);
+    margin: 4px 0 16px;
+    line-height: 1.7;
+  }
+  .story .as-a strong { color: var(--accent); font-family: var(--mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; margin-right: 6px; }
+  .story h4 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-mute);
+    font-family: var(--mono);
+    font-weight: 600;
+    margin: 18px 0 6px;
+  }
+  .story ul, .story ol { margin: 0 0 0 0; padding-left: 22px; }
+  .story ul li, .story ol li { margin-bottom: 4px; font-size: 14.5px; }
+  .story .oos { color: var(--ink-mute); font-size: 13.5px; font-style: italic; }
+
+</style>
+</head>
+<body>
+<main>
+
+  <section>
+    <div class="eyebrow">che / ejecución de pipelines · flow</div>
+    <h1>Flujo de ejecución de pipelines</h1>
+    <p class="lede">
+      Diagrama de estados, transiciones, bifurcaciones y validaciones de todo
+      lo que es <strong>ejecución de pipelines</strong>: recolectar el input
+      del primer step, preflight de dependencias, correr cada step en
+      subprocess con streaming, loops del validator, persistencia de
+      artefactos por run, cancel, finalización y vuelta al menu.
+      <strong>No cubre la creación ni edición</strong> del YAML — eso vive en
+      <code>manage-pipelines-flow.html</code>.
+    </p>
+    <p>
+      Compañero de <code>manage-pipelines-flow.html</code> (que cubre el
+      wizard S1–S4 y el lister de drafts/ready) — éste cubre lo que pasa
+      cuando un pipeline <span class="chip ok">ready</span> se dispara desde
+      <code>My pipelines</code>: <kbd>enter</kbd> sobre el row → este flow.
+    </p>
+    <p>
+      Punto de entrada único: <code>My pipelines</code> → enter sobre un row
+      con chip <code>ready</code>. No hay invocación por subcomando ni por
+      argumento — el run vive dentro de la TUI principal de <code>che</code>.
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== MAPA GENERAL ========== -->
+  <section>
+    <div class="eyebrow">mapa</div>
+    <h2>State diagram</h2>
+    <p>
+      Flujo lineal con tres bifurcaciones terminales (<code>R4 done</code>,
+      <code>RF failed</code>, <code>RC cancelled</code>) y un loop dentro de
+      <code>R3</code> por cada step que tiene <code>validator</code>.
+      Pause (<code>RP</code>) sólo aparece si algún step define
+      <code>on_max_loops: pause</code> y se queda esperando una decisión
+      humana.
+    </p>
+
+    <div class="diagram-wrap">
+      <svg width="1020" height="340" viewBox="0 0 1020 340" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#52525b"/>
+          </marker>
+          <marker id="arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#4338ca"/>
+          </marker>
+          <marker id="arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#15803d"/>
+          </marker>
+          <marker id="arrow-fail" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#b91c1c"/>
+          </marker>
+          <marker id="arrow-warn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#b45309"/>
+          </marker>
+        </defs>
+
+        <!-- ===== R0 My pipelines ===== -->
+        <rect x="20" y="120" width="140" height="60" rx="8" fill="#fef3c7" stroke="#fde68a"/>
+        <text x="90" y="148" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#b45309" font-weight="600">My pipelines</text>
+        <text x="90" y="166" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#b45309">R0 · enter sobre ready</text>
+
+        <!-- ===== R1 InputPrompt ===== -->
+        <rect x="200" y="120" width="140" height="60" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+        <text x="270" y="148" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#4338ca" font-weight="600">InputPrompt</text>
+        <text x="270" y="166" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">R1 · pedir input step 1</text>
+
+        <!-- ===== R2 Preflight ===== -->
+        <rect x="380" y="120" width="140" height="60" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+        <text x="450" y="148" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#4338ca" font-weight="600">Preflight</text>
+        <text x="450" y="166" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">R2 · doctor + skills</text>
+
+        <!-- ===== R3 Running ===== -->
+        <rect x="560" y="120" width="160" height="60" rx="8" fill="#eef2ff" stroke="#c7d2fe"/>
+        <text x="640" y="148" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#4338ca" font-weight="600">Running</text>
+        <text x="640" y="166" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">R3 · steps + validator loop</text>
+
+        <!-- ===== R4 RunDone ===== -->
+        <rect x="760" y="60" width="140" height="60" rx="8" fill="#ecfdf5" stroke="#bbf7d0"/>
+        <text x="830" y="88" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#15803d" font-weight="600">RunDone</text>
+        <text x="830" y="106" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#15803d">R4 · all steps ok</text>
+
+        <!-- ===== RF Failed ===== -->
+        <rect x="760" y="140" width="140" height="60" rx="8" fill="#fef2f2" stroke="#fecaca"/>
+        <text x="830" y="168" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#b91c1c" font-weight="600">Failed</text>
+        <text x="830" y="186" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#b91c1c">RF · step o validator</text>
+
+        <!-- ===== RC Cancelled ===== -->
+        <rect x="760" y="220" width="140" height="60" rx="8" fill="#fef3c7" stroke="#fde68a"/>
+        <text x="830" y="248" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#b45309" font-weight="600">Cancelled</text>
+        <text x="830" y="266" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#b45309">RC · ctrl+c durante run</text>
+
+        <!-- ===== Main flow ===== -->
+        <line x1="160" y1="150" x2="196" y2="150" stroke="#4338ca" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+        <text x="178" y="112" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">enter (ready)</text>
+
+        <line x1="340" y1="150" x2="376" y2="150" stroke="#4338ca" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+        <text x="358" y="112" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">input ok</text>
+
+        <line x1="520" y1="150" x2="556" y2="150" stroke="#4338ca" stroke-width="1.6" marker-end="url(#arrow-accent)"/>
+        <text x="538" y="112" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4338ca">checks ok</text>
+
+        <!-- R3 → R4 (ok) -->
+        <line x1="700" y1="135" x2="756" y2="95" stroke="#15803d" stroke-width="1.6" marker-end="url(#arrow-ok)"/>
+        <text x="720" y="105" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#15803d">all done</text>
+
+        <!-- R3 → RF (fail) -->
+        <line x1="720" y1="170" x2="756" y2="170" stroke="#b91c1c" stroke-width="1.6" marker-end="url(#arrow-fail)"/>
+        <text x="738" y="160" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#b91c1c">step fail</text>
+
+        <!-- R3 → RC (cancel) -->
+        <line x1="700" y1="180" x2="756" y2="248" stroke="#b45309" stroke-width="1.6" marker-end="url(#arrow-warn)"/>
+        <text x="700" y="220" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#b45309">ctrl+c</text>
+
+        <!-- R2 → RF (preflight fail) -->
+        <path d="M 450 180 L 450 240 L 760 240" fill="none" stroke="#b91c1c" stroke-width="1.4" marker-end="url(#arrow-fail)" stroke-dasharray="4 3"/>
+        <text x="600" y="232" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#b91c1c">cli/skill missing → no se llega a R3</text>
+
+        <!-- ===== Validator loop sobre R3 ===== -->
+        <path d="M 600 120 C 600 78, 680 78, 680 120" fill="none" stroke="#52525b" stroke-width="1.4" marker-end="url(#arrow)"/>
+        <text x="640" y="72" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#52525b">validator loop · max_loops</text>
+
+        <!-- ===== Return: any terminal → R0 (My pipelines) ===== -->
+        <path d="M 830 280 L 830 308 L 90 308 L 90 180" fill="none" stroke="#15803d" stroke-width="1.4" marker-end="url(#arrow-ok)"/>
+        <text x="460" y="324" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#15803d">enter / esc → vuelve al lister de My pipelines</text>
+
+        <!-- ===== Notas al pie ===== -->
+        <text x="20" y="332" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#71717a">↩ atrás (esc) en R1: vuelve a R0 sin run iniciado. ⊗ ctrl+c en R3 abre RC modal (abort & save / back). RP (paused por on_max_loops=pause) no se dibuja — vive como sub-modal de R3.</text>
+      </svg>
+    </div>
+
+    <div class="legend">
+      <span><span class="swatch" style="background:#fef3c7;border-color:#fde68a;"></span>entry / pausa humana</span>
+      <span><span class="swatch" style="background:#eef2ff;border-color:#c7d2fe;"></span>screen del run</span>
+      <span><span class="swatch" style="background:#ecfdf5;border-color:#bbf7d0;"></span>terminal exitoso</span>
+      <span><span class="swatch" style="background:#fef2f2;border-color:#fecaca;"></span>terminal de error</span>
+      <span><span style="display:inline-block;width:24px;height:0;border-top:2px solid #4338ca;vertical-align:middle;margin-right:6px;"></span>flujo principal</span>
+      <span><span style="display:inline-block;width:24px;height:0;border-top:1.4px solid #52525b;vertical-align:middle;margin-right:6px;"></span>loops</span>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== ARTEFACTOS / PERSISTENCIA ========== -->
+  <section>
+    <div class="eyebrow">artefactos</div>
+    <h2>Persistencia del run</h2>
+    <p>
+      Cada run produce un directorio dedicado bajo
+      <code>~/.che/runs/&lt;slug&gt;/&lt;run-id&gt;/</code>. La idea es que un
+      crash, un kill abrupto o un terminal cerrado dejen suficiente material
+      en disco como para auditar qué pasó <strong>sin depender de que la TUI
+      siga viva</strong>: stdout/stderr se flushean en cada línea, el manifest
+      se reescribe atómicamente en cada transición de step, y el resultado
+      del step queda parseado en un archivo aparte para que el step siguiente
+      lo lea sin tener que re-tokenizar el stdout.
+    </p>
+
+    <div class="card accent">
+      <strong>Un run = un directorio inmutable.</strong> Una vez terminado
+      (done / failed / cancelled), nada lo edita. Re-correr el pipeline
+      genera un <code>run-id</code> nuevo. Esto convierte
+      <code>~/.che/runs/&lt;slug&gt;/</code> en un historial natural ordenado
+      por timestamp.
+    </div>
+
+    <h3>Layout en disco</h3>
+<pre class="code"><span class="c">~/.che/runs/triage-checkout-flow/</span>
+<span class="c">  2026-05-08T14-32-11/                     # run-id = ISO sin colons</span>
+    <span class="k">manifest.yaml</span>                          <span class="c"># estado del run (atómico)</span>
+    <span class="k">input.yaml</span>                             <span class="c"># input recolectado en R1</span>
+    <span class="k">step-01.stdout.log</span>                     <span class="c"># raw stream del subprocess</span>
+    <span class="k">step-01.stderr.log</span>
+    <span class="k">step-01.events.jsonl</span>                   <span class="c"># eventos parseados (stream-json)</span>
+    <span class="k">step-01.result.yaml</span>                     <span class="c"># resultado consumible por step N+1</span>
+    <span class="k">step-01.validator.01.stdout.log</span>         <span class="c"># validator loop iter 1</span>
+    <span class="k">step-01.validator.01.events.jsonl</span>
+    <span class="k">step-01.validator.01.verdict.yaml</span>        <span class="c"># {verdict: ok|fail, feedback: ...}</span>
+    <span class="k">step-02.stdout.log</span>
+    ...
+<span class="c">  2026-05-08T16-44-02/                     # otro run del mismo pipeline</span>
+    ...
+</pre>
+
+    <h3>Schema del <code>manifest.yaml</code></h3>
+    <p>
+      Reescrito atómicamente (<code>.tmp</code> + <code>os.Rename</code>) en
+      cada transición de step y al cerrar (done / failed / cancelled). La
+      estructura es plana para que un <code>cat</code> rápido te diga el
+      estado actual sin parsearlo entero.
+    </p>
+<pre class="code"><span class="k">run_id</span>: <span class="s">2026-05-08T14-32-11</span>
+<span class="k">pipeline_slug</span>: <span class="s">triage-checkout-flow</span>
+<span class="k">pipeline_path</span>: <span class="s">~/.che/pipelines/triage-checkout-flow.yaml</span>
+<span class="k">started_at</span>: <span class="s">2026-05-08T14:32:11-03:00</span>
+<span class="k">finished_at</span>: <span class="s">2026-05-08T14:38:42-03:00</span>   <span class="c"># vacío mientras status=running</span>
+<span class="k">status</span>: <span class="s">done</span>                              <span class="c"># running | done | failed | cancelled | interrupted</span>
+<span class="k">current_step</span>: <span class="n">4</span>                            <span class="c"># 1-indexed; congelado al terminar</span>
+<span class="k">total_steps</span>: <span class="n">4</span>
+<span class="k">che_version</span>: <span class="s">0.0.96</span>
+<span class="k">steps</span>:
+  - <span class="k">idx</span>: <span class="n">1</span>
+    <span class="k">name</span>: <span class="s">collect-signals</span>
+    <span class="k">cli</span>: <span class="s">claude</span>
+    <span class="k">status</span>: <span class="s">done</span>                          <span class="c"># pending | running | done | failed | cancelled</span>
+    <span class="k">started_at</span>: <span class="s">2026-05-08T14:32:11-03:00</span>
+    <span class="k">finished_at</span>: <span class="s">2026-05-08T14:34:03-03:00</span>
+    <span class="k">exit_code</span>: <span class="n">0</span>
+    <span class="k">validator</span>: <span class="s">null</span>                       <span class="c"># bloque presente solo si el step lo tiene</span>
+  - <span class="k">idx</span>: <span class="n">2</span>
+    <span class="k">name</span>: <span class="s">cluster-anomalies</span>
+    <span class="k">cli</span>: <span class="s">claude</span>
+    <span class="k">status</span>: <span class="s">done</span>
+    <span class="k">started_at</span>: <span class="s">2026-05-08T14:34:04-03:00</span>
+    <span class="k">finished_at</span>: <span class="s">2026-05-08T14:36:21-03:00</span>
+    <span class="k">exit_code</span>: <span class="n">0</span>
+    <span class="k">validator</span>:
+      <span class="k">cli</span>: <span class="s">gemini</span>
+      <span class="k">loops_run</span>: <span class="n">2</span>
+      <span class="k">max_loops</span>: <span class="n">3</span>
+      <span class="k">on_max_loops</span>: <span class="s">fail</span>
+      <span class="k">final_verdict</span>: <span class="s">ok</span>                  <span class="c"># ok | fail | timeout</span>
+</pre>
+
+    <h3>Schema del <code>step-NN.result.yaml</code></h3>
+    <p>
+      El "output canónico" del step. Lo escribe el runner al cerrar el
+      subprocess, parseando los eventos finales de <code>events.jsonl</code>
+      (assistant message final + cualquier <code>verdict</code> bloque YAML
+      que el step haya emitido). El step <code>N+1</code> con
+      <code>input: previous_output</code> lee este archivo, no el stdout
+      crudo — así no nos importa el verbose ni los tool-use chunks.
+    </p>
+<pre class="code"><span class="k">step_idx</span>: <span class="n">1</span>
+<span class="k">cli</span>: <span class="s">claude</span>
+<span class="k">kind</span>: <span class="s">skill</span>
+<span class="k">content</span>: <span class="s">collect-signals</span>
+<span class="k">duration_ms</span>: <span class="n">112430</span>
+<span class="k">exit_code</span>: <span class="n">0</span>
+<span class="k">output</span>: |
+  47 anomalías encontradas en logs de checkout entre 14:00 y 14:32...
+  Cluster A (latencia P99 &gt; 800ms): ...
+  Cluster B (timeouts gateway): ...
+<span class="k">verdict</span>: <span class="s">null</span>                              <span class="c"># solo presente si fue salida de un validator</span>
+</pre>
+
+    <h3>Schema del <code>input.yaml</code> (R1)</h3>
+<pre class="code"><span class="k">step_idx</span>: <span class="n">1</span>
+<span class="k">step_input_kind</span>: <span class="s">issue</span>                       <span class="c"># text|pr|issue|file|url|none</span>
+<span class="k">value</span>: <span class="s">"chichex/che#42"</span>                     <span class="c"># lo que el usuario tipeó / eligió</span>
+<span class="k">resolved_at</span>: <span class="s">2026-05-08T14:32:09-03:00</span>
+<span class="k">resolved_payload</span>: |                            <span class="c"># el contenido fetched (issue body, file contents, etc.)</span>
+  Title: "checkout 500s en europa"
+  Body: ...
+</pre>
+
+    <h3>Cuándo se escribe cada cosa</h3>
+    <table>
+      <thead><tr><th>Evento</th><th>Archivos tocados</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Entrar a R3 (start del run)</td>
+          <td>Crear dir, escribir <code>manifest.yaml</code> con <code>status: running</code> y <code>steps[].status: pending</code>; copiar <code>input.yaml</code> resuelto.</td>
+        </tr>
+        <tr>
+          <td>Step N arranca</td>
+          <td>Update <code>steps[N-1].status: running</code>, <code>started_at</code>. Manifest atómico.</td>
+        </tr>
+        <tr>
+          <td>Línea de stdout/stderr del step</td>
+          <td>Append a <code>step-NN.stdout.log</code> / <code>.stderr.log</code>. Sin atómico, sin batching: <code>file.WriteString(line) + Sync()</code> por línea.</td>
+        </tr>
+        <tr>
+          <td>Evento parseado del stream</td>
+          <td>Append a <code>step-NN.events.jsonl</code>. Sirve para reconstruir la UI o auditar tool-use sin volver a parsear stdout.</td>
+        </tr>
+        <tr>
+          <td>Step N termina (exit)</td>
+          <td>Escribir <code>step-NN.result.yaml</code>; update manifest <code>steps[N-1].status: done|failed</code>, <code>exit_code</code>, <code>finished_at</code>.</td>
+        </tr>
+        <tr>
+          <td>Validator loop K arranca</td>
+          <td>Update manifest <code>validator.loops_run: K</code>; subprocess separado; eventos a <code>step-NN.validator.0K.*</code>.</td>
+        </tr>
+        <tr>
+          <td>Validator loop K cierra</td>
+          <td>Escribir <code>step-NN.validator.0K.verdict.yaml</code>; update manifest. Si <code>verdict: ok</code> o <code>K == max_loops</code>, salir del loop.</td>
+        </tr>
+        <tr>
+          <td>Run termina (cualquier salida)</td>
+          <td>Update manifest <code>status</code> + <code>finished_at</code>. Cierre de file handles. Trigger de GC.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Garantías y no-garantías</h3>
+    <ul>
+      <li><strong>Atomicidad del manifest</strong>: <code>.tmp</code> + rename. Un crash entre dos transiciones deja un manifest viejo pero coherente, nunca uno trunco.</li>
+      <li><strong>Logs no son atómicos</strong>. En un <code>kill -9</code> podés perder hasta lo que estaba en buffer del runtime de Go (<code>Sync()</code> reduce a casi cero pero no garantiza). Asumido — el manifest es la fuente de verdad.</li>
+      <li><strong>No hay resume</strong> v1. Un run con <code>status: running</code> al boot es un <code>interrupted</code>. La siguiente vez que el lister lea el manifest reescribe el status a <code>interrupted</code> y deja el dir como está; el usuario decide borrarlo o no.</li>
+      <li><strong>GC</strong>: al iniciar un run nuevo, mantener los últimos 10 dirs por pipeline (<code>last_saved_at</code> desc); más viejos → <code>os.RemoveAll</code>. Configurable con env <code>CHE_RUN_HISTORY=N</code>, default 10.</li>
+      <li><strong>Concurrencia</strong>: dos runs simultáneos del mismo pipeline son posibles porque el <code>run-id</code> los separa físicamente. No hay lock — el segundo no espera al primero. Out of scope v1.</li>
+    </ul>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== CICLO DE VIDA / LIFECYCLE ========== -->
+  <section>
+    <div class="eyebrow">lifecycle</div>
+    <h2>Ciclo de vida end-to-end</h2>
+    <p>
+      Lo que pasa entre el <kbd>enter</kbd> sobre un row ready y la vuelta al
+      menu, mirado como una secuencia de bloques en vez de un grafo. Los
+      transitions ya están en el state diagram; esta sección documenta
+      <strong>qué hace el código</strong> en cada bloque.
+    </p>
+
+    <table>
+      <thead><tr><th>Fase</th><th>Trigger</th><th>Output</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>1 · Resolución</strong></td>
+          <td><kbd>enter</kbd> sobre row ready en <code>My pipelines</code>.</td>
+          <td>Re-parsear <code>~/.che/pipelines/&lt;slug&gt;.yaml</code> (no usar la copia en RAM del lister — puede estar stale si el usuario abrió <code>$EDITOR</code>). Validar <code>IsValid()</code> de nuevo. Si falla → toast en el lister, no se entra a R1.</td>
+        </tr>
+        <tr>
+          <td><strong>2 · Input (R1)</strong></td>
+          <td>Pipeline válido + step 1 con <code>input != none</code>.</td>
+          <td>Pantalla R1 que pide el input según el kind (textarea, picker de PR/issue via <code>gh</code>, file picker via TUI, URL input). Si <code>input: none</code>, R1 se skipea y va directo a R2.</td>
+        </tr>
+        <tr>
+          <td><strong>3 · Resolve</strong></td>
+          <td>Usuario confirma input.</td>
+          <td>Resolver el payload: <code>gh issue view &lt;ref&gt; --json title,body</code>, <code>os.ReadFile</code>, <code>http.Get</code>. Falla de fetch → R1 con error inline. Éxito → guardar a <code>input.yaml</code> in-memory (todavía no hay run-id).</td>
+        </tr>
+        <tr>
+          <td><strong>4 · Preflight (R2)</strong></td>
+          <td>Input resuelto.</td>
+          <td>Recorrer todos los steps y validar:<br>· CLI installed (reusar <code>internal/skills.Detect</code>).<br>· Si <code>kind: skill</code>, la skill existe en ese CLI.<br>· Si algún step requiere <code>gh</code> y <code>gh auth status</code> falla, marcar.<br>R2 muestra una checklist (✓/✗ por chequeo); si todos pasan, "siguiente"; si alguno falla, opciones <em>volver a My pipelines</em> / <em>correr <code>che doctor</code></em>.</td>
+        </tr>
+        <tr>
+          <td><strong>5 · Init run</strong></td>
+          <td>Preflight OK.</td>
+          <td>Generar <code>run-id</code> (<code>time.Now().UTC().Format("2006-01-02T15-04-05")</code>); crear <code>~/.che/runs/&lt;slug&gt;/&lt;run-id&gt;/</code>; escribir <code>input.yaml</code> + <code>manifest.yaml</code> inicial; trigger GC (mantener últimos N).</td>
+        </tr>
+        <tr>
+          <td><strong>6 · Step loop (R3)</strong></td>
+          <td>Manifest creado.</td>
+          <td>Por cada step del pipeline (en orden): resolver input (kind del step 1 ya está; para idx ≥ 1 con <code>previous_output</code> leer <code>step-(N-1).result.yaml</code>); spawn subprocess; tee stdout → <code>.stdout.log</code> + parser stream-json; tee stderr → <code>.stderr.log</code>; al exit, escribir <code>result.yaml</code> + actualizar manifest. Si tiene validator, entrar al validator loop.</td>
+        </tr>
+        <tr>
+          <td><strong>7 · Validator loop</strong></td>
+          <td>Step terminó con <code>exit_code: 0</code> + tiene <code>validator</code>.</td>
+          <td>Spawn validator con <code>step-NN.result.yaml/output</code> como input. Parsear <code>verdict: ok|fail</code> + <code>feedback</code> al final del stdout. Si <code>ok</code> → siguiente step. Si <code>fail</code> y <code>loops_run &lt; max_loops</code> → re-correr el step pasando el feedback como contexto extra. Si hit <code>max_loops</code> → aplicar <code>on_max_loops</code>.</td>
+        </tr>
+        <tr>
+          <td><strong>8 · Terminal</strong></td>
+          <td>All steps done · o un step/validator falló · o el usuario hizo <code>ctrl+c</code>.</td>
+          <td>Cerrar manifest con <code>status: done|failed|cancelled</code>, <code>finished_at</code>; transición a R4 (RunDone), RF (Failed) o RC (Cancelled). En todos los casos, el pipeline-yaml en <code>~/.che/pipelines/</code> queda intacto.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== ESTADOS DETALLADOS ========== -->
+  <section>
+    <div class="eyebrow">estados</div>
+    <h2>Detalle por estado</h2>
+    <p>
+      Cada estado describe trigger de entrada, render esperado, eventos del
+      modelo, transiciones disponibles y qué tecla las dispara. Los estados
+      <code>R</code> son screens; <code>RP</code> y <code>RC</code> son
+      modales que viven sobre <code>R3</code>.
+    </p>
+
+    <!-- R0 -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">R0</span>
+        <h3>My pipelines (entry — fuera del runner)</h3>
+        <span class="state-sub">internal/wizard/list.go</span>
+      </div>
+      <dl class="grid">
+        <dt>Entrada</dt><dd>Item 1 del menu principal.</dd>
+        <dt>Trigger del run</dt><dd><kbd>enter</kbd> sobre un row con chip <span class="chip ok">ready</span>.</dd>
+        <dt>Cambios vs hoy</dt><dd>Hoy (post-H10 del manage doc) muestra toast "ejecución no implementada". Esto se reemplaza por la transición a <code>R1</code>. Si <code>step[0].input == "none"</code> → salta directo a <code>R2</code>.</dd>
+        <dt>Estado del row post-run</dt><dd>El lister gana una línea extra por row ready: "<em>last run: 12 min ago</em>" + chip <span class="chip ok">✓ done</span> / <span class="chip fail">✗ failed</span> / <span class="chip warn">cancelled</span>. La info sale del manifest del último run.</dd>
+        <dt>Acciones nuevas</dt><dd><kbd>r</kbd> sobre cualquier row → screen "Run history" (lista de los últimos N runs, terminales). Out of scope del flow principal pero documentado en H10.</dd>
+      </dl>
+    </div>
+
+    <!-- R1 -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">R1</span>
+        <h3>InputPrompt — recolección del input del step 1</h3>
+        <span class="state-sub">screen 1 / 4 del runner</span>
+      </div>
+      <dl class="grid">
+        <dt>Trigger</dt><dd>R0 emite "run pipeline X" + <code>step[0].input != "none"</code>.</dd>
+        <dt>Render dinámico</dt><dd>
+          <ul class="tight">
+            <li><code>text</code> · textarea multiline (mismo estilo que S1 description). Hint: "el step recibirá este texto en stdin / como prompt".</li>
+            <li><code>pr</code> · single-line input que pide <code>owner/repo#NNN</code>. Validación: existe vía <code>gh pr view</code>.</li>
+            <li><code>issue</code> · análogo a <code>pr</code>, <code>gh issue view</code>.</li>
+            <li><code>file</code> · file picker (lista <code>$PWD</code> + <code>~/</code> con tab para navegar). Validación: existe + es regular file + size &lt; 10 MiB (configurable env <code>CHE_MAX_INPUT_SIZE</code>).</li>
+            <li><code>url</code> · single-line. Validación de schema (http/https). Fetch eager con timeout 10s al confirmar.</li>
+            <li><code>none</code> · screen no aparece — skip a R2.</li>
+          </ul>
+        </dd>
+        <dt>Validaciones</dt><dd>
+          <ul class="tight">
+            <li>Input no vacío (excepto <code>none</code>).</li>
+            <li>Resolución eager: si <code>gh</code> / <code>http</code> / <code>os.ReadFile</code> falla, mostrar el error inline y quedarse en R1.</li>
+            <li>Resolved payload no es vacío post-fetch (un PR sin body sigue siendo válido — solo bloqueamos si <code>err != nil</code>).</li>
+          </ul>
+        </dd>
+        <dt>Transiciones</dt><dd>
+          <ul class="tight">
+            <li><kbd>ctrl+s</kbd> / <kbd>enter</kbd> sobre el último foco · validar + resolver + ir a <code>R2</code>.</li>
+            <li><kbd>esc</kbd> · vuelve a <code>R0</code> (sin run iniciado, sin manifest creado).</li>
+            <li><kbd>ctrl+c</kbd> · salida total de <code>che</code>.</li>
+          </ul>
+        </dd>
+        <dt>Estado del modelo</dt><dd>Tras transición exitosa: <code>RunModel.Input</code> seteado con <code>{Kind, Value, ResolvedPayload}</code>. Sin escribir disco todavía.</dd>
+      </dl>
+    </div>
+
+    <!-- R2 -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">R2</span>
+        <h3>Preflight — chequeos de dependencias</h3>
+        <span class="state-sub">screen 2 / 4 del runner</span>
+      </div>
+      <dl class="grid">
+        <dt>Trigger</dt><dd>R1 confirmó el input · o R1 se skipeó por <code>input: none</code>.</dd>
+        <dt>Render</dt><dd>
+          Lista de chequeos con ✓ / ✗ / ⏳ (mientras se evalúan). Cada row tiene una línea adicional con el remedio si falla.
+          <div class="mockup">Preflight de <span style="color:#a6e3a1">triage-checkout-flow</span>
+
+  ✓ claude · v1.4.2
+  ✓ gemini · v0.8.1 (validator del step 2)
+  ✗ codex · no instalado
+      remedio: brew install codex · o cambiá el step 3 a otro CLI
+
+  ✓ skill <span style="color:#a6e3a1">collect-signals</span> en claude
+  ✓ skill <span style="color:#a6e3a1">cluster-anomalies</span> en claude
+  ✗ skill <span style="color:#f38ba8">summarize-checkout</span> en codex
+      remedio: edit pipeline (cambiar a prompt) o instalar la skill
+
+  ✗ gh · auth status fallido
+      remedio: gh auth login
+
+3 problemas · esc volver · r reintentar · d abrir doctor</div>
+        </dd>
+        <dt>Chequeos</dt><dd>
+          <ul class="tight">
+            <li><code>cli installed</code> por cada CLI distinto en <code>steps[].cli</code> y <code>steps[].validator.cli</code>.</li>
+            <li><code>skill exists</code> por cada step/validator con <code>kind: skill</code>.</li>
+            <li><code>gh auth</code> si algún step tiene <code>input: pr|issue</code>.</li>
+            <li><code>file readable</code> si <code>input.kind == "file"</code> (re-check post R1, defensivo: el archivo pudo desaparecer entre R1 y R2).</li>
+            <li><code>disk space</code> ≥ 100 MB libres en <code>~/.che/runs</code>. Si no, warning amarillo (no bloqueante).</li>
+          </ul>
+        </dd>
+        <dt>Transiciones</dt><dd>
+          <ul class="tight">
+            <li>Todos verdes → <kbd>enter</kbd> avanza a R3 (start del run).</li>
+            <li>Algún rojo → <kbd>enter</kbd> bloqueado. <kbd>r</kbd> reintenta los chequeos. <kbd>d</kbd> sale a <code>che doctor</code> (suspende TUI). <kbd>esc</kbd> vuelve a R0.</li>
+            <li>Solo warnings amarillos → <kbd>enter</kbd> avanza con confirm modal "continuar igual".</li>
+          </ul>
+        </dd>
+      </dl>
+    </div>
+
+    <!-- R3 -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">R3</span>
+        <h3>Running — full-screen takeover con steps + log streaming</h3>
+        <span class="state-sub">screen 3 / 4 · loopable por validator</span>
+      </div>
+      <dl class="grid">
+        <dt>Trigger</dt><dd>R2 OK → init run dir → spawn step 1.</dd>
+        <dt>Layout</dt><dd>
+          <div class="mockup">┌ Run: triage-checkout-flow                  step 2/4 ┐
+│ ▸ collect-signals     <span style="color:#a6e3a1">✓ done   2.3s</span>                  │
+│ ▸ cluster-anomalies   <span style="color:#f9e2af">⏳ running</span>     loop 1/3        │
+│   review              ✕ pending                       │
+│   summarize           ✕ pending                       │
+├───────────────────────────────────────────────────────┤
+│ [2/4] cluster-anomalies (claude / skill)              │
+│ &gt; Reading collect-signals.json...                     │
+│ &gt; Found 47 anomalies clustered into 6 groups          │
+│ &gt; Validator (gemini) loop 1/3...                      │
+│ █                                                     │
+├───────────────────────────────────────────────────────┤
+│ ctrl+c cancel · ctrl+l clear · ↑↓ scroll              │
+└───────────────────────────────────────────────────────┘</div>
+          <ul class="tight">
+            <li><strong>Header</strong>: nombre del pipeline, contador <code>step N/M</code>.</li>
+            <li><strong>Steps tracker</strong>: rows compactos por step con status icon + nombre + duración + (si validator) <code>loop K/max</code>.</li>
+            <li><strong>Log pane</strong>: viewport scrolleable con las últimas N líneas del subprocess actual (parseadas desde <code>stream-json</code> cuando aplica). Auto-scroll al fondo a menos que el usuario haya scrolleado arriba (sticky-bottom).</li>
+            <li><strong>Footer</strong>: hints de keys.</li>
+          </ul>
+        </dd>
+        <dt>Render del log pane</dt><dd>
+          <ul class="tight">
+            <li>Para CLIs con <code>stream-json</code> (claude/codex): parser tolerante (ver memory <em>bufio.Scanner 64 KiB</em>: buffer 1 MiB) emite líneas humano-legibles (<code>&gt; <em>assistant text</em></code>, <code>· <em>tool: read_file</em></code>).</li>
+            <li>Para CLIs sin stream-json (gemini text mode): mostrar el stdout crudo, una línea por línea.</li>
+            <li>Stderr en rojo dimmed, intercalado con stdout.</li>
+            <li>Reusar <code>internal/output</code> como sink — stdout=payload, stderr=logs (ver memory <em>logger unificado</em>).</li>
+          </ul>
+        </dd>
+        <dt>Transiciones</dt><dd>
+          <ul class="tight">
+            <li><kbd>↑/↓</kbd> · scroll del log pane (desactiva sticky-bottom).</li>
+            <li><kbd>g</kbd> · vuelve sticky-bottom y salta al fondo.</li>
+            <li><kbd>ctrl+l</kbd> · limpia el viewport (los logs en disco quedan; sólo afecta render).</li>
+            <li><kbd>tab</kbd> · cycle entre steps tracker y log pane (foco visual; afecta de qué step se renderean los logs).</li>
+            <li><kbd>ctrl+c</kbd> · abre <code>RC</code> modal (cancel confirm).</li>
+            <li>Auto: step exitoso + sin validator → siguiente step. Step exitoso + validator → validator loop. Step <code>exit_code != 0</code> → <code>RF</code>.</li>
+          </ul>
+        </dd>
+        <dt>Modelo</dt><dd>
+          <code>RunModel.Steps[i]</code> con <code>Status</code>, <code>StartedAt</code>, <code>FinishedAt</code>, <code>ExitCode</code>, <code>ValidatorState</code>; <code>RunModel.LogBuffer[i]</code> ring buffer de las últimas 2000 líneas por step (memoria; el archivo en disco es full).
+        </dd>
+      </dl>
+    </div>
+
+    <!-- R4 -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">R4</span>
+        <h3>RunDone — terminal exitoso</h3>
+        <span class="state-sub">terminal</span>
+      </div>
+      <dl class="grid">
+        <dt>Trigger</dt><dd>Todos los steps cerraron con <code>status: done</code>.</dd>
+        <dt>Render</dt><dd>
+          Resumen verde: nombre del pipeline, duración total, lista de steps con duración por step, path al run dir y al <code>step-NN.result.yaml</code> del último step (que es el "output efectivo del pipeline").
+          <div class="mockup">Run completo · <span style="color:#a6e3a1">triage-checkout-flow</span>
+
+duración: 6m 31s
+run id: 2026-05-08T14-32-11
+
+  1. collect-signals       2.3s    ✓
+  2. cluster-anomalies     2m 17s  ✓ (validator: 2 loops)
+  3. review                1m 04s  ✓
+  4. summarize             3m 07s  ✓
+
+output final: ~/.che/runs/triage-checkout-flow/
+              2026-05-08T14-32-11/step-04.result.yaml
+
+enter / esc volver al menu · y abrir result.yaml en $EDITOR</div>
+        </dd>
+        <dt>Transiciones</dt><dd>
+          <ul class="tight">
+            <li><kbd>enter</kbd> / <kbd>esc</kbd> · vuelve a R0 (lister de My pipelines, refresheado para mostrar el nuevo "last run").</li>
+            <li><kbd>y</kbd> · suspende TUI, abre <code>$EDITOR</code> sobre <code>step-NN.result.yaml</code> del último step.</li>
+            <li><kbd>l</kbd> · suspende TUI, abre <code>$PAGER</code> (fallback <code>less</code>) sobre <code>step-NN.stdout.log</code> del último step.</li>
+            <li><kbd>q</kbd> / <kbd>ctrl+c</kbd> · salida total.</li>
+          </ul>
+        </dd>
+      </dl>
+    </div>
+
+    <!-- RF -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">RF</span>
+        <h3>Failed — terminal de error</h3>
+        <span class="state-sub">terminal</span>
+      </div>
+      <dl class="grid">
+        <dt>Trigger</dt><dd>
+          Algún step terminó con <code>exit_code != 0</code>, o un validator devolvió <code>fail</code> y <code>on_max_loops: fail</code>, o R2 detectó un problema fatal y el usuario eligió no continuar.
+        </dd>
+        <dt>Render</dt><dd>
+          Resumen rojo con el mismo layout que R4 pero marcando el step que falló y mostrando las últimas 20 líneas de su <code>stderr.log</code> + stdout.
+          <div class="mockup">Run falló · <span style="color:#f38ba8">triage-checkout-flow</span>
+
+step 2 · cluster-anomalies (claude / skill)
+exit_code: 1   ·   duración: 1m 22s
+
+últimas líneas:
+  &gt; tool: read_file failed: ENOENT
+  &gt; assistant: no puedo continuar sin signals.json
+  ! claude exited with code 1
+
+run id: 2026-05-08T14-32-11
+ver logs: ~/.che/runs/.../step-02.stderr.log
+
+enter / esc volver · l abrir log · r retry pipeline</div>
+        </dd>
+        <dt>Transiciones</dt><dd>
+          <ul class="tight">
+            <li><kbd>enter</kbd> / <kbd>esc</kbd> · vuelve a R0.</li>
+            <li><kbd>l</kbd> · <code>$PAGER</code> sobre el <code>stderr.log</code> del step que falló.</li>
+            <li><kbd>r</kbd> · re-disparar el pipeline desde R1 (input se conserva por default — el usuario lo puede modificar). Crea un <code>run-id</code> nuevo.</li>
+          </ul>
+        </dd>
+      </dl>
+    </div>
+
+    <!-- RC -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">RC</span>
+        <h3>Cancelled — confirm de cancelación</h3>
+        <span class="state-sub">modal sobre R3</span>
+      </div>
+      <dl class="grid">
+        <dt>Trigger</dt><dd><kbd>ctrl+c</kbd> en R3 (siempre — el run no es "salida accidental").</dd>
+        <dt>Render</dt><dd>
+          Modal con 3 opciones:
+          <ul class="tight">
+            <li><strong>abort & save</strong> — SIGTERM al subprocess, gracia 5s, SIGKILL si no salió. Manifest se cierra con <code>status: cancelled</code> + el step en curso queda con <code>status: cancelled</code>. Ir a un screen tipo RF pero con tono amarillo.</li>
+            <li><strong>back to run</strong> — cierra el modal, el run sigue.</li>
+            <li><strong>exit che</strong> — abort & save + salida total del proceso (no vuelve al menu).</li>
+          </ul>
+        </dd>
+        <dt>Comportamiento</dt><dd>
+          <ul class="tight">
+            <li>El runner SIEMPRE intenta SIGTERM antes que SIGKILL — los CLIs pueden estar haciendo cleanup (cerrar archivos, terminar tool calls, llamar abort de la API).</li>
+            <li>Gracia configurable env <code>CHE_KILL_GRACE</code>, default 5s.</li>
+            <li>Logs flusheados antes del exit.</li>
+          </ul>
+        </dd>
+      </dl>
+    </div>
+
+    <!-- RP -->
+    <div class="state-card">
+      <div class="state-head">
+        <span class="state-id">RP</span>
+        <h3>Paused — validator agotó max_loops con on_max_loops=pause</h3>
+        <span class="state-sub">modal sobre R3 · sólo si el step lo declara</span>
+      </div>
+      <dl class="grid">
+        <dt>Trigger</dt><dd>Step con <code>validator</code> + <code>on_max_loops: pause</code> agotó el contador de loops.</dd>
+        <dt>Render</dt><dd>
+          Modal con el último <code>verdict.feedback</code> del validator + 3 opciones:
+          <ul class="tight">
+            <li><strong>continuar</strong> — aceptar el último output del step, pasar al siguiente. Manifest registra <code>final_verdict: human-override</code>.</li>
+            <li><strong>retry</strong> — reset del contador y otro intento (consume <code>max_loops</code> nuevos). Útil si el usuario quiere editar el prompt antes (out of scope v1: editar el prompt mid-run).</li>
+            <li><strong>abort</strong> — equivalente a <code>on_max_loops: fail</code>. Va a RF.</li>
+          </ul>
+        </dd>
+        <dt>Estado del modelo</dt><dd>El subprocess ya no está vivo cuando el modal aparece — los outputs ya están escritos. RP es 100% decisión humana.</dd>
+      </dl>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== BIFURCACIONES ========== -->
+  <section>
+    <div class="eyebrow">bifurcaciones</div>
+    <h2>Decisiones que cambian la UI o el comportamiento</h2>
+
+    <h3>B1 — Tipo de input del step 1 cambia R1</h3>
+    <div class="branch">
+      <span class="lbl">input: text</span>
+      Textarea multiline. Resolución: el texto crudo es el payload.
+    </div>
+    <div class="branch">
+      <span class="lbl">input: pr / issue</span>
+      Single-line input + helper que sugiere repos del <code>$PWD</code> (lee <code>git remote -v</code> + cache de <code>gh repo list</code>). Resolución: <code>gh pr view --json title,body,comments</code>. Falla → R1 con error inline.
+    </div>
+    <div class="branch">
+      <span class="lbl">input: file</span>
+      File picker minimalista con tab para nav + filtro inline. Resolución: <code>os.ReadFile</code> + check de tamaño.
+    </div>
+    <div class="branch">
+      <span class="lbl">input: url</span>
+      Single-line. Resolución: <code>http.Get</code> con timeout 10s, body como string. Status no-2xx → error inline.
+    </div>
+    <div class="branch">
+      <span class="lbl">input: none</span>
+      R1 se skipea. <code>input.yaml</code> tiene <code>step_input_kind: none</code> + <code>resolved_payload: ""</code>.
+    </div>
+
+    <h3>B2 — Validator on/off cambia el flow del step</h3>
+    <div class="branch">
+      <span class="lbl">validator: nil</span>
+      Step termina → siguiente step. <code>manifest.steps[i].validator</code> ausente.
+    </div>
+    <div class="branch">
+      <span class="lbl">validator: presente</span>
+      Step termina con <code>exit_code: 0</code> → spawn validator con el output del step como input. Parsear <code>verdict</code>. Loopear hasta <code>ok</code> o <code>max_loops</code>. Si fail final → aplicar <code>on_max_loops</code>.
+    </div>
+
+    <h3>B3 — Resolución de <code>previous_output</code></h3>
+    <div class="branch">
+      <span class="lbl">step idx == 0</span>
+      Imposible por construcción — <code>IsValid</code> ya bloqueó esto en el wizard. Defensive: si llegara a aparecer, RF inmediato con error "previous_output en step 0".
+    </div>
+    <div class="branch">
+      <span class="lbl">step idx ≥ 1</span>
+      Leer <code>step-(N-1).result.yaml/output</code> y pasarlo como input del step N. Si el step previo terminó con validator activo, leer del último loop exitoso.
+    </div>
+
+    <h3>B4 — <code>on_max_loops</code></h3>
+    <div class="branch">
+      <span class="lbl">fail</span>
+      Manifest <code>final_verdict: fail</code> · run termina en RF.
+    </div>
+    <div class="branch">
+      <span class="lbl">continue</span>
+      Manifest <code>final_verdict: fail-but-continued</code> · acepta el último output del step y pasa al siguiente. Útil para validators "mejor esfuerzo" donde la última iteración igual sirve.
+    </div>
+    <div class="branch">
+      <span class="lbl">pause</span>
+      Trigger de RP modal · espera decisión humana.
+    </div>
+
+    <h3>B5 — Render del log pane según CLI</h3>
+    <div class="branch">
+      <span class="lbl">claude / codex (stream-json --verbose)</span>
+      Parser de eventos: <code>{type:assistant, content}</code> → línea humana, <code>{type:tool_use, name, input}</code> → "· tool: <em>name</em>". Buffer 1 MiB del scanner para evitar el truncate silencioso de 64 KiB (ver memory).
+    </div>
+    <div class="branch">
+      <span class="lbl">gemini / opencode (text)</span>
+      Stdout crudo line by line. Sin parsing.
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== MODELO ========== -->
+  <section>
+    <div class="eyebrow">modelo</div>
+    <h2>Modelo interno</h2>
+    <p>
+      Una struct vive en el bubbletea program del runner. Los handles a los
+      subprocesos y los <code>file</code> abiertos viven adentro — al cerrar
+      el program (cualquier salida) se hace flush + close de todo.
+    </p>
+
+<pre class="code"><span class="c">// internal/runner/model.go</span>
+<span class="k">type</span> <span class="t">RunModel</span> <span class="k">struct</span> {
+    Screen   <span class="t">RunScreen</span>           <span class="c">// R1 | R2 | R3 | R4 | RF | RC | RP</span>
+    Pipeline <span class="t">wizard.Pipeline</span>     <span class="c">// reusa el struct del wizard</span>
+
+    <span class="c">// R1</span>
+    Input    <span class="t">InputState</span>          <span class="c">// kind, value, resolvedPayload</span>
+
+    <span class="c">// R2</span>
+    Preflight <span class="t">[]PreflightCheck</span>   <span class="c">// {Label, Status, Remedy}</span>
+
+    <span class="c">// R3</span>
+    RunID      <span class="t">string</span>            <span class="c">// 2026-05-08T14-32-11</span>
+    RunDir     <span class="t">string</span>            <span class="c">// ~/.che/runs/&lt;slug&gt;/&lt;id&gt;/</span>
+    Steps      []<span class="t">StepRun</span>          <span class="c">// status, started, finished, exit, validator</span>
+    Active     <span class="t">int</span>               <span class="c">// idx del step en curso (0 = step 1)</span>
+    LogBuffers []*<span class="t">RingBuffer</span>      <span class="c">// 2000 líneas por step, en RAM</span>
+
+    <span class="c">// log pane focus</span>
+    LogFocus      <span class="t">int</span>            <span class="c">// idx del step cuyos logs se renderean</span>
+    StickyBottom  <span class="t">bool</span>           <span class="c">// auto-scroll al fondo</span>
+
+    <span class="c">// modales</span>
+    CancelModal   <span class="t">bool</span>
+    PauseModal    *<span class="t">PauseState</span>     <span class="c">// nil si no hay pause activa</span>
+
+    <span class="c">// process handles (cerrados al exit del program)</span>
+    activeCmd     *<span class="t">exec.Cmd</span>
+    stdoutFile    *<span class="t">os.File</span>
+    stderrFile    *<span class="t">os.File</span>
+    eventsFile    *<span class="t">os.File</span>
+}
+
+<span class="k">type</span> <span class="t">StepRun</span> <span class="k">struct</span> {
+    Idx        <span class="t">int</span>               <span class="c">// 1-indexed para manifest</span>
+    Status     <span class="t">StepStatus</span>        <span class="c">// pending|running|done|failed|cancelled</span>
+    StartedAt  <span class="t">time.Time</span>
+    FinishedAt <span class="t">time.Time</span>
+    ExitCode   <span class="t">int</span>
+    Validator  *<span class="t">ValidatorRun</span>     <span class="c">// nil si el step no tiene</span>
+}
+
+<span class="k">type</span> <span class="t">ValidatorRun</span> <span class="k">struct</span> {
+    LoopsRun     <span class="t">int</span>
+    MaxLoops     <span class="t">int</span>
+    OnMaxLoops   <span class="t">string</span>          <span class="c">// fail|continue|pause</span>
+    FinalVerdict <span class="t">string</span>          <span class="c">// "" mientras no termine; ok|fail|timeout|human-override</span>
+    LastFeedback <span class="t">string</span>          <span class="c">// del último verdict.yaml</span>
+}</pre>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== NAMING / PATHS ========== -->
+  <section>
+    <div class="eyebrow">paths</div>
+    <h2>Naming, paths y conflictos</h2>
+    <table>
+      <thead>
+        <tr><th>Aspecto</th><th>Decisión</th><th>Notas</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>run-id</code></td>
+          <td><code>time.Now().UTC().Format("2006-01-02T15-04-05")</code></td>
+          <td>Sortable, filename-safe (sin colons), sin colision en granularidad de 1s. Si dos runs caen en el mismo segundo (edge case), el segundo agrega sufijo <code>-2</code>.</td>
+        </tr>
+        <tr>
+          <td>Run dir</td>
+          <td><code>~/.che/runs/&lt;slug&gt;/&lt;run-id&gt;/</code></td>
+          <td>Permisos <code>0700</code> en dirs, <code>0600</code> en files. Crear lazy.</td>
+        </tr>
+        <tr>
+          <td>Atomicidad del manifest</td>
+          <td><code>manifest.yaml.tmp</code> + <code>os.Rename</code></td>
+          <td>Mismo patrón que el wizard. Tests reusables.</td>
+        </tr>
+        <tr>
+          <td>Logs</td>
+          <td>Append continuo + <code>Sync()</code> por línea</td>
+          <td>No atómicos. Trade-off conocido — losses bajo SIGKILL son aceptables.</td>
+        </tr>
+        <tr>
+          <td>GC</td>
+          <td>Mantener últimos N runs por pipeline (default 10, env <code>CHE_RUN_HISTORY</code>)</td>
+          <td>Trigger al iniciar un run nuevo. <code>os.RemoveAll</code> de los más viejos.</td>
+        </tr>
+        <tr>
+          <td>Concurrencia</td>
+          <td>Sin lock. Dos runs simultáneos posibles.</td>
+          <td>Out of scope v1. Cada uno con su <code>run-id</code>, no se pisan.</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== INVOCACIÓN AL CLI ========== -->
+  <section>
+    <div class="eyebrow">subprocess</div>
+    <h2>Cómo se invoca cada CLI</h2>
+    <p>
+      Convenciones por CLI. Todas pasan el input/payload por stdin para
+      evitar problemas de escaping de shell. La elección entre
+      <code>stream-json</code> y <code>text</code> sigue la regla de la
+      memory <em>Invocación al CLI de claude</em>: stream-json para
+      ejecuciones largas con tool use; text si el step explícitamente lo
+      pide (no expuesto v1, default stream-json donde aplica).
+    </p>
+    <table>
+      <thead><tr><th>CLI</th><th>Comando</th><th>Modo de output</th></tr></thead>
+      <tbody>
+        <tr><td><code>claude</code></td><td><code>claude -p &lt;skill-or-prompt&gt; --output-format stream-json --verbose</code></td><td>events.jsonl + stdout en log</td></tr>
+        <tr><td><code>codex</code></td><td><code>codex exec --json &lt;skill-or-prompt&gt;</code></td><td>events.jsonl + stdout en log</td></tr>
+        <tr><td><code>gemini</code></td><td><code>gemini -p &lt;prompt&gt;</code> · si <code>kind: skill</code> → <code>gemini /&lt;skill&gt;</code> (alias de commands TOML)</td><td>stdout crudo (text mode)</td></tr>
+        <tr><td><code>opencode</code></td><td><code>opencode run &lt;prompt&gt;</code></td><td>stdout crudo</td></tr>
+      </tbody>
+    </table>
+    <p>
+      <strong>Stdin del subprocess</strong>: el <code>resolved_payload</code>
+      del input (R1) o el <code>output</code> del <code>previous_output</code>
+      step. Para CLIs que no leen stdin, se concatena al final del prompt
+      con un separador (<code>\n\n---\n\n</code>).
+    </p>
+    <p>
+      <strong>Validator</strong>: mismo patrón, pero el prompt incluye un
+      preámbulo que pide explícitamente el bloque YAML <code>verdict</code>
+      al final. El parser de <code>verdict.yaml</code> es tolerante: busca el
+      último bloque YAML válido en el output que tenga la clave
+      <code>verdict</code>; si no encuentra ninguno, asume <code>fail</code>
+      con feedback "no verdict block".
+    </p>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== ERRORES ========== -->
+  <section>
+    <div class="eyebrow">errores y edge cases</div>
+    <h2>Tabla de errores</h2>
+    <table>
+      <thead>
+        <tr><th>Caso</th><th>Estado donde se detecta</th><th>Comportamiento</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Pipeline-yaml editado a inválido entre listado y enter</td><td>R0 → resolución</td>
+          <td>Toast en R0 con el error de <code>IsValid</code>; no se entra a R1.</td>
+        </tr>
+        <tr>
+          <td>R1 fetch falla (issue inexistente, file ENOENT, http 404)</td><td>R1</td>
+          <td>Error inline rojo con el mensaje exacto. Foco vuelve al input. No se crea run dir.</td>
+        </tr>
+        <tr>
+          <td>R1 file > <code>CHE_MAX_INPUT_SIZE</code></td><td>R1</td>
+          <td>Error inline "archivo demasiado grande (X MiB / Y MiB max)". No se crea run dir.</td>
+        </tr>
+        <tr>
+          <td>R2 CLI no instalado</td><td>R2</td>
+          <td>Row rojo con el remedio. Bloquea avance hasta retry o doctor.</td>
+        </tr>
+        <tr>
+          <td>R2 skill desinstalada (vs cuando se creó el pipeline)</td><td>R2</td>
+          <td>Row rojo. Sugerencia: edit del pipeline (cambiar a prompt) o instalar la skill.</td>
+        </tr>
+        <tr>
+          <td>R2 disk space &lt; 100 MB</td><td>R2</td>
+          <td>Warning amarillo. Confirm modal al enter para continuar.</td>
+        </tr>
+        <tr>
+          <td>Spawn del subprocess falla (binary no ejecutable, PATH inconsistente)</td><td>R3 step start</td>
+          <td>RF con el error de <code>exec.Cmd.Start()</code>. El step queda <code>status: failed</code> con <code>exit_code: -1</code>.</td>
+        </tr>
+        <tr>
+          <td>Subprocess crashea mid-step (<code>exit_code != 0</code>)</td><td>R3</td>
+          <td>RF. Manifest cierra con el step en <code>failed</code>. <code>result.yaml</code> se escribe igual con <code>output</code> = lo que haya en stdout, <code>exit_code != 0</code>.</td>
+        </tr>
+        <tr>
+          <td>Subprocess no devuelve nada (stdout vacío al exit 0)</td><td>R3 step end</td>
+          <td>Si el step tiene validator → validator probablemente devuelve <code>fail</code> (no hay nada que validar). Si no → <code>result.yaml.output: ""</code> + sigue. <strong>No</strong> es error fatal por sí solo.</td>
+        </tr>
+        <tr>
+          <td>Validator no emite bloque <code>verdict</code></td><td>R3 validator end</td>
+          <td>Parser tolerante asume <code>verdict: fail</code> + <code>feedback: "no verdict block emitted"</code>. Loop continúa o aplica <code>on_max_loops</code> según corresponda.</td>
+        </tr>
+        <tr>
+          <td>Validator hit <code>max_loops</code> con on_max_loops=fail</td><td>R3 validator</td>
+          <td>RF. Manifest <code>final_verdict: fail</code>.</td>
+        </tr>
+        <tr>
+          <td>Validator hit <code>max_loops</code> con on_max_loops=continue</td><td>R3 validator</td>
+          <td>Aceptar último output, siguiente step. Manifest <code>final_verdict: fail-but-continued</code>.</td>
+        </tr>
+        <tr>
+          <td>Validator hit <code>max_loops</code> con on_max_loops=pause</td><td>R3 validator</td>
+          <td>RP modal. Espera decisión humana. El subprocess ya no está vivo.</td>
+        </tr>
+        <tr>
+          <td>previous_output del step N+1, step N tuvo output vacío</td><td>R3 step start</td>
+          <td>Pasar string vacío. El subprocess decide qué hacer. No es error de runner.</td>
+        </tr>
+        <tr>
+          <td>Disco lleno mid-run (no se puede escribir log)</td><td>R3</td>
+          <td>RF inmediato. Manifest cierra con <code>status: failed</code> + nota "disk full". El subprocess vivo recibe SIGTERM.</td>
+        </tr>
+        <tr>
+          <td>ctrl+c en R3 con subprocess que ignora SIGTERM</td><td>R3 → RC</td>
+          <td>Tras gracia <code>CHE_KILL_GRACE</code> (default 5s) → SIGKILL. Manifest cierra <code>cancelled</code>. Logs flusheados.</td>
+        </tr>
+        <tr>
+          <td>Resize del terminal mid-run</td><td>todos los R</td>
+          <td><code>tea.WindowSizeMsg</code> → re-layout. El log pane se redimensiona; la cantidad de líneas visibles cambia pero el ring buffer no.</td>
+        </tr>
+        <tr>
+          <td>Crash de <code>che</code> (panic, kill -9 al proceso padre)</td><td>—</td>
+          <td>Manifest queda con <code>status: running</code> a pesar de que no hay nadie corriendo. Al próximo boot (R0 leyendo manifests para mostrar "last run"), si <code>status == running</code> y <code>started_at &gt; 1h</code> → reescribir a <code>interrupted</code>.</td>
+        </tr>
+        <tr>
+          <td>Pipeline-yaml borrado entre runs anteriores</td><td>R0 al renderear "last run"</td>
+          <td>Si el row no aparece en el lister (porque el yaml no existe), tampoco se intenta mostrar last run. El run dir queda como historial huérfano (no se borra automáticamente).</td>
+        </tr>
+        <tr>
+          <td>Stream-json line &gt; 1 MiB (memory <em>bufio.Scanner</em>)</td><td>R3 parsing</td>
+          <td>Buffer del scanner subido a 1 MiB. Si igual se excede: emit warning en logs y caer a "stdout crudo" para esa línea (no RF).</td>
+        </tr>
+      </tbody>
+    </table>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== PLAN DE ARCHIVOS ========== -->
+  <section>
+    <div class="eyebrow">implementación</div>
+    <h2>Plan de archivos</h2>
+    <table>
+      <thead><tr><th>Archivo</th><th>Responsabilidad</th></tr></thead>
+      <tbody>
+        <tr><td><code>internal/wizard/list.go</code></td><td>Reemplazar el toast "ejecución no implementada" por el dispatch al runner. Agregar lectura del último manifest por row para renderear chip "last run".</td></tr>
+        <tr><td><code>cmd/root.go</code></td><td><code>runMyPipelines</code> agrega caso para <code>ListActionRun</code> → <code>runner.Run(path, &amp;wizard.Pipeline{...})</code>.</td></tr>
+        <tr><td><code>internal/runner/model.go</code></td><td>Struct <code>RunModel</code>, <code>StepRun</code>, <code>ValidatorRun</code>, <code>InputState</code>, <code>PreflightCheck</code> + enums.</td></tr>
+        <tr><td><code>internal/runner/runner.go</code></td><td>Bubbletea program raíz que despacha a la screen actual y mantiene el modelo. Entry: <code>Run(pipelinePath string) (exitApp bool, err error)</code>.</td></tr>
+        <tr><td><code>internal/runner/input.go</code></td><td>Screen R1 (textarea / pr-issue-picker / file-picker / url-input / none-skip).</td></tr>
+        <tr><td><code>internal/runner/preflight.go</code></td><td>Screen R2 + lógica de chequeos (CLI, skill, gh auth, disk).</td></tr>
+        <tr><td><code>internal/runner/running.go</code></td><td>Screen R3 (steps tracker + log pane viewport + footer).</td></tr>
+        <tr><td><code>internal/runner/done.go</code></td><td>Screen R4 + RF (mismo struct con flag <code>failed</code>).</td></tr>
+        <tr><td><code>internal/runner/cancel.go</code></td><td>Modal RC.</td></tr>
+        <tr><td><code>internal/runner/pause.go</code></td><td>Modal RP.</td></tr>
+        <tr><td><code>internal/runner/manifest.go</code></td><td>Schema + serialización + write atómico de <code>manifest.yaml</code>. <code>UpdateStep(idx, status, ...)</code> con write per call.</td></tr>
+        <tr><td><code>internal/runner/result.go</code></td><td>Schema + write de <code>step-NN.result.yaml</code>; reader para <code>previous_output</code>.</td></tr>
+        <tr><td><code>internal/runner/spawn.go</code></td><td><code>spawnStep(step, input, runDir) (*exec.Cmd, files, err)</code> + el <code>tee</code> de stdout/stderr a archivos + buffers + parser de eventos.</td></tr>
+        <tr><td><code>internal/runner/parser/claude.go</code></td><td>Parser de stream-json de claude. Buffer 1 MiB. Devuelve líneas humanas para el log pane.</td></tr>
+        <tr><td><code>internal/runner/parser/codex.go</code></td><td>Parser de codex --json (cuando exista; v1 puede ser stub que cae a stdout crudo).</td></tr>
+        <tr><td><code>internal/runner/parser/raw.go</code></td><td>Pass-through line-by-line para gemini/opencode.</td></tr>
+        <tr><td><code>internal/runner/validator.go</code></td><td>Loop del validator: spawn, parse <code>verdict.yaml</code> tolerante, decide continuar / aceptar / fail / pause.</td></tr>
+        <tr><td><code>internal/runner/input_resolve.go</code></td><td>Resolución eager del input: <code>gh pr view</code>, <code>os.ReadFile</code>, <code>http.Get</code> + tests con fakes.</td></tr>
+        <tr><td><code>internal/runner/gc.go</code></td><td><code>Prune(slug, keepN)</code> para mantener últimos N runs. Llamado al iniciar un run nuevo.</td></tr>
+        <tr><td><code>internal/runner/ringbuf.go</code></td><td>Ring buffer de líneas para el log pane. Tests unitarios.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Reúso</h3>
+    <ul>
+      <li><code>internal/wizard.Pipeline</code> · el struct ya existe; el runner consume el mismo, con su <code>IsValid</code>.</li>
+      <li><code>internal/skills</code> · <code>Detect()</code> + listado, ya implementadas. Preflight es un wrapper.</li>
+      <li><code>internal/output</code> · sink unificado; el runner adapta <code>logger.AsWriter</code> al tee.</li>
+      <li><code>gopkg.in/yaml.v3</code> · ya en <code>go.mod</code>.</li>
+      <li>Estilos lipgloss · copiar paleta del wizard (<code>internal/wizard/styles.go</code>).</li>
+    </ul>
+
+    <h3>Dependencias nuevas</h3>
+    <ul>
+      <li>Ninguna externa. Todo lo que se necesita está en stdlib o en lo ya importado: <code>os/exec</code>, <code>bufio</code> (con buffer subido), <code>encoding/json</code>, <code>net/http</code>, <code>gopkg.in/yaml.v3</code>.</li>
+      <li><code>gh</code> CLI · runtime dep, no go-dep. Preflight lo verifica.</li>
+    </ul>
+
+    <h3>Tests</h3>
+    <ul>
+      <li><strong>Unitarios</strong>: ringbuf, manifest serialize/deserialize, parser de stream-json (golden inputs con eventos representativos), validator verdict parser tolerante (con/sin verdict block, multi-block, malformed YAML), GC con N=10 y N=0.</li>
+      <li><strong>Integración con fake CLIs</strong>: scripts shell que emiten stream-json predecible (success / fail / silent). Suficiente para ejercitar todo el flow R3 sin necesidad de claude real. Reusar el patrón del harness e2e (memory <em>diseño del harness e2e</em>).</li>
+      <li><strong>e2e con TUI</strong>: stdin secuencial → R1 → R2 → R3 → R4. Asserts sobre archivos generados (manifest.yaml, result.yaml, logs no vacíos). Tmp HOME por test.</li>
+      <li><strong>No tests</strong> de View() de R3 — el viewport con stream-json es difícil de fixturear deterministicamente. Confiar en smoke manual.</li>
+    </ul>
+  </section>
+
+  <hr class="rule">
+
+  <!-- ========== ROADMAP / USER STORIES ========== -->
+  <section>
+    <div class="eyebrow">roadmap</div>
+    <h2>Plan de desarrollo — historias de usuario</h2>
+    <p>
+      Diez historias incrementales. Cada una entrega valor visible al usuario
+      final, deja el runner funcional al cierre, y se valida con un test e2e
+      automatizado <strong>y</strong> un smoke manual reproducible. El orden
+      es de dependencia: cada historia se construye sobre la anterior.
+    </p>
+    <p>
+      <strong>Cancel modal (RC)</strong> entra transversal en H4 — la
+      primera historia donde hay un subprocess vivo que cortar.
+    </p>
+
+    <!-- H1 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H1</span>
+        <h3>Wire-up: enter sobre ready dispara el runner skeleton</h3>
+        <span class="deps">deps: <span class="chip muted">ninguna</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> dev de che, <strong>quiero</strong> que enter sobre un row ready en <code>My pipelines</code> entre a una pantalla del runner (placeholder), <strong>para</strong> validar el routing antes de implementar funcionalidad real.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>Reemplazar el toast "ejecución no implementada" en <code>internal/wizard/list.go</code> por <code>m.action = ListActionRun; m.target = sel.path; tea.Quit</code>.</li>
+        <li>Agregar enum <code>ListActionRun</code>.</li>
+        <li><code>cmd/root.go</code> en <code>runMyPipelines</code> rutea <code>ListActionRun</code> a <code>runner.Run(target)</code>.</li>
+        <li><code>internal/runner/runner.go</code> · <code>Run(path string) (exitApp bool, err error)</code> que carga el pipeline desde disco, valida con <code>IsValid</code>, y muestra una pantalla con título "Run · &lt;name&gt;" + mensaje "runner pendiente". <kbd>esc</kbd> vuelve, <kbd>q</kbd> sale total.</li>
+        <li>Sin tocar disco, sin spawnear nada.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Crear un pipeline ready cualquiera vía wizard.</li>
+        <li><code>che</code> → My pipelines → enter sobre el row → ver pantalla skeleton del runner.</li>
+        <li><kbd>esc</kbd> → vuelve al lister; <kbd>q</kbd> → exit total.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Tmp HOME con un yaml ready pre-armado (sin status block).</li>
+        <li>Stdin: <code>"1\n"</code> (My pipelines), <code>enter</code> sobre el primer row, <code>esc</code>, <code>esc</code>, <code>0</code>.</li>
+        <li>Asserts: stdout contiene "Run · &lt;name&gt;" en algún punto. <strong>No</strong> existe <code>~/.che/runs/</code>. Exit 0.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Toda la funcionalidad real del runner.</p>
+    </div>
+
+    <!-- H2 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H2</span>
+        <h3>R1 InputPrompt — recolección + resolución del input</h3>
+        <span class="deps">deps: <span class="chip">H1</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> que el runner me pida el input del step 1 según su <code>kind</code>, lo valide y lo resuelva eager, <strong>para</strong> que el run no arranque con un input que después va a fallar.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>R1 se renderiza según <code>step[0].input</code>: textarea (text), single-line (pr/issue/url), file picker (file). <code>none</code> skipea R1 directo a la pantalla siguiente (placeholder de R2 — viene en H3).</li>
+        <li>Resolución eager al confirmar:
+          <ul>
+            <li><code>text</code>: payload = texto crudo.</li>
+            <li><code>file</code>: <code>os.ReadFile</code>; check de tamaño contra <code>CHE_MAX_INPUT_SIZE</code> (default 10 MiB).</li>
+            <li><code>url</code>: <code>http.Get</code> con timeout 10s; status 2xx.</li>
+            <li><code>pr</code>/<code>issue</code>: <code>gh pr view --json title,body,comments</code> · análogo para issue.</li>
+          </ul>
+        </li>
+        <li>Falla de fetch → error inline rojo bajo el input + foco vuelve al input.</li>
+        <li>Confirmación: <kbd>ctrl+s</kbd> o <kbd>enter</kbd> sobre el último foco.</li>
+        <li><kbd>esc</kbd> vuelve al lister sin crear run dir.</li>
+        <li><code>RunModel.Input</code> tiene <code>{Kind, Value, ResolvedPayload}</code> al avanzar.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Pipeline con step[0].input=text → enter → tipear texto → ctrl+s → ver "ok, siguiente: preflight (placeholder)".</li>
+        <li>Pipeline con step[0].input=issue → tipear <code>chichex/che#1</code> → ctrl+s → ver "ok" (asumiendo gh auth).</li>
+        <li>Mismo pero con issue inexistente → ver error inline.</li>
+        <li>Pipeline con step[0].input=file → file picker → seleccionar → ctrl+s → ok.</li>
+        <li>Pipeline con step[0].input=none → R1 no aparece, salta directo.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Pipeline text con stdin que tipea + ctrl+s; assert: pantalla siguiente abre.</li>
+        <li>Pipeline url con server fake (<code>httptest.NewServer</code>) que devuelve 200 con body conocido; assert: <code>RunModel.Input.ResolvedPayload</code> contiene el body.</li>
+        <li>Pipeline file con tmpfile pre-creado; assert: payload coincide con contenido.</li>
+        <li>Pipeline issue con <code>gh</code> faked vía PATH override (script shell); assert: payload contiene el body fake.</li>
+        <li>Falla path: file que no existe; assert: error inline visible.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Preflight (H3), spawn de subprocess (H4).</p>
+    </div>
+
+    <!-- H3 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H3</span>
+        <h3>R2 Preflight — chequeos de CLI / skill / gh auth / disk</h3>
+        <span class="deps">deps: <span class="chip">H2</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> que el runner verifique las dependencias antes de spawnear cualquier subprocess, <strong>para</strong> no descubrir 5 minutos después que una skill no está instalada.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>R2 muestra una checklist con un row por chequeo. Estado animado mientras corren (⏳ → ✓/✗).</li>
+        <li>Chequeos:
+          <ul>
+            <li>CLI installed por cada CLI distinto en <code>steps[].cli</code> + <code>steps[].validator.cli</code>.</li>
+            <li>Skill exists por cada step/validator con <code>kind: skill</code> (reusar <code>internal/skills</code>).</li>
+            <li><code>gh auth status</code> si algún step tiene <code>input: pr|issue</code>.</li>
+            <li>Disk space ≥ 100 MB en <code>~/.che/runs</code>.</li>
+          </ul>
+        </li>
+        <li>Cada row con failure muestra una línea de remedio.</li>
+        <li>Todos verdes → <kbd>enter</kbd> avanza a R3 (placeholder de H4).</li>
+        <li>Algún rojo → <kbd>enter</kbd> bloqueado · <kbd>r</kbd> reintenta · <kbd>d</kbd> sale a <code>che doctor</code> (suspende TUI) · <kbd>esc</kbd> vuelve al lister.</li>
+        <li>Solo amarillos → <kbd>enter</kbd> abre confirm modal "continuar igual".</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Pipeline con CLI instalado y skill existente → todos verdes → enter → placeholder R3.</li>
+        <li>Mismo pipeline pero quitando la skill (mover el dir a <code>~/.claude/skills.bak/</code>) → R2 marca rojo.</li>
+        <li>Pipeline con input=issue + gh sin auth → R2 marca rojo gh.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Tmp HOME con CLI faked + skill pre-creada; assert: R2 todos verdes, enter avanza.</li>
+        <li>Tmp HOME sin la skill; assert: R2 marca el row en rojo, enter bloqueado.</li>
+        <li>Disk full simulado (out of scope técnico — skip o usar <code>statfs</code> mockeable).</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Spawn (H4).</p>
+    </div>
+
+    <!-- H4 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H4</span>
+        <h3>R3 spawn básico — un step, sin streaming, exit code</h3>
+        <span class="deps">deps: <span class="chip">H3</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> que el runner ejecute el primer step en subprocess y muestre su exit, <strong>para</strong> tener un loop completo end-to-end aunque sea de un solo step y sin streaming.
+      </div>
+
+      <h4>Notas de implementación</h4>
+      <ul>
+        <li>Modo <em>blocking</em>: <code>cmd.Run()</code>, no <code>cmd.Start()</code>. Stdout/stderr se capturan completos a archivo + buffer en RAM.</li>
+        <li>Render del log pane: dump del stdout una vez terminado el step. Sin streaming todavía.</li>
+        <li>Init del run dir y manifest.yaml acá ya — no esperar a H8. Lo que H8 agrega son los updates atómicos por transición.</li>
+        <li>Cancel modal (RC) entra acá. <kbd>ctrl+c</kbd> → SIGTERM al cmd, gracia 5s, SIGKILL.</li>
+      </ul>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li><code>internal/runner/spawn.go</code> · <code>spawnStep(step, payload, runDir)</code> que crea los archivos de log, ejecuta el comando, espera, escribe <code>result.yaml</code>.</li>
+        <li>Layout R3 mínimo: header con <code>step 1/N</code>, steps tracker, log pane (dump al final), footer con <kbd>ctrl+c</kbd>.</li>
+        <li>Exit 0 → transición a R4 (placeholder con resumen).</li>
+        <li>Exit ≠ 0 → transición a RF (placeholder con error).</li>
+        <li><kbd>ctrl+c</kbd> → RC modal con 3 opciones; abort & save manda SIGTERM, gracia 5s, SIGKILL.</li>
+        <li>Soportar solo pipelines de 1 step en H4 (defensive: si el pipeline tiene N&gt;1, mostrar warning "multi-step viene en H6").</li>
+        <li>Manifest mínimo escrito al iniciar y al cerrar.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Pipeline 1 step con <code>cli: claude</code> · <code>kind: prompt</code> · <code>content: "decí hola"</code> · <code>input: text</code>.</li>
+        <li>Run → ver log dump al final → R4 verde.</li>
+        <li>Mismo pero con <code>content: "exit 1"</code> via fake CLI → ver R3 → RF rojo.</li>
+        <li>Mismo, ctrl+c durante el run → ver RC modal → abort → ver run dir con manifest <code>cancelled</code>.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Fake CLI script que escribe "ok" en stdout y exit 0; assert: R4, manifest done, result.yaml con output="ok".</li>
+        <li>Fake CLI exit 1 con stderr "boom"; assert: RF, manifest failed, stderr.log contiene "boom".</li>
+        <li>Fake CLI con <code>sleep 30</code>; stdin de ctrl+c → eligiendo abort; assert: manifest cancelled, exit_code negativo, run dir conserva los logs parciales.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Streaming (H5), multi-step (H6), validator (H7), atomic manifest updates (H8).</p>
+    </div>
+
+    <!-- H5 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H5</span>
+        <h3>R3 streaming — stream-json + log pane viviente</h3>
+        <span class="deps">deps: <span class="chip">H4</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> ver el output del step llegando línea por línea en el log pane, <strong>para</strong> saber que el run está vivo y entender qué está haciendo el agente.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li><code>cmd.Start()</code> en lugar de <code>Run()</code>. Goroutines de tee para stdout/stderr.</li>
+        <li>Parser de <code>stream-json --verbose</code> de claude (memoria <em>Invocación al CLI</em>): emite líneas humanas para el log pane y aparte appendea events.jsonl raw.</li>
+        <li>Buffer del scanner subido a 1 MiB (memory <em>bufio.Scanner</em>).</li>
+        <li>Fallback a stdout crudo para CLIs sin stream-json (gemini/opencode).</li>
+        <li>Ring buffer en RAM (2000 líneas/step) detrás del viewport. Sticky-bottom on por default; <kbd>↑/↓</kbd> scroll desactiva sticky; <kbd>g</kbd> lo reactiva.</li>
+        <li><kbd>ctrl+l</kbd> limpia el viewport (no toca disco).</li>
+        <li>Líneas de stderr en rojo dimmed, intercaladas.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Pipeline 1 step claude con skill que tarde &gt; 10s (ej: <code>collect-signals</code>).</li>
+        <li>Ver el log pane actualizándose línea por línea.</li>
+        <li>↑↓ scrollear; g volver al fondo.</li>
+        <li>Confirmar que <code>events.jsonl</code> tiene un evento por línea del stream.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Fake CLI que emite 5 eventos stream-json con sleeps cortos. Assert: log pane termina mostrando la última línea + events.jsonl tiene 5 entradas.</li>
+        <li>Fake CLI que emite una línea &gt; 64 KiB. Assert: parser no trunca; events.jsonl tiene la línea entera.</li>
+        <li>Fake CLI que emite stderr y stdout intercalados. Assert: stderr.log y stdout.log tienen el split correcto, ring buffer mantiene el orden de llegada.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Multi-step (H6), validator (H7).</p>
+    </div>
+
+    <!-- H6 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H6</span>
+        <h3>Multi-step + previous_output</h3>
+        <span class="deps">deps: <span class="chip">H5</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> que el runner encadene N steps con <code>previous_output</code> resolviendo desde <code>step-(N-1).result.yaml</code>, <strong>para</strong> que un pipeline real con varias etapas funcione end-to-end.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>Loop sobre <code>pipeline.Steps</code> en orden.</li>
+        <li>Para step idx ≥ 1 con <code>input: previous_output</code>: leer <code>step-(N-1).result.yaml/output</code> y pasarlo como payload del subprocess.</li>
+        <li>Para step idx ≥ 1 con <code>input</code> distinto a <code>previous_output</code>: <strong>defensive</strong> — no debería pasar (el wizard fuerza <code>previous_output</code> como default y el caso "text" en step ≥ 1 no aplica al spec actual). Si llega, usar el mismo input que se recolectó en R1 (raro).</li>
+        <li>Steps tracker en R3 actualiza el row del step en curso. Tab cycle entre steps cambia qué logs se renderean.</li>
+        <li>Cualquier step con exit ≠ 0 → RF inmediato; los siguientes no se ejecutan.</li>
+        <li>Manifest registra cada step en <code>steps[]</code>.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Pipeline con 3 steps: text → previous_output → previous_output. Cada step un fake CLI que appendea <code>"step-N "</code> a su input y echo del resultado.</li>
+        <li>Run → ver el step 3 imprimir <code>"step-1 step-2 step-3 ..."</code>.</li>
+        <li>Confirmar que <code>step-NN.result.yaml</code> existe por cada step.</li>
+        <li>Pipeline con step 2 fallando → ver RF, step 3 nunca arrancó (no hay step-03.* en el run dir).</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Pipeline 2 steps con fake CLIs predecibles. Assert: payload del step 2 es exactamente el output del step 1.</li>
+        <li>Step 2 fake con exit 1; assert: RF, manifest steps[0].status=done, steps[1].status=failed, steps[2] no existe en el array.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Validator (H7).</p>
+    </div>
+
+    <!-- H7 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H7</span>
+        <h3>Validator loop — max_loops + on_max_loops + RP modal</h3>
+        <span class="deps">deps: <span class="chip">H6</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> que un step con validator loopee hasta que el verdict sea <code>ok</code> o se agoten los <code>max_loops</code>, <strong>para</strong> que el cross-review del wizard se haga efectivo en runtime.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li><code>internal/runner/validator.go</code> · loop que tras un step <code>exit_code: 0</code> spawneá un subprocess validator con el output del step + un preámbulo que pide bloque YAML <code>verdict</code>.</li>
+        <li>Parser tolerante de <code>verdict.yaml</code>: busca el último bloque YAML con la clave <code>verdict</code>; sin bloque → <code>fail</code> + <code>feedback: "no verdict block"</code>.</li>
+        <li><code>verdict: ok</code> → siguiente step.</li>
+        <li><code>verdict: fail</code> + <code>loops_run &lt; max_loops</code> → re-correr <strong>el step</strong> (no el validator) con el feedback como contexto extra.</li>
+        <li>Hit <code>max_loops</code>:
+          <ul>
+            <li><code>on_max_loops: fail</code> → RF.</li>
+            <li><code>on_max_loops: continue</code> → aceptar último output, siguiente step.</li>
+            <li><code>on_max_loops: pause</code> → RP modal.</li>
+          </ul>
+        </li>
+        <li>RP modal con 3 opciones (continuar / retry / abort). Continuar registra <code>final_verdict: human-override</code>.</li>
+        <li>Manifest registra <code>validator.loops_run</code>, <code>final_verdict</code>, <code>last_feedback</code>.</li>
+        <li>Steps tracker en R3 muestra <code>loop K/max</code> mientras está activo.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Pipeline 1 step con validator gemini, max_loops=3, on_max_loops=fail. Step fake siempre exit 0; validator fake siempre <code>verdict: ok</code> → run done en 1 loop.</li>
+        <li>Mismo pero validator siempre <code>verdict: fail</code> → ver 3 loops → RF.</li>
+        <li>Mismo con on_max_loops=pause → ver RP modal → continuar → R4 verde.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Validator fake con verdict ok primer try; assert: manifest loops_run=1, final_verdict=ok.</li>
+        <li>Validator fake con verdict fail siempre, on_max_loops=fail; assert: RF, loops_run=max_loops, final_verdict=fail.</li>
+        <li>Validator que devuelve un YAML sin bloque verdict; assert: comportamiento equivalente a <code>fail</code> con feedback "no verdict block".</li>
+        <li>on_max_loops=pause; stdin que selecciona "continuar" en RP; assert: R4, final_verdict=human-override.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Editar el prompt mid-run (post-v1). Atomic manifest writes (H8).</p>
+    </div>
+
+    <!-- H8 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H8</span>
+        <h3>Manifest atómico + GC + recovery de runs interrumpidos</h3>
+        <span class="deps">deps: <span class="chip">H7</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> dev / ops, <strong>quiero</strong> que el manifest sobreviva crashes coherente, que los runs viejos no se acumulen, y que un kill abrupto deje un estado leíble, <strong>para</strong> poder confiar en el historial de runs.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>Cada update del manifest pasa por <code>writeManifestAtomic</code>: <code>.tmp</code> + <code>os.Rename</code>.</li>
+        <li>Updates triggeados en: start del run, start/end de cada step, start/end de cada validator loop, end del run.</li>
+        <li>GC: al iniciar un run nuevo, escanear <code>~/.che/runs/&lt;slug&gt;/</code>, mantener los últimos N (default 10, env <code>CHE_RUN_HISTORY</code>) por mtime, <code>os.RemoveAll</code> el resto.</li>
+        <li>Recovery: al boot del lister (R0), por cada manifest con <code>status: running</code> y <code>started_at</code> &gt; 1h, reescribir a <code>interrupted</code>. Defensive: si <code>started_at</code> &lt; 1h, dejar como está (puede ser otro proceso de che corriendo en paralelo).</li>
+        <li>Tests cubriendo: crash entre dos updates → manifest queda en estado anterior consistente, no trunco.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Run, interrumpir con <code>kill -9</code> al PID de che mid-step.</li>
+        <li><code>cat ~/.che/runs/&lt;slug&gt;/&lt;id&gt;/manifest.yaml</code> → status=running.</li>
+        <li>Re-abrir <code>che</code> → My pipelines → ver row con chip "interrupted" (manifest se reescribió).</li>
+        <li>Disparar 12 runs en serie → ver que solo quedan los últimos 10.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Disparar run, simular <code>SIGKILL</code> (<code>os.Process.Kill</code> sobre el PID de che en un test integrationcito); reload del lister; assert: manifest status=interrupted.</li>
+        <li>GC: pre-armar 15 dirs con mtimes escalonados, disparar run; assert: solo los últimos 10 quedan + el nuevo.</li>
+        <li>Atomicidad: kill entre <code>writeFile(.tmp)</code> y <code>Rename</code> (vía <code>os.Setenv("CHE_FAULT_INJECT_BEFORE_RENAME", "1")</code>); assert: manifest viejo intacto, .tmp huérfano (cleanup en boot).</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Cleanup de .tmp huérfanos automático (post-v1, no crítico). Compresión de logs viejos.</p>
+    </div>
+
+    <!-- H9 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H9</span>
+        <h3>Polish del cancel — graceful shutdown + cleanup de handles</h3>
+        <span class="deps">deps: <span class="chip">H8</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> que un cancel mid-run no deje archivos truncos, procesos zombie, ni la TUI rota, <strong>para</strong> poder cancelar sin miedo.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>RC modal de H4 se promueve a 3 opciones bien definidas: <strong>abort & save</strong> · <strong>back to run</strong> · <strong>exit che</strong>.</li>
+        <li>Abort & save: SIGTERM, gracia <code>CHE_KILL_GRACE</code> (default 5s), SIGKILL si no salió. Flush + close de stdout/stderr/events files. Manifest cierra <code>status: cancelled</code>, step en curso <code>status: cancelled</code>, <code>exit_code: -1</code>.</li>
+        <li>Exit che: lo de arriba + <code>os.Exit(0)</code>.</li>
+        <li>Back to run: cierra el modal, run sigue.</li>
+        <li>Si el subprocess salió por sí mismo entre el ctrl+c y la decisión del modal (race), tratar como step normal terminado.</li>
+        <li>Tras cancel, transición a un screen tipo RF pero con tono amarillo (<code>RC-done</code>): título "Run cancelado", lista de steps con el que se canceló marcado, opciones <kbd>r</kbd> retry / <kbd>l</kbd> log / <kbd>esc</kbd> volver.</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Run con fake CLI <code>sleep 30</code>; ctrl+c → modal → "back to run" → ver que el run sigue.</li>
+        <li>Mismo, ctrl+c → "abort & save" → ver pantalla amarilla "Run cancelado".</li>
+        <li>Mismo CLI pero que ignora SIGTERM (<code>trap '' TERM</code>); abort & save; verificar que se SIGKILL tras 5s.</li>
+        <li>Después del cancel, <code>ps aux | grep claude</code> no debería tener huérfanos.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Fake CLI que ignora SIGTERM. Assert: tras abort, exit code refleja SIGKILL, manifest cancelled, todos los handles cerrados (no <code>EBADF</code> en re-abrir el archivo).</li>
+        <li>Race test: fake CLI sale exit 0 right antes del SIGTERM. Assert: manifest cierra <code>done</code>, no <code>cancelled</code>.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Pause/resume de un run (post-v1).</p>
+    </div>
+
+    <!-- H10 -->
+    <div class="story">
+      <div class="story-head">
+        <span class="story-id">H10</span>
+        <h3>R4/RF + history en My pipelines (last run chip + r history view)</h3>
+        <span class="deps">deps: <span class="chip">H9</span></span>
+      </div>
+      <div class="as-a">
+        <strong>Como</strong> usuario, <strong>quiero</strong> ver el resultado del run de forma resumida, abrir el output o los logs sin salir de la TUI, y desde <code>My pipelines</code> ver de un vistazo cuándo corrió cada pipeline por última vez y con qué resultado.
+      </div>
+
+      <h4>Criterios de aceptación</h4>
+      <ul>
+        <li>R4 (success) y RF (failed) ya implementados básico desde H4 — H10 los lleva al render final descrito en "Detalle por estado": resumen con duración, lista de steps, path al result.yaml.</li>
+        <li>R4: <kbd>y</kbd> abre <code>$EDITOR</code> sobre el último <code>result.yaml</code>. <kbd>l</kbd> abre <code>$PAGER</code> sobre el último <code>stdout.log</code>. <kbd>enter</kbd>/<kbd>esc</kbd> vuelven a R0.</li>
+        <li>RF: como R4 pero el step que falló está en rojo + se muestran las últimas 20 líneas de stderr inline. <kbd>r</kbd> retry (re-dispara el pipeline desde R1 con el input pre-cargado).</li>
+        <li>R0 (lister) lee el último manifest por row ready y agrega línea "<em>last run: 12 min ago</em>" + chip <span class="chip ok">✓ done</span> / <span class="chip fail">✗ failed</span> / <span class="chip warn">cancelled</span> / <span class="chip muted">interrupted</span> / <span class="chip muted">never</span>.</li>
+        <li><kbd>r</kbd> en R0 sobre cualquier row → "Run history" screen: lista de los últimos N runs con timestamp, status, duración. <kbd>enter</kbd> sobre un run abre detalle (resumen tipo R4/RF read-only).</li>
+        <li>Chip de "last run" actualizado al volver a R0 desde R4/RF (re-fetch del manifest del lister).</li>
+      </ul>
+
+      <h4>Smoke manual</h4>
+      <ol>
+        <li>Run exitoso → R4 con duración real, paths correctos.</li>
+        <li><kbd>y</kbd> → editor con result.yaml.</li>
+        <li>esc → R0; ver chip "last run: just now ✓".</li>
+        <li>Run que falla → RF con stderr inline; r → re-disparar.</li>
+        <li>r en R0 sobre un row → ver lista de runs históricos.</li>
+      </ol>
+
+      <h4>Test e2e</h4>
+      <ul>
+        <li>Run done → assert: R4 muestra duración &gt; 0, path absoluto al result.yaml, y volviendo a R0 el row tiene chip done.</li>
+        <li>Run failed → assert: RF muestra stderr inline (mock contiene marker conocido).</li>
+        <li>3 runs históricos pre-armados (manifests directos al fixture); r en R0; assert: lista contiene los 3 con sus timestamps/statuses correctos.</li>
+        <li>Manifest con <code>status: running</code> y <code>started_at</code> &gt; 1h en el fixture; abrir lister; assert: chip "interrupted" + manifest reescrito a interrupted.</li>
+      </ul>
+
+      <h4 class="oos-h">Out of scope</h4>
+      <p class="oos">Diff entre dos runs. Compartir un run a otro device. Stats agregadas (success rate, duración promedio).</p>
+    </div>
+
+  </section>
+
+  <footer>
+    che / parametrizable revamp · pipeline execution flow · 2026-05-08
+  </footer>
+
+</main>
+</body>
+</html>
