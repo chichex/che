@@ -60,6 +60,13 @@ type listItem struct {
 	// el render — el flag persiste el "este pipeline asume repo" sin
 	// re-parsear los steps por keystroke).
 	needsRepo bool
+	// isBuiltin = pipeline shippeado embedded en el binario (ver Builtins()).
+	// Aparece siempre en la lista con chip [default]; no tiene path en el FS
+	// hasta que el usuario lo personaliza (copy-on-edit). Enter ejecuta usando
+	// el target sentinel "builtin:<slug>"; e / y disparan copy-on-edit a
+	// ~/.che/pipelines/<slug>.yaml; d se rechaza con toast.
+	isBuiltin     bool
+	builtinSource []byte // YAML crudo del builtin para copy-on-edit
 }
 
 // listModel es el bubbletea model del lister "My pipelines".
@@ -134,23 +141,58 @@ func loadListItemsCmd(home string) tea.Cmd {
 // activo, asi que reusar editorFinishedMsg directamente es seguro. El
 // wrapper queda comentado por si en el futuro hay UI compartida.
 
-// loadListItems lee ~/.che/pipelines/*.yaml, parsea cada uno, y devuelve la
-// lista ordenada por when desc (mas reciente primero). Archivos ilegibles o
-// con YAML invalido se skipean en silencio (decision: pipelines corruptos no
-// deben volar el lister; al hacer enter sobre uno tampoco habria como
-// reanudarlo). Si el dir no existe, devuelve lista vacia (caso "primer uso").
+// loadListItems lee ~/.che/pipelines/*.yaml, mergea con los builtins
+// embedded del binario, y devuelve la lista ordenada por when desc (mas
+// reciente primero). Si el usuario tiene un archivo cuyo slug coincide con
+// un builtin (ej. ~/.che/pipelines/che-funnel.yaml), su override gana y el
+// builtin queda hidden — semantica de shadow file.
+//
+// Archivos ilegibles o con YAML invalido del FS se skipean en silencio
+// (pipelines corruptos no deben volar el lister; al hacer enter sobre uno
+// tampoco habria como reanudarlo). Builtins que no parsean SI rompen el
+// load — eso es bug del binario, no del usuario, y queremos verlo.
+//
+// Si el dir no existe, devolvemos solo los builtins (caso "primer uso").
 func loadListItems(homeDir string) ([]listItem, error) {
 	dir, err := PipelinesDir(homeDir)
 	if err != nil {
 		return nil, err
 	}
+	fsItems, fsSlugs, err := loadFSItems(dir, homeDir)
+	if err != nil {
+		return nil, err
+	}
+	builtins, err := Builtins()
+	if err != nil {
+		// El binario tiene un builtin invalido — abortamos el load para que
+		// el caller surface el error en vez de ocultarlo.
+		return nil, err
+	}
+	items := fsItems
+	for _, b := range builtins {
+		if fsSlugs[b.Slug] {
+			// Override del FS gana: el builtin queda hidden.
+			continue
+		}
+		items = append(items, builtinToListItem(b))
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].when.After(items[j].when)
+	})
+	return items, nil
+}
+
+// loadFSItems lee los pipelines del FS. Devuelve los items + el set de
+// slugs presentes (para el dedupe de builtins en loadListItems).
+func loadFSItems(dir, homeDir string) ([]listItem, map[string]bool, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, map[string]bool{}, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
+	slugs := map[string]bool{}
 	var items []listItem
 	for _, ent := range entries {
 		if ent.IsDir() {
@@ -203,12 +245,88 @@ func loadListItems(homeDir string) ([]listItem, error) {
 		// chip pasa por repoctx.Detect() en el render — el flag de aca solo
 		// dice "este pipeline asume repo".
 		item.needsRepo = PipelineNeedsRepo(p)
+		slugs[item.slug] = true
 		items = append(items, item)
 	}
-	sort.SliceStable(items, func(i, j int) bool {
-		return items[i].when.After(items[j].when)
-	})
-	return items, nil
+	return items, slugs, nil
+}
+
+// builtinToListItem proyecta un BuiltinPipeline al shape que el lister
+// renderea. when = epoch zero para que el sort por when desc lo deje al
+// final (los items del FS siempre son mas recientes); en la practica con
+// solo un builtin esto no se nota, pero deja la semantica consistente
+// si en el futuro shipeamos varios.
+func builtinToListItem(b BuiltinPipeline) listItem {
+	return listItem{
+		path:          "",
+		name:          b.Pipeline.Name,
+		description:   b.Pipeline.Description,
+		nSteps:        len(b.Pipeline.Steps),
+		when:          time.Time{}, // sort: queda al final
+		slug:          b.Slug,
+		needsRepo:     PipelineNeedsRepo(b.Pipeline),
+		isBuiltin:     true,
+		builtinSource: b.Source,
+	}
+}
+
+// builtinTargetPrefix es el sentinel que el lister usa al devolver
+// ListActionRun sobre un builtin. El runner detecta el prefijo y carga el
+// pipeline via wizard.Builtins() en vez de tocar el FS.
+const builtinTargetPrefix = "builtin:"
+
+// IsBuiltinTarget devuelve true si target tiene el prefijo de builtin.
+// El runner lo usa para ramificar entre Load(path) y BuiltinBySlug.
+func IsBuiltinTarget(target string) bool {
+	return strings.HasPrefix(target, builtinTargetPrefix)
+}
+
+// BuiltinSlugFromTarget extrae el slug de un target sentinel. Si target
+// no tiene el prefijo, devuelve "" — el caller debe haber chequeado con
+// IsBuiltinTarget primero.
+func BuiltinSlugFromTarget(target string) string {
+	if !IsBuiltinTarget(target) {
+		return ""
+	}
+	return strings.TrimPrefix(target, builtinTargetPrefix)
+}
+
+// BuiltinBySlug busca un builtin por slug. Devuelve (nil, nil) si no existe;
+// (nil, err) si Builtins() falla (bug del binario).
+func BuiltinBySlug(slug string) (*BuiltinPipeline, error) {
+	bs, err := Builtins()
+	if err != nil {
+		return nil, err
+	}
+	for i := range bs {
+		if bs[i].Slug == slug {
+			return &bs[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// copyBuiltinToFS escribe el YAML crudo del builtin a ~/.che/pipelines/<slug>
+// .yaml y devuelve el path. Si el archivo ya existe (porque el usuario ya
+// hizo copy-on-edit antes pero no aparece en la lista por algun race), no
+// lo pisa — devolvemos el path existente. La proxima loadListItems va a
+// detectar el shadow y ocultar al builtin.
+func copyBuiltinToFS(homeDir, slug string, source []byte) (string, error) {
+	dir, err := EnsureDir(homeDir)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, slug+".yaml")
+	if _, err := os.Stat(path); err == nil {
+		// Ya existe — no pisamos para evitar perder ediciones del usuario.
+		return path, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	if err := os.WriteFile(path, source, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // RunList levanta el lister "My pipelines" usando $HOME real.
@@ -329,8 +447,15 @@ func (m listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// ready: H1 del flow de runner — enter dispara la screen del
 		// runner skeleton. El caller (cmd/root.go.runMyPipelines) rutea
 		// ListActionRun a runner.Run(target).
+		// Builtins se identifican con el sentinel "builtin:<slug>" — el
+		// runner detecta el prefijo y carga el pipeline desde memoria via
+		// wizard.Builtins() en vez de leer del FS.
 		m.action = ListActionRun
-		m.target = sel.path
+		if sel.isBuiltin {
+			m.target = builtinTargetPrefix + sel.slug
+		} else {
+			m.target = sel.path
+		}
 		return m, tea.Quit
 	case "e":
 		if len(m.items) == 0 {
@@ -344,11 +469,37 @@ func (m listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.target = sel.path
 			return m, tea.Quit
 		}
+		if sel.isBuiltin {
+			// Copy-on-edit: el builtin no es editable in-place porque vive
+			// embedded en el binario. Lo escribimos al FS del usuario y
+			// abrimos el wizard como ready edit sobre la copia. La proxima
+			// vez que el lister cargue, el shadow del FS oculta al builtin
+			// (la copia queda como su override personal).
+			path, err := copyBuiltinToFS(m.homeDir, sel.slug, sel.builtinSource)
+			if err != nil {
+				m.toast = "no pude copiar el default: " + err.Error()
+				m.toastOK = false
+				return m, nil
+			}
+			m.action = ListActionEditReady
+			m.target = path
+			return m, tea.Quit
+		}
 		m.action = ListActionEditReady
 		m.target = sel.path
 		return m, tea.Quit
 	case "d":
 		if len(m.items) == 0 {
+			return m, nil
+		}
+		sel := m.items[m.cursor]
+		if sel.isBuiltin {
+			// Builtins no se borran. Si el usuario quiere "ocultarlo",
+			// puede crear un shadow en ~/.che/pipelines/ y borrarlo cuando
+			// quiera — pero sacar el default mismo del binario seria
+			// confuso (volveria al primer load).
+			m.toast = "default embebido — no se puede borrar"
+			m.toastOK = false
 			return m, nil
 		}
 		m.delConfirm = true
@@ -359,6 +510,20 @@ func (m listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		sel := m.items[m.cursor]
+		if sel.isBuiltin {
+			// Mismo principio que `e`: el builtin no tiene path en el FS.
+			// Copy-on-edit primero, despues el editor abre la copia. El
+			// usuario edita y guarda como cualquier otro pipeline.
+			path, err := copyBuiltinToFS(m.homeDir, sel.slug, sel.builtinSource)
+			if err != nil {
+				m.toast = "no pude copiar el default: " + err.Error()
+				m.toastOK = false
+				return m, nil
+			}
+			m.toast = "copia creada en ~/.che/pipelines/" + sel.slug + ".yaml"
+			m.toastOK = true
+			return m, openEditorCmd(path)
+		}
 		return m, openEditorCmd(sel.path)
 	case "r":
 		// H10: r abre la pantalla "Run history" del row seleccionado.
@@ -500,6 +665,9 @@ func (m listModel) applyDelete() (tea.Model, tea.Cmd) {
 var (
 	chipReadyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#50FA7B")).Bold(true)
 	chipDraftStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F1FA8C")).Bold(true)
+	// chipDefaultStyle marca builtin pipelines (cyan dracula). Va junto al
+	// chip [ready] para distinguir lo embedded de lo creado por el usuario.
+	chipDefaultStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#8BE9FD")).Bold(true)
 	// chipFailStyle / chipWarnStyle / chipInfoStyle son los chips del
 	// "last run" por status (H10). Rojo para failed, amarillo para
 	// cancelled, gris para interrupted/never. Done reusa chipReadyStyle
@@ -583,6 +751,12 @@ func renderListRow(it listItem) string {
 	chip := chipReadyStyle.Render("[ready]")
 	if it.isDraft {
 		chip = chipDraftStyle.Render("[draft]")
+	}
+	if it.isBuiltin {
+		// Builtins son ready por construccion (no hay drafts embedded). El
+		// chip [default] reemplaza el "X ago" de when para no mentir con un
+		// timestamp ficticio (when=zero en builtins).
+		chip = chipDefaultStyle.Render("[default]") + "  " + chipReadyStyle.Render("[ready]")
 	}
 
 	when := relTime(it.when)
