@@ -206,12 +206,16 @@ func TestRunner_R1H2TextConfirm(t *testing.T) {
 	if err := p.Send("\x13"); err != nil {
 		t.Fatalf("send ctrl+s: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "ok, siguiente: preflight (placeholder)", 3*time.Second) {
-		t.Fatalf("R2 placeholder never rendered\n%s", p.Since(mark))
+	// Post-H3 R2 ya no es placeholder — render real con header "Preflight
+	// de <name>" + rows del checklist. El sentinel "Preflight de" es
+	// estable porque el header sale en el primer Render().
+	if !p.WaitForOutputSince(t, mark, "Preflight de R1H2 Text", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
-	// Confirmamos que el chip "input resuelto" refleja el largo del texto.
-	if !strings.Contains(p.Since(mark), "kind=text") {
-		t.Errorf("expected 'kind=text' in R2 placeholder, got:\n%s", p.Since(mark))
+	// Pipeline usa cli=claude → R2 lista al menos el row "cli claude
+	// instalado" (chefake symlink lo hace ✓).
+	if !strings.Contains(p.Since(mark), "cli claude instalado") {
+		t.Errorf("expected 'cli claude instalado' row in R2, got:\n%s", p.Since(mark))
 	}
 
 	// esc vuelve al lister sin crear run dir.
@@ -224,7 +228,7 @@ func TestRunner_R1H2TextConfirm(t *testing.T) {
 	}
 	runsDir := filepath.Join(env.HomeDir, ".che", "runs")
 	if _, err := os.Stat(runsDir); !os.IsNotExist(err) {
-		t.Errorf("expected ~/.che/runs/ to not exist post-R2 placeholder, stat err=%v", err)
+		t.Errorf("expected ~/.che/runs/ to not exist post-R2 preflight, stat err=%v", err)
 	}
 	// Salida limpia.
 	mark = p.Mark()
@@ -281,9 +285,10 @@ func TestRunner_R1H2TextEmptyError(t *testing.T) {
 	if !p.WaitForOutputSince(t, mark, "no puede estar vacio", 3*time.Second) {
 		t.Fatalf("expected 'no puede estar vacio' inline error, got:\n%s", p.Since(mark))
 	}
-	// Asegurar que NO se transiciono a R2.
-	if strings.Contains(p.Since(mark), "ok, siguiente: preflight") {
-		t.Errorf("R1 should NOT transition to R2 placeholder on empty input, got:\n%s", p.Since(mark))
+	// Asegurar que NO se transiciono a R2 (post-H3 el sentinel R2 es
+	// "Preflight de").
+	if strings.Contains(p.Since(mark), "Preflight de") {
+		t.Errorf("R1 should NOT transition to R2 on empty input, got:\n%s", p.Since(mark))
 	}
 
 	// Cleanup: ctrl+c sale total (R1 trata `q` como char tipeable).
@@ -365,24 +370,34 @@ func TestRunner_R1H2FileSelectAndConfirm(t *testing.T) {
 	if err := p.Send("\x13"); err != nil { // ctrl+s
 		t.Fatalf("send ctrl+s: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "ok, siguiente: preflight (placeholder)", 3*time.Second) {
-		t.Fatalf("R2 placeholder never rendered\n%s", p.Since(mark))
+	if !p.WaitForOutputSince(t, mark, "Preflight de R1H2 File", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
-	// El chip "input resuelto" debe reportar el size del archivo.
-	wantSize := fmt.Sprintf("%d bytes", len(payload))
-	if !strings.Contains(p.Since(mark), wantSize) {
-		t.Errorf("expected %q in R2 placeholder, got:\n%s", wantSize, p.Since(mark))
+	// Post-H3 R2 lista un row "file readable: <path>" (re-check defensivo
+	// del input=file). En macos os.Getwd puede resolver el cwd a
+	// /private/var/... mientras t.TempDir devuelve /var/...; por eso
+	// chequeamos solo el basename del fixture (suficiente para confirmar
+	// que el row apunta al archivo correcto).
+	if !strings.Contains(p.Since(mark), "file readable:") || !strings.Contains(p.Since(mark), filepath.Base(fpath)) {
+		t.Errorf("expected 'file readable: ...%s' row in R2, got:\n%s", filepath.Base(fpath), p.Since(mark))
 	}
 
-	// Cleanup.
+	// Cleanup — esc (R2→lister), esc (lister→menu), q (menu→exit). Cada
+	// esc necesita esperar al re-render antes del proximo send para que
+	// el debounce interno de bubbletea no las merge en una sola.
+	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered after esc\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutput(t, "0-3 jump", 3*time.Second) {
-		t.Fatalf("menu never re-rendered\n%s", p.Snapshot())
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
 		t.Fatalf("send q: %v", err)
@@ -395,16 +410,18 @@ func TestRunner_R1H2FileSelectAndConfirm(t *testing.T) {
 
 // TestRunner_R1H2IssueGHHappy cubre el camino feliz de input=issue: gh
 // faked via PATH (el harness symlinkea gh → chefake) responde JSON con
-// body conocido; R1 confirma + transiciona a R2 placeholder + el chip
-// "input resuelto" refleja el size del payload.
+// body conocido; R1 confirma + transiciona a R2 (post-H3 con preflight
+// real, que tambien chequea gh auth — aca scripteamos auth status como
+// success).
 func TestRunner_R1H2IssueGHHappy(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
 
-	// Scriptear gh para devolver un JSON dummy. ExpectGh acepta args
-	// regex; matcheamos issue view + el repo + el num.
+	// Scriptear gh para devolver un JSON dummy en `issue view` y "ok" en
+	// `auth status` (R2 lo invoca porque el step usa input=issue, post-H3).
 	ghBody := `{"title":"fake","body":"hola desde gh","comments":[]}`
 	env.ExpectGh(`issue view --repo chichex/che 1`).RespondStdout(ghBody, 0)
+	env.ExpectGh(`auth status`).RespondStdout("Logged in to github.com", 0)
 
 	preArmPipelinesDir(t, env.HomeDir, map[string]string{
 		"r1h2-issue.yaml": readyYAMLInput("R1H2 Issue", "issue"),
@@ -438,23 +455,30 @@ func TestRunner_R1H2IssueGHHappy(t *testing.T) {
 	if err := p.Send("\x13"); err != nil { // ctrl+s
 		t.Fatalf("send ctrl+s: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "ok, siguiente: preflight (placeholder)", 3*time.Second) {
-		t.Fatalf("R2 placeholder never rendered\n%s", p.Since(mark))
+	if !p.WaitForOutputSince(t, mark, "Preflight de R1H2 Issue", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
 	}
-	wantSize := fmt.Sprintf("%d bytes", len(ghBody))
-	if !strings.Contains(p.Since(mark), wantSize) {
-		t.Errorf("expected %q in R2 placeholder, got:\n%s", wantSize, p.Since(mark))
+	// El row de gh auth tiene que existir cuando input=issue.
+	if !strings.Contains(p.Since(mark), "gh auth status") {
+		t.Errorf("expected 'gh auth status' row in R2, got:\n%s", p.Since(mark))
 	}
 
-	// Cleanup.
+	// Cleanup — esc (R2→lister), esc (lister→menu), q (menu→exit). Cada
+	// esc necesita esperar al re-render antes del proximo send para que
+	// el debounce interno de bubbletea no las merge en una sola.
+	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered after esc\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutput(t, "0-3 jump", 3*time.Second) {
-		t.Fatalf("menu never re-rendered\n%s", p.Snapshot())
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
 		t.Fatalf("send q: %v", err)
@@ -505,7 +529,7 @@ func TestRunner_R1H2IssueBadFormat(t *testing.T) {
 	if !p.WaitForOutputSince(t, mark, "owner/repo#NNN", 3*time.Second) {
 		t.Fatalf("expected format hint inline error, got:\n%s", p.Since(mark))
 	}
-	if strings.Contains(p.Since(mark), "ok, siguiente: preflight") {
+	if strings.Contains(p.Since(mark), "Preflight de") {
 		t.Errorf("R1 should NOT transition to R2 on format error")
 	}
 
@@ -518,8 +542,299 @@ func TestRunner_R1H2IssueBadFormat(t *testing.T) {
 	}
 }
 
+// readyYAMLSkillStep es la version de readyYAMLInput que arma un step
+// kind=skill con la skill que el test recibe. H3 lo usa para forzar el
+// row "skill X en claude" en R2.
+func readyYAMLSkillStep(name, skill, inputKind string) string {
+	return fmt.Sprintf(`name: %s
+description: ready desc
+steps:
+- name: alpha
+  cli: claude
+  kind: skill
+  content: %s
+  input: %s
+`, name, skill, inputKind)
+}
+
+// preArmClaudeSkill crea ~/.claude/skills/<name>/SKILL.md con un cuerpo
+// minimal. internal/skills.scanSkillDirs lo detecta porque solo necesita
+// que SKILL.md exista — sin frontmatter usa el nombre del dir como
+// skill name (lo cual es justo lo que el preflight chequea).
+func preArmClaudeSkill(t *testing.T, home, skill string) {
+	t.Helper()
+	dir := filepath.Join(home, ".claude", "skills", skill)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	body := "# " + skill + "\n\ntest skill installed by harness\n"
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+}
+
+// TestRunner_R2H3AllGreenAdvances cubre el camino feliz de H3: pipeline con
+// CLI faked + skill pre-creada → R2 marca todos los chequeos verdes →
+// enter avanza a la R3 placeholder. Coincide con el primer test e2e
+// listado en H3 ("Tmp HOME con CLI faked + skill pre-creada; assert: R2
+// todos verdes, enter avanza").
+func TestRunner_R2H3AllGreenAdvances(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	// Skill instalada en la home tmp del test.
+	preArmClaudeSkill(t, env.HomeDir, "h3-green")
+
+	// Pipeline con kind=skill apuntando a la skill que acabamos de crear,
+	// e input=none para no tener que pasar por R1 (mas simple) y para
+	// evitar el row de gh auth (no necesitamos scriptearlo aca).
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r2h3-green.yaml": readyYAMLSkillStep("R2H3 Green", "h3-green", "none"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R2H3 Green", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight de R2H3 Green", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+	// Esperamos a que aparezca el row de la skill — es el ultimo
+	// chequeo "no-disco" relevante; si esta listado significa que el
+	// builder + runner los corrieron.
+	if !p.WaitForOutputSince(t, mark, "skill h3-green en claude", 3*time.Second) {
+		t.Fatalf("expected skill row in R2, got:\n%s", p.Since(mark))
+	}
+	// Verdict "todo listo" → enter avanza directo.
+	if !strings.Contains(p.Since(mark), "todo listo") {
+		t.Errorf("expected 'todo listo' verdict (all green), got:\n%s", p.Since(mark))
+	}
+	// Asegurar que NO hay rows fail (cualquier "remedio:" indicaria una
+	// fila roja o amarilla). disk-warn aparece como warn, no como
+	// remedio bloqueante; el verdict "todo listo" arriba ya garantiza
+	// que no hay warns ni fails.
+	if strings.Contains(p.Since(mark), "remedio:") {
+		t.Errorf("expected no remedios when all green, got:\n%s", p.Since(mark))
+	}
+
+	// enter avanza al R3 placeholder.
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "spawn pendiente — H4 implementa R3", 3*time.Second) {
+		t.Fatalf("R3 placeholder never rendered after enter\n%s", p.Since(mark))
+	}
+
+	// Cleanup — esc (R2→lister), esc (lister→menu), q (menu→exit). Cada
+	// esc necesita esperar al re-render antes del proximo send para que
+	// el debounce interno de bubbletea no las merge en una sola.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered after esc\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Sin tocar disco: H3 todavia no escribe el run-dir (eso es H4).
+	runsDir := filepath.Join(env.HomeDir, ".che", "runs")
+	if _, err := os.Stat(runsDir); !os.IsNotExist(err) {
+		t.Errorf("expected ~/.che/runs/ to not exist post-R2 ok, stat err=%v", err)
+	}
+}
+
+// TestRunner_R2H3MissingSkillBlocks cubre el escenario "skill no
+// instalada": pipeline con kind=skill apuntando a una skill que NO
+// existe en el HOME tmp → R2 marca el row en rojo + enter no avanza.
+// Coincide con el segundo test e2e de H3 ("Tmp HOME sin la skill;
+// assert: R2 marca el row en rojo, enter bloqueado").
+func TestRunner_R2H3MissingSkillBlocks(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	// NOTA: NO creamos la skill — preflight tiene que detectar que falta.
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r2h3-missing.yaml": readyYAMLSkillStep("R2H3 Missing", "no-existe-h3", "none"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R2H3 Missing", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight de R2H3 Missing", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+	// El row debe aparecer + estar marcado como rojo (con remedio).
+	if !p.WaitForOutputSince(t, mark, "skill no-existe-h3 en claude", 3*time.Second) {
+		t.Fatalf("expected skill row in R2, got:\n%s", p.Since(mark))
+	}
+	if !strings.Contains(p.Since(mark), "remedio:") {
+		t.Errorf("expected 'remedio:' line under failed skill row, got:\n%s", p.Since(mark))
+	}
+	if !strings.Contains(p.Since(mark), "instalar la skill") {
+		t.Errorf("expected install hint in remedio, got:\n%s", p.Since(mark))
+	}
+	if !strings.Contains(p.Since(mark), "enter bloqueado") {
+		t.Errorf("expected 'enter bloqueado' footer when red row present, got:\n%s", p.Since(mark))
+	}
+
+	// enter no debe transicionar a R3 placeholder.
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	// Pequena espera para que cualquier transicion (incorrecta) tenga
+	// chance de renderear. El assert principal es que el sentinel R3
+	// NO aparezca.
+	time.Sleep(200 * time.Millisecond)
+	if strings.Contains(p.Since(mark), "spawn pendiente") {
+		t.Errorf("R2 should NOT advance to R3 with a failed check, got:\n%s", p.Since(mark))
+	}
+	// Aseguramos que seguimos en R2 (el footer "enter bloqueado" sigue
+	// presente en el snapshot total).
+	if !strings.Contains(p.Snapshot(), "enter bloqueado") {
+		t.Errorf("expected to still be in R2 (enter bloqueado), got:\n%s", p.Snapshot())
+	}
+
+	// Cleanup — esc (R2→lister), esc (lister→menu), q (menu→exit). Cada
+	// esc necesita esperar al re-render antes del proximo send para que
+	// el debounce interno de bubbletea no las merge en una sola.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered after esc\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
+// TestRunner_R2H3MissingSkillRetries cubre la rama `r` de R2: con un row
+// rojo, presionar `r` re-corre los chequeos. Si entre el primer run y el
+// retry escribimos la skill que faltaba, el verdict cambia a all-green.
+// No esta en la lista textual de e2e de H3 pero cubre el criterio de
+// aceptacion "r reintenta" — sin esto, `r` nunca se ejercita.
+func TestRunner_R2H3MissingSkillRetries(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r2h3-retry.yaml": readyYAMLSkillStep("R2H3 Retry", "h3-retry", "none"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R2H3 Retry", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight de R2H3 Retry", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+	if !strings.Contains(p.Since(mark), "enter bloqueado") {
+		t.Fatalf("expected initial verdict to block (no skill installed), got:\n%s", p.Since(mark))
+	}
+
+	// Crear la skill y pedir retry con `r`.
+	preArmClaudeSkill(t, env.HomeDir, "h3-retry")
+	mark = p.Mark()
+	if err := p.Send("r"); err != nil {
+		t.Fatalf("send r: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 3*time.Second) {
+		t.Fatalf("expected 'todo listo' after retry with skill present, got:\n%s", p.Since(mark))
+	}
+
+	// Cleanup — esc (R2→lister), esc (lister→menu), q (menu→exit). Cada
+	// esc necesita esperar al re-render antes del proximo send para que
+	// el debounce interno de bubbletea no las merge en una sola.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered after esc\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
 // TestRunner_R1H2NoneSkipsR1 cubre el branch "input: none" — R1 no aparece
-// y caemos directo al placeholder de R2.
+// y caemos directo a R2 (post-H3 = preflight real).
 func TestRunner_R1H2NoneSkipsR1(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
@@ -544,22 +859,30 @@ func TestRunner_R1H2NoneSkipsR1(t *testing.T) {
 	if err := p.Send("\r"); err != nil {
 		t.Fatalf("send enter: %v", err)
 	}
-	// Esperamos R2 placeholder directo, sin pasar por R1.
-	if !p.WaitForOutputSince(t, mark, "ok, siguiente: preflight (placeholder)", 3*time.Second) {
-		t.Fatalf("R2 placeholder never rendered for input=none\n%s", p.Since(mark))
+	// Esperamos R2 directo, sin pasar por R1.
+	if !p.WaitForOutputSince(t, mark, "Preflight de R1H2 None", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered for input=none\n%s", p.Since(mark))
 	}
 	if strings.Contains(p.Since(mark), "Input · text") || strings.Contains(p.Since(mark), "Input · file") {
 		t.Errorf("R1 should NOT render when input=none; got:\n%s", p.Since(mark))
 	}
 
+	// Cleanup — esc (R2→lister), esc (lister→menu), q (menu→exit). Cada
+	// esc necesita esperar al re-render antes del proximo send para que
+	// el debounce interno de bubbletea no las merge en una sola.
+	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered after esc\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc (lister→menu): %v", err)
 	}
-	if !p.WaitForOutput(t, "0-3 jump", 3*time.Second) {
-		t.Fatalf("menu never re-rendered\n%s", p.Snapshot())
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
 		t.Fatalf("send q: %v", err)

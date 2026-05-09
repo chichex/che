@@ -318,7 +318,8 @@ func (m RunModel) updateInputFile(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 // confirmInput valida + resuelve eager. Si la resolucion falla, deja el
 // error en m.inputErr y se queda en R1 (criterio de aceptacion: foco
 // vuelve al input). Si pasa, popula m.Input.{Value,ResolvedPayload} y
-// transiciona a ScreenSecondary (placeholder de R2).
+// transiciona a ScreenPreflight (R2 real, H3) corriendo los chequeos en
+// el acto.
 func (m RunModel) confirmInput() (tea.Model, tea.Cmd) {
 	value := m.inputUI.textBuf.value()
 	if m.inputUI.kind != wizard.InputFile {
@@ -339,8 +340,7 @@ func (m RunModel) confirmInput() (tea.Model, tea.Cmd) {
 	m.Input.Value = value
 	m.Input.ResolvedPayload = payload
 	m.inputErr = ""
-	m.Screen = ScreenSecondary
-	return m, nil
+	return enterPreflight(m), nil
 }
 
 // viewInput renderiza R1 segun el kind.

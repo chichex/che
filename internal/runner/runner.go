@@ -52,16 +52,15 @@ func Run(path string) (exitApp bool, err error) {
 }
 
 // enterFirstScreen elige la screen inicial segun el kind del input del step 0.
-// kind=none → ScreenSecondary (skip de R1, segun el doc). Cualquier otro kind
-// (text/pr/issue/file/url) → ScreenInput. La inicializacion de inputUI vive
-// en initInputUI para que H3+ pueda re-entrar a R1 desde RF (retry) sin
-// duplicar la logica.
+// kind=none → ScreenPreflight (skip de R1, segun el doc — preflight corre
+// igual). Cualquier otro kind (text/pr/issue/file/url) → ScreenInput. La
+// inicializacion de inputUI vive en initInputUI para que H4+ pueda re-entrar
+// a R1 desde RF (retry) sin duplicar la logica.
 func (m RunModel) enterFirstScreen() RunModel {
 	kind := firstInputKind(m.Pipeline)
 	if kind == wizard.InputNone {
-		m.Screen = ScreenSecondary
 		m.Input = InputState{Kind: kind}
-		return m
+		return enterPreflight(m)
 	}
 	m.Screen = ScreenInput
 	m.Input = InputState{Kind: kind}
@@ -102,8 +101,10 @@ func (m RunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.Screen {
 	case ScreenInput:
 		return m.updateInput(key)
-	case ScreenSecondary:
-		return m.updateSecondary(key)
+	case ScreenPreflight:
+		return m.updatePreflight(key)
+	case ScreenRunningPlaceholder:
+		return m.updateRunningPlaceholder(key)
 	}
 	// ScreenSkeleton (legacy) o cualquier otro: comportamiento heredado de
 	// H1 — esc vuelve al lister, q/ctrl+c salen total.
@@ -118,16 +119,18 @@ func (m RunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// View dispatchea segun la screen activa. H2 cubre R1 + R2-placeholder; el
-// fallback es la screen skeleton heredada de H1 (no se usa en el flow real
-// pero la dejamos como red de seguridad si una transicion futura olvida
-// setear Screen).
+// View dispatchea segun la screen activa. H3 cubre R1 + R2 (preflight real)
+// + R3 placeholder; el fallback es la screen skeleton heredada de H1 (no se
+// usa en el flow real pero la dejamos como red de seguridad si una
+// transicion futura olvida setear Screen).
 func (m RunModel) View() string {
 	switch m.Screen {
 	case ScreenInput:
 		return m.viewInput()
-	case ScreenSecondary:
-		return m.viewSecondary()
+	case ScreenPreflight:
+		return m.viewPreflight()
+	case ScreenRunningPlaceholder:
+		return m.viewRunningPlaceholder()
 	}
 	return m.viewSkeleton()
 }
@@ -149,10 +152,11 @@ func (m RunModel) viewSkeleton() string {
 	return b.String()
 }
 
-// updateSecondary maneja teclas en el placeholder de R2. esc vuelve al
-// lister; q/ctrl+c sale total. enter no hace nada todavia — H3 lo va a
-// usar para arrancar los chequeos de preflight.
-func (m RunModel) updateSecondary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+// updateRunningPlaceholder maneja teclas en el placeholder de R3 (post-
+// preflight ok). H3 lo deja minimal: esc vuelve al lister, q/ctrl+c salen
+// total. H4 lo reemplaza por el handler real de R3 con spawn del
+// subprocess + RC modal para ctrl+c.
+func (m RunModel) updateRunningPlaceholder(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch key.String() {
 	case "ctrl+c", "q":
 		m.exitApp = true
@@ -164,10 +168,12 @@ func (m RunModel) updateSecondary(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// viewSecondary renderiza el placeholder de R2. Texto literal "ok,
-// siguiente: preflight (placeholder)" — el smoke manual de H2 lo busca,
-// y los tests e2e tambien.
-func (m RunModel) viewSecondary() string {
+// viewRunningPlaceholder renderiza el placeholder de R3 que aparece cuando
+// preflight cierra OK (o el usuario confirma los warnings amarillos).
+// Texto literal "spawn pendiente — H4 implementa R3" — los tests de H3 lo
+// usan como sentinel para asegurar la transicion. H4 reemplaza esta
+// funcion por el render real de R3.
+func (m RunModel) viewRunningPlaceholder() string {
 	name := m.Pipeline.Name
 	if name == "" {
 		name = "(sin nombre)"
@@ -175,7 +181,7 @@ func (m RunModel) viewSecondary() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("Run · " + name))
 	b.WriteString("\n\n")
-	b.WriteString(dimStyle.Render("ok, siguiente: preflight (placeholder)"))
+	b.WriteString(dimStyle.Render("spawn pendiente — H4 implementa R3 (running)"))
 	b.WriteString("\n\n")
 	if m.Input.Kind != wizard.InputNone && m.Input.Kind != "" {
 		b.WriteString(dimStyle.Render(fmt.Sprintf("input resuelto: kind=%s · %d bytes", m.Input.Kind, len(m.Input.ResolvedPayload))))
