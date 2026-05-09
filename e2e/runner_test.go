@@ -3454,3 +3454,186 @@ func TestRunner_R0H10InterruptedChip(t *testing.T) {
 		t.Errorf("expected manifest rewritten to status: interrupted, got:\n%s", manifestRaw)
 	}
 }
+
+// TestRunner_R1RepoctxPickerWithRepo cubre el camino feliz del picker R1 de
+// pr/issue cuando el cwd esta dentro de un repo de github (segun gh):
+//
+//   - el harness scriptea `gh repo view --json nameWithOwner -q .nameWithOwner`
+//     para que repoctx.Detect retorne InGitHubRepo=true + Repo="chichex/che";
+//   - scriptea `gh pr list ...` con 3 PRs abiertos;
+//   - el R1 abre el picker en vez del textBuf libre, lista los 3 PRs;
+//   - ↓ + enter elige el segundo, dispara `gh pr view --repo chichex/che 11
+//     --json title,body,comments` y aterriza en R2.
+//
+// Cubre el criterio "el resolver se invoca con el numero correcto" del
+// task: el ultimo gh view tiene que pegarle al item bajo el cursor.
+func TestRunner_R1RepoctxPickerWithRepo(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	// repoctx.Detect → "chichex/che" (gh repo view exit 0 + stdout).
+	env.ExpectGh(`repo view --json nameWithOwner`).RespondStdout("chichex/che", 0)
+	// gh pr list → 3 PRs abiertos.
+	env.ExpectGh(`pr list --state open`).RespondStdout(
+		`[{"number":10,"title":"first","state":"OPEN"},{"number":11,"title":"second","state":"OPEN"},{"number":12,"title":"third","state":"OPEN"}]`,
+		0,
+	)
+	// gh pr view (resolver del item elegido) y gh auth status (preflight).
+	env.ExpectGh(`pr view --repo chichex/che 11`).RespondStdout(`{"title":"second","body":"hola","comments":[]}`, 0)
+	env.ExpectGh(`auth status`).RespondStdout("Logged in to github.com", 0)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r1-pickerpr.yaml": readyYAMLInput("R1 PickerPR", "pr"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R1 PickerPR", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "PRs abiertos en chichex/che", 3*time.Second) {
+		t.Fatalf("R1 picker never rendered\n%s", p.Since(mark))
+	}
+	// Los 3 items deben aparecer.
+	snap := p.Since(mark)
+	for _, want := range []string{"#10  first", "#11  second", "#12  third"} {
+		if !strings.Contains(snap, want) {
+			t.Errorf("picker should list %q, got:\n%s", want, snap)
+		}
+	}
+
+	// ↓ para mover al segundo item, enter para elegir.
+	mark = p.Mark()
+	if err := p.Send("\x1b[B"); err != nil { // down
+		t.Fatalf("send down: %v", err)
+	}
+	if err := p.Send("\r"); err != nil { // enter
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
+// TestRunner_R2RepoctxPreflightFailWithoutRepo cubre el criterio R2 del
+// task: pipeline con input=pr + cwd sin repo de github → row "git repo
+// context" rojo + verdict bloquea avance.
+//
+// El harness NO scriptea `gh repo view`, asi que el chefake retorna exit 1
+// (sin matcher) → repoctx.Detect → InGitHubRepo=false → preflight fail.
+func TestRunner_R2RepoctxPreflightFailWithoutRepo(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	// Auth status igual lo va a invocar el preflight (input=issue cae al
+	// textBuf libre porque no hay repo). Sin script, gh devuelve exit 1.
+	// Para evitar ruido, scripteamos auth status como ok — el row que nos
+	// importa es "git repo context".
+	env.ExpectGh(`auth status`).RespondStdout("Logged in to github.com", 0)
+	// gh repo view explicitamente falla — confirmamos el path "no repo".
+	env.ExpectGh(`repo view --json nameWithOwner`).RespondExitWithError(1, "not a git repo")
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r2-norepo.yaml": readyYAMLInput("R2 NoRepo", "issue"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R2 NoRepo", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	// Sin repo, el R1 cae al textBuf libre (no al picker). Tipeamos un ref
+	// valido para pasar a R2 — ahi es donde el row "git repo context"
+	// bloquea.
+	if !p.WaitForOutputSince(t, mark, "Input · issue", 3*time.Second) {
+		t.Fatalf("R1 issue never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("chichex/che#1"); err != nil {
+		t.Fatalf("send ref: %v", err)
+	}
+	// Para resolver el ref via gh issue view tambien necesitamos un script.
+	env.ExpectGh(`issue view --repo chichex/che 1`).RespondStdout(`{"title":"x","body":"y","comments":[]}`, 0)
+	if err := p.Send("\x13"); err != nil { // ctrl+s
+		t.Fatalf("send ctrl+s: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Preflight", 3*time.Second) {
+		t.Fatalf("R2 preflight never rendered\n%s", p.Since(mark))
+	}
+	preflight := p.Since(mark)
+	if !strings.Contains(preflight, "git repo context") {
+		t.Errorf("expected 'git repo context' row, got:\n%s", preflight)
+	}
+	// El verdict tiene que ser "problema(s)" (al menos 1 fail).
+	if !strings.Contains(preflight, "problema") {
+		t.Errorf("expected fail verdict (1+ problemas), got:\n%s", preflight)
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+}

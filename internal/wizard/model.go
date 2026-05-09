@@ -8,6 +8,7 @@ package wizard
 import (
 	"time"
 
+	"github.com/chichex/che/internal/repoctx"
 	"github.com/chichex/che/internal/skills"
 )
 
@@ -195,6 +196,40 @@ func inputsForStepIdx(idx int) []string {
 		return base
 	}
 	return append([]string{InputPreviousOutput}, base...)
+}
+
+// inputNeedsRepo reporta si la opcion de input depende de que `gh` reconozca
+// el cwd como un repo de github (pr / issue). Se usa para deshabilitar las
+// pills cuando repoctx.Detect().InGitHubRepo == false — ofrecer "elegi un PR
+// del repo" sin repo actual no tiene sentido y termina rebotando en el
+// runner.
+func inputNeedsRepo(opt string) bool {
+	return opt == InputPR || opt == InputIssue
+}
+
+// inputDisabled reporta si la pill `opt` debe rendirse deshabilitada (dim,
+// cursor la salta) en el contexto actual del proceso. Hoy solo se aplica a
+// pr/issue cuando el cwd no esta dentro de un repo conocido por gh; el resto
+// es false. La deteccion se cachea en repoctx, asi llamarlo en el render no
+// dispara un fork por keystroke.
+func inputDisabled(opt string) bool {
+	if !inputNeedsRepo(opt) {
+		return false
+	}
+	return !repoctx.Detect().InGitHubRepo
+}
+
+// pipelineNeedsRepo reporta si el pipeline tiene algun step cuyo input
+// dependa del repo (pr / issue). El lister + el preflight lo usan para
+// chipear / sumar el row "git repo context" sin hardcodear la lista de
+// inputs en cada caller.
+func PipelineNeedsRepo(p Pipeline) bool {
+	for _, st := range p.Steps {
+		if inputNeedsRepo(st.Input) {
+			return true
+		}
+	}
+	return false
 }
 
 // stepEditState es el estado UI especifico de S2. Vive como sub-struct del

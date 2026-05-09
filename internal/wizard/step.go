@@ -411,22 +411,29 @@ func (m model) stepHandleContentKey(key tea.KeyMsg) (model, tea.Cmd) {
 // literal "ignora cambios" del spec encerraba al usuario en previous_output
 // sin un atajo de salida (la unica via era editar el step desde S3, que
 // todavia no existe).
+//
+// Excepcion: las opciones cubiertas por inputDisabled (hoy pr/issue cuando
+// el cwd no esta dentro de un repo de github) se saltan en navegacion
+// ←/→/h/l y se rechazan al hacer 1-9. Sin esto el cursor podria aterrizar
+// en una pill que el runner no puede ofrecer (el preflight ya bloquea, pero
+// es preferible que la senal aparezca temprano en el wizard).
 func (m model) stepHandleInputKey(key tea.KeyMsg) (model, tea.Cmd) {
 	options := inputsForStepIdx(m.stepEdit.idx)
 	switch key.String() {
 	case "left", "h":
-		m.stepEdit.input = stepNeighbor(options, m.stepEdit.input, -1)
+		m.stepEdit.input = stepNeighborSkipDisabled(options, m.stepEdit.input, -1)
 		m.stepEdit.errMsg = ""
 		return m, nil
 	case "right", "l":
-		m.stepEdit.input = stepNeighbor(options, m.stepEdit.input, +1)
+		m.stepEdit.input = stepNeighborSkipDisabled(options, m.stepEdit.input, +1)
 		m.stepEdit.errMsg = ""
 		return m, nil
 	}
-	// digito 1..N: jump directo
+	// digito 1..N: jump directo. Si la opcion esta disabled (pr/issue sin
+	// repo) el jump es no-op — coherente con el cyclado que la salta.
 	if key.String() >= "1" && key.String() <= "9" {
 		idx := int(key.String()[0] - '1')
-		if idx >= 0 && idx < len(options) {
+		if idx >= 0 && idx < len(options) && !inputDisabled(options[idx]) {
 			m.stepEdit.input = options[idx]
 			m.stepEdit.errMsg = ""
 		}
@@ -777,6 +784,14 @@ func (m model) buildStep() (Step, error) {
 	if !contains(allowed, in) {
 		return Step{}, fmt.Errorf("input %q no es valido para el step %d", in, m.stepEdit.idx+1)
 	}
+	// Coherencia con el render disabled: si el contexto no soporta pr/issue
+	// (sin repo de github en el cwd), rechazamos el guardado con un hint
+	// claro. El cyclado ya salta esas opciones, asi que llegar aca implica
+	// que el wizard arranco con repo y se "perdio" antes del save (raro,
+	// pero la red defensiva lo cubre).
+	if inputDisabled(in) {
+		return Step{}, fmt.Errorf("input %q requiere un repo de github en el cwd", in)
+	}
 
 	step := Step{
 		Name:    name,
@@ -970,6 +985,41 @@ func (m *model) stepIsLastFocus() bool {
 		return false
 	}
 	return m.stepEdit.focus == order[len(order)-1]
+}
+
+// stepNeighborSkipDisabled es como stepNeighbor pero salta las opciones
+// reportadas por inputDisabled. Si todas las opciones estan disabled (caso
+// patologico — text/file/url/none nunca lo estan), devuelve current sin
+// tocar para no entrar en loop.
+func stepNeighborSkipDisabled(options []string, current string, delta int) string {
+	if len(options) == 0 {
+		return current
+	}
+	idx := -1
+	for i, o := range options {
+		if o == current {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		// current desaparecio de la lista; arrancar en el primer enabled.
+		for i, o := range options {
+			if !inputDisabled(o) {
+				return options[i]
+			}
+		}
+		return options[0]
+	}
+	n := len(options)
+	for step := 1; step <= n; step++ {
+		next := options[((idx+delta*step)%n+n)%n]
+		if !inputDisabled(next) {
+			return next
+		}
+	}
+	// Todas disabled — no cambiar.
+	return current
 }
 
 // stepNeighbor devuelve el elemento adyacente (con wrap) en una lista.
@@ -1290,6 +1340,13 @@ func renderInputPills(m model) string {
 	focused := m.stepEdit.focus == StepFocusInput
 	var parts []string
 	for _, o := range options {
+		// pr/issue sin repo activo se rinden con sufijo "·off" (mismo patron
+		// visual que un CLI no instalado en S2). dim + off comunica "esta
+		// opcion existe pero el contexto no la habilita".
+		if inputDisabled(o) {
+			parts = append(parts, dimStyle.Render(" "+o+" ·off "))
+			continue
+		}
 		switch {
 		case o == m.stepEdit.input && focused:
 			parts = append(parts, selectedItem.Render("["+o+"]"))

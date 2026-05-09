@@ -13,6 +13,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/chichex/che/internal/repoctx"
 	"github.com/chichex/che/internal/skills"
 	"github.com/chichex/che/internal/wizard"
 )
@@ -145,10 +146,15 @@ func buildPreflightChecks(p wizard.Pipeline, inputKind, inputValue string) []Pre
 		})
 	}
 
-	// gh auth: solo si algun step usa input pr|issue. El doc trata esto
-	// como un solo row global — no uno por step — porque el remedio (gh
-	// auth login) cubre cualquier ref.
+	// gh auth + git repo context: ambos solo aplican si algun step usa
+	// input pr|issue. El row de repo aparece antes que el de auth porque
+	// "no estas en un repo" es un fail mas estructural que "no estas
+	// logueado" — si fallan los dos, el usuario lee la causa raiz primero.
 	if pipelineNeedsGh(p) {
+		checks = append(checks, PreflightCheck{
+			Label:  "git repo context",
+			Status: PreflightPending,
+		})
 		checks = append(checks, PreflightCheck{
 			Label:  "gh auth status",
 			Status: PreflightPending,
@@ -279,6 +285,20 @@ func resolveCheck(c PreflightCheck, p wizard.Pipeline, inputKind, inputValue str
 		return resolveCliCheck(c, cliInstalled)
 	case strings.HasPrefix(c.Label, "skill "):
 		return resolveSkillCheck(c, cliSkills)
+	case c.Label == "git repo context":
+		info := repoctx.Detect()
+		if info.InGitHubRepo {
+			c.Status = PreflightOK
+			c.Remedy = ""
+			// Append del repo detectado al label para que el usuario sepa
+			// contra cual repo va a resolver pr/issue (mismo patron que
+			// "file readable: <path>").
+			c.Label = "git repo context: " + info.Repo
+			return c
+		}
+		c.Status = PreflightFail
+		c.Remedy = "cd al repo correspondiente (gh repo view debe responder)"
+		return c
 	case c.Label == "gh auth status":
 		if ghAuthFn() {
 			c.Status = PreflightOK

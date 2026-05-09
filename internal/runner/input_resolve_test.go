@@ -174,6 +174,67 @@ func TestResolveGH_Happy(t *testing.T) {
 	}
 }
 
+// TestDefaultGhList_Happy valida el shape del comando + parseo del JSON.
+func TestDefaultGhList_Happy(t *testing.T) {
+	saved := ghCommand
+	t.Cleanup(func() { ghCommand = saved })
+	ghCommand = func(ctx context.Context, args ...string) *exec.Cmd {
+		want := []string{"pr", "list", "--state", "open", "--json", "number,title,state", "--limit", "50"}
+		if len(args) != len(want) {
+			t.Errorf("ghCommand args len = %d, want %d (got=%v)", len(args), len(want), args)
+		}
+		for i := range want {
+			if i < len(args) && args[i] != want[i] {
+				t.Errorf("ghCommand args[%d] = %q, want %q", i, args[i], want[i])
+			}
+		}
+		body := `[{"number":42,"title":"first","state":"OPEN"},{"number":43,"title":"second","state":"OPEN"}]`
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "printf %s "+shellQuote(body))
+	}
+	items, err := defaultGhList("pr")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("got %d items, want 2 (%+v)", len(items), items)
+	}
+	if items[0].Number != 42 || items[0].Title != "first" {
+		t.Errorf("items[0] = %+v, want {42, first}", items[0])
+	}
+}
+
+// TestDefaultGhList_BadKindRejected garantiza que kind != pr|issue rebota
+// antes de spawnear gh.
+func TestDefaultGhList_BadKindRejected(t *testing.T) {
+	if _, err := defaultGhList("bogus"); err == nil {
+		t.Error("expected error for bogus kind")
+	}
+}
+
+// TestDefaultGhList_EmptyStdoutTreatedAsEmpty cubre el path "no hay PRs":
+// gh devuelve "" o "[]" → lista vacia + sin error.
+func TestDefaultGhList_EmptyStdoutTreatedAsEmpty(t *testing.T) {
+	saved := ghCommand
+	t.Cleanup(func() { ghCommand = saved })
+	ghCommand = func(ctx context.Context, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "true")
+	}
+	items, err := defaultGhList("pr")
+	if err != nil {
+		t.Fatalf("unexpected err for empty stdout: %v", err)
+	}
+	if len(items) != 0 {
+		t.Errorf("got %d items, want 0", len(items))
+	}
+}
+
+// shellQuote envuelve s entre comillas simples y escapa las comillas
+// internas — suficiente para el uso de tests (JSON sin caracteres
+// patologicos). Evita el set de problemas tipicos de pasar JSON via -c.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // TestResolveGH_Failure surface el stderr de gh cuando el exit code != 0.
 func TestResolveGH_Failure(t *testing.T) {
 	saved := ghCommand

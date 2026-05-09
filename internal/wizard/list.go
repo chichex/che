@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/chichex/che/internal/repoctx"
 )
 
 // ListAction es el resultado externo del lister: que querés que el caller
@@ -53,6 +54,12 @@ type listItem struct {
 	// runs, lastRun.Status == RunStatusNever. Solo se popula para rows
 	// ready — drafts no tienen runs por construccion.
 	lastRun RunSummary
+	// needsRepo = true si algun step del pipeline declara input pr/issue.
+	// Sirve para decorar el row con el chip "[needs repo]" cuando el cwd
+	// del proceso no esta dentro de un repo de github (la chequera vive en
+	// el render — el flag persiste el "este pipeline asume repo" sin
+	// re-parsear los steps por keystroke).
+	needsRepo bool
 }
 
 // listModel es el bubbletea model del lister "My pipelines".
@@ -170,6 +177,10 @@ func loadListItems(homeDir string) ([]listItem, error) {
 		if !item.isDraft {
 			item.lastRun = LastRunFor(homeDir, item.slug)
 		}
+		// needsRepo se computa una vez al cargar la lista. La chequera del
+		// chip pasa por repoctx.Detect() en el render — el flag de aca solo
+		// dice "este pipeline asume repo".
+		item.needsRepo = PipelineNeedsRepo(p)
 		items = append(items, item)
 	}
 	sort.SliceStable(items, func(i, j int) bool {
@@ -461,6 +472,10 @@ var (
 	chipFailStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555")).Bold(true)
 	chipWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F1FA8C")).Bold(true)
 	chipInfoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4"))
+	// chipNeedsRepoStyle es el chip discreto "[needs repo]" — gris dracula
+	// sin bold, italic para diferenciarlo de los chips de status. La idea
+	// es que se note pero sin competir visualmente con [ready] / [failed].
+	chipNeedsRepoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4")).Italic(true)
 )
 
 func (m listModel) View() string {
@@ -533,6 +548,16 @@ func renderListRow(it listItem) string {
 	whenPart := dimStyle.Render(fmt.Sprintf("%-10s", when))
 
 	row := mutedItem.Render(namePart) + "  " + chip + "  " + whenPart
+
+	// Chip "[needs repo]" — discreto (gris dracula, sin bold) al lado del
+	// chip principal. Aparece solo en rows ready cuando el pipeline tiene
+	// algun step pr/issue Y el cwd no esta dentro de un repo de github
+	// segun gh. Para drafts lo omitimos: el draft es justo lo que el
+	// usuario esta editando, y mostrar el chip mientras todavia no termina
+	// de declarar steps es ruido.
+	if !it.isDraft && it.needsRepo && !repoctx.Detect().InGitHubRepo {
+		row += "  " + chipNeedsRepoStyle.Render("[needs repo]")
+	}
 
 	if it.isDraft {
 		sub := stageLabel(it)

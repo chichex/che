@@ -9,13 +9,18 @@ import (
 	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/chichex/che/internal/repoctx"
 	"github.com/chichex/che/internal/wizard"
 )
 
 // inputUIState es el estado UI puro de R1. Cambia segun el kind:
 //
 //   - text          → textBuf multiline.
-//   - pr / issue    → textBuf single-line con la referencia owner/repo#NNN.
+//   - pr / issue    → textBuf single-line con la referencia owner/repo#NNN
+//     SI no hay repo en el cwd. Cuando repoctx.Detect().InGitHubRepo es
+//     true, el R1 abre un picker (ghEntries / ghCursor) con los PRs / issues
+//     abiertos del repo activo (mismo patron que el file picker, pero el
+//     listado viene de gh en vez del filesystem).
 //   - url           → textBuf single-line con la URL.
 //   - file          → fileEntries / fileCursor / fileDir + textBuf como
 //     filtro tipeado (no vital para H2; el cursor + enter alcanza).
@@ -32,6 +37,16 @@ type inputUIState struct {
 	fileDir     string     // dir actual listado
 	fileEntries []fileItem // entradas visibles (dirs primero, luego files)
 	fileCursor  int        // indice seleccionado dentro de fileEntries
+
+	// Estado del picker de gh (kind=pr|issue + repo activo). repoMode=true
+	// indica que el R1 esta operando sobre la lista de gh (ghEntries) en
+	// vez del textBuf de toggle libre. Cuando ghLoadErr != "", el render
+	// muestra el error en vez de la lista (la lista igual queda vacia).
+	repoMode  bool
+	repo      string // owner/name del repo activo (segun repoctx)
+	ghEntries []GHListItem
+	ghCursor  int
+	ghLoadErr string
 }
 
 // fileItem es una entrada del file picker.
@@ -145,6 +160,12 @@ const cursorBlock = "▎"
 // initInputUI prepara el estado UI segun el kind. Para file picker arranca
 // listando $PWD; si falla cae a $HOME. El error de listing no es fatal —
 // se refleja como inputErr al primer render (loadFileEntries lo retorna).
+//
+// Para pr / issue, si hay repo de github en el cwd (repoctx.Detect()), el
+// R1 abre un picker con los items abiertos del repo en vez del input libre
+// — el doc fija que el usuario no debe tener que tipear el ref a mano si
+// el contexto lo evita. Si no hay repo o el listado de gh falla, caemos al
+// textBuf como antes.
 func initInputUI(kind string) inputUIState {
 	switch kind {
 	case wizard.InputText:
@@ -162,8 +183,30 @@ func initInputUI(kind string) inputUIState {
 		ui.fileDir = dir
 		ui.fileEntries, _ = loadFileEntries(dir)
 		return ui
+	case wizard.InputPR, wizard.InputIssue:
+		ui := inputUIState{kind: kind, textBuf: newTextBuffer(false)}
+		info := repoctx.Detect()
+		if !info.InGitHubRepo {
+			// Sin repo activo: fallback al textBuf libre. El R2 igual va a
+			// rebotar (preflight nuevo "git repo context") — el textBuf
+			// permite que un usuario que sabe el ref de otro repo lo
+			// tipee igual.
+			return ui
+		}
+		ui.repoMode = true
+		ui.repo = info.Repo
+		listKind := "pr"
+		if kind == wizard.InputIssue {
+			listKind = "issue"
+		}
+		items, err := ghListFn(listKind)
+		if err != nil {
+			ui.ghLoadErr = err.Error()
+		}
+		ui.ghEntries = items
+		return ui
 	default:
-		// pr / issue / url → single-line.
+		// url → single-line.
 		return inputUIState{kind: kind, textBuf: newTextBuffer(false)}
 	}
 }
@@ -225,8 +268,13 @@ func (m RunModel) updateInput(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateInputFile(key)
 	case wizard.InputText:
 		return m.updateInputText(key)
+	case wizard.InputPR, wizard.InputIssue:
+		if m.inputUI.repoMode {
+			return m.updateInputGHPicker(key)
+		}
+		return m.updateInputSingleLine(key)
 	default:
-		// pr / issue / url → single-line + confirm con ctrl+s/enter.
+		// url → single-line + confirm con ctrl+s/enter.
 		return m.updateInputSingleLine(key)
 	}
 }
@@ -257,6 +305,46 @@ func (m RunModel) updateInputSingleLine(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	consumed := m.inputUI.textBuf.handleKey(key.String(), key.Runes)
 	if consumed && m.inputErr != "" {
 		m.inputErr = ""
+	}
+	return m, nil
+}
+
+// updateInputGHPicker: navegacion del picker de PRs/issues abiertos. Mismo
+// patron que updateInputFile (↑/↓ cursor, enter / ctrl+s confirman) pero
+// sobre m.inputUI.ghEntries en vez de fileEntries. Si la lista esta vacia
+// (ghLoadErr o repo sin items) el confirm rebota con un error inline —
+// esc igual deja al usuario volver al lister para fixear el contexto.
+func (m RunModel) updateInputGHPicker(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "up", "k":
+		if m.inputUI.ghCursor > 0 {
+			m.inputUI.ghCursor--
+			m.inputErr = ""
+		}
+		return m, nil
+	case "down", "j":
+		if m.inputUI.ghCursor < len(m.inputUI.ghEntries)-1 {
+			m.inputUI.ghCursor++
+			m.inputErr = ""
+		}
+		return m, nil
+	case "enter", "ctrl+s":
+		if len(m.inputUI.ghEntries) == 0 {
+			if m.inputUI.ghLoadErr != "" {
+				m.inputErr = m.inputUI.ghLoadErr
+			} else {
+				m.inputErr = "no hay items abiertos en el repo activo"
+			}
+			return m, nil
+		}
+		sel := m.inputUI.ghEntries[m.inputUI.ghCursor]
+		ref := fmt.Sprintf("%s#%d", m.inputUI.repo, sel.Number)
+		// Sembrar el textBuf con la referencia armada — confirmInput
+		// resuelve el payload via resolveGH (mismo path que el textBuf).
+		m.inputUI.textBuf = textBuffer{}
+		m.inputUI.textBuf.runes = []rune(ref)
+		m.inputUI.textBuf.cursor = len(m.inputUI.textBuf.runes)
+		return m.confirmInput()
 	}
 	return m, nil
 }
@@ -366,15 +454,29 @@ func (m RunModel) viewInput() string {
 		b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
 		b.WriteString("\n")
 	case wizard.InputPR:
-		b.WriteString(dimStyle.Render("formato: owner/repo#NNN — se valida con `gh pr view`"))
-		b.WriteString("\n")
-		b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
-		b.WriteString("\n")
+		if m.inputUI.repoMode {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("PRs abiertos en %s — ↑/↓ navegar · enter elegir", m.inputUI.repo)))
+			b.WriteString("\n")
+			b.WriteString(renderGHPicker(m.inputUI))
+			b.WriteString("\n")
+		} else {
+			b.WriteString(dimStyle.Render("formato: owner/repo#NNN — se valida con `gh pr view`"))
+			b.WriteString("\n")
+			b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
+			b.WriteString("\n")
+		}
 	case wizard.InputIssue:
-		b.WriteString(dimStyle.Render("formato: owner/repo#NNN — se valida con `gh issue view`"))
-		b.WriteString("\n")
-		b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
-		b.WriteString("\n")
+		if m.inputUI.repoMode {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("issues abiertos en %s — ↑/↓ navegar · enter elegir", m.inputUI.repo)))
+			b.WriteString("\n")
+			b.WriteString(renderGHPicker(m.inputUI))
+			b.WriteString("\n")
+		} else {
+			b.WriteString(dimStyle.Render("formato: owner/repo#NNN — se valida con `gh issue view`"))
+			b.WriteString("\n")
+			b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
+			b.WriteString("\n")
+		}
 	case wizard.InputURL:
 		b.WriteString(dimStyle.Render("http/https — fetch con timeout 10s al confirmar"))
 		b.WriteString("\n")
@@ -397,13 +499,59 @@ func (m RunModel) viewInput() string {
 	}
 
 	b.WriteString("\n")
-	if m.inputUI.kind == wizard.InputFile {
+	switch {
+	case m.inputUI.kind == wizard.InputFile:
 		b.WriteString(hintStyle.Render("↑/↓ navegar · enter abrir/seleccionar · ctrl+s confirmar · esc volver"))
-	} else {
+	case m.inputUI.repoMode:
+		b.WriteString(hintStyle.Render("↑/↓ navegar · enter / ctrl+s elegir · esc volver · ctrl+c salir"))
+	default:
 		b.WriteString(hintStyle.Render("ctrl+s / enter confirmar · esc volver · ctrl+c salir"))
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+// renderGHPicker es el render de la lista de PRs / issues abiertos del repo
+// activo. Mismo patron que renderFilePicker (ventana centrada en el cursor,
+// cap a 10 visibles segun el doc), pero la linea es "#NNN  titulo". Cuando
+// la lista esta vacia, mostramos el error de carga (si lo hubo) o un
+// placeholder neutro — el handler de teclas igual respeta esc para volver.
+func renderGHPicker(ui inputUIState) string {
+	if ui.ghLoadErr != "" {
+		return errorStyle.Render("✗ "+ui.ghLoadErr) + "\n" + dimStyle.Render("  esc para volver al lister")
+	}
+	if len(ui.ghEntries) == 0 {
+		return dimStyle.Render("(no hay items abiertos en " + ui.repo + ")")
+	}
+	const maxRows = 10
+	start := 0
+	end := len(ui.ghEntries)
+	if end > maxRows {
+		start = ui.ghCursor - maxRows/2
+		if start < 0 {
+			start = 0
+		}
+		end = start + maxRows
+		if end > len(ui.ghEntries) {
+			end = len(ui.ghEntries)
+			start = end - maxRows
+			if start < 0 {
+				start = 0
+			}
+		}
+	}
+	var b strings.Builder
+	for i := start; i < end; i++ {
+		entry := ui.ghEntries[i]
+		line := fmt.Sprintf("#%d  %s", entry.Number, entry.Title)
+		if i == ui.ghCursor {
+			b.WriteString(pickerSelected.Render("> " + line))
+		} else {
+			b.WriteString("  " + pickerNormal.Render(line))
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func renderFilePicker(ui inputUIState) string {

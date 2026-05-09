@@ -6,9 +6,21 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/chichex/che/internal/repoctx"
 	"github.com/chichex/che/internal/skills"
 	"github.com/chichex/che/internal/wizard"
 )
+
+// repoctxSetForTest instala un fake en repoctx.Detect y restaura el
+// detector "no repo" + limpia el cache en t.Cleanup.
+func repoctxSetForTest(t *testing.T, info repoctx.Info) {
+	t.Helper()
+	repoctx.SetDetectFn(func() repoctx.Info { return info })
+	t.Cleanup(func() {
+		repoctx.SetDetectFn(func() repoctx.Info { return repoctx.Info{} })
+		repoctx.ResetForTest()
+	})
+}
 
 // TestBuildPreflightChecks_DistinctClis verifica que el builder dedupe
 // CLIs y validators en una sola row por nombre + ordene alfabeticamente
@@ -147,6 +159,9 @@ func TestRunPreflightChecks_AllGreen(t *testing.T) {
 	}
 	ghAuthFn = func() bool { return true }
 	diskFreeFn = func(string) uint64 { return 9999 * 1024 * 1024 } // 9.7 GiB libres
+	// Repo activo: el row "git repo context" se resuelve a OK con el
+	// nombre del repo append-eado al label.
+	repoctxSetForTest(t, repoctx.Info{InGitHubRepo: true, Repo: "chichex/che"})
 
 	p := wizard.Pipeline{
 		Name: "p",
@@ -190,6 +205,8 @@ func TestRunPreflightChecks_FailRows(t *testing.T) {
 	lookPathFn = func(string) (string, error) { return "", os.ErrNotExist }
 	ghAuthFn = func() bool { return false }
 	diskFreeFn = func(string) uint64 { return 10 * 1024 * 1024 } // 10 MiB libres → warn
+	// Sin repo: el row "git repo context" tambien debe fail.
+	repoctxSetForTest(t, repoctx.Info{})
 
 	p := wizard.Pipeline{
 		Name: "p",
@@ -205,6 +222,7 @@ func TestRunPreflightChecks_FailRows(t *testing.T) {
 		"cli claude instalado":          PreflightFail,
 		"skill missing-skill en claude": PreflightFail,
 		"gh auth status":                PreflightFail,
+		"git repo context":              PreflightFail,
 	}
 	for label, status := range want {
 		found := false
@@ -233,6 +251,73 @@ func TestRunPreflightChecks_FailRows(t *testing.T) {
 				t.Errorf("disk row: got %v, want Warn", c.Status)
 			}
 		}
+	}
+}
+
+// TestBuildPreflightChecks_GitRepoContextRowOnlyWhenGh valida que el row
+// "git repo context" aparece SOLO cuando algun step usa pr/issue. Sin gh-
+// related inputs no tiene sentido pedir un repo activo.
+func TestBuildPreflightChecks_GitRepoContextRowOnlyWhenGh(t *testing.T) {
+	pNoGh := wizard.Pipeline{
+		Name: "p",
+		Steps: []wizard.Step{
+			{Name: "a", CLI: "claude", Kind: wizard.KindPrompt, Input: wizard.InputText},
+		},
+	}
+	for _, c := range buildPreflightChecks(pNoGh, wizard.InputText, "") {
+		if c.Label == "git repo context" {
+			t.Errorf("did not expect git repo row when no step uses pr/issue, got: %v", c)
+		}
+	}
+
+	pWithGh := wizard.Pipeline{
+		Name: "p",
+		Steps: []wizard.Step{
+			{Name: "a", CLI: "claude", Kind: wizard.KindPrompt, Input: wizard.InputPR},
+		},
+	}
+	found := false
+	for _, c := range buildPreflightChecks(pWithGh, wizard.InputPR, "x/y#1") {
+		if c.Label == "git repo context" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected git repo row when step uses input=pr")
+	}
+}
+
+// TestResolveCheck_GitRepoContextOK valida que con repo activo el row
+// resuelve OK + el label gana el sufijo con el nombre del repo (asi el
+// usuario sabe contra que esta resolviendo pr/issue).
+func TestResolveCheck_GitRepoContextOK(t *testing.T) {
+	repoctxSetForTest(t, repoctx.Info{InGitHubRepo: true, Repo: "chichex/che"})
+
+	c := PreflightCheck{Label: "git repo context", Status: PreflightPending}
+	got := resolveCheck(c, wizard.Pipeline{}, "", "", nil, nil)
+	if got.Status != PreflightOK {
+		t.Errorf("status: got %v, want OK", got.Status)
+	}
+	if !strings.Contains(got.Label, "chichex/che") {
+		t.Errorf("label should include repo name, got %q", got.Label)
+	}
+}
+
+// TestResolveCheck_GitRepoContextFail valida que sin repo el row reporta
+// fail + remedio claro.
+func TestResolveCheck_GitRepoContextFail(t *testing.T) {
+	repoctxSetForTest(t, repoctx.Info{})
+
+	c := PreflightCheck{Label: "git repo context", Status: PreflightPending}
+	got := resolveCheck(c, wizard.Pipeline{}, "", "", nil, nil)
+	if got.Status != PreflightFail {
+		t.Errorf("status: got %v, want Fail", got.Status)
+	}
+	if got.Remedy == "" {
+		t.Errorf("expected remedio when no repo")
+	}
+	if !strings.Contains(got.Remedy, "cd") {
+		t.Errorf("remedio should hint at `cd`, got %q", got.Remedy)
 	}
 }
 

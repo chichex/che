@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,6 +35,64 @@ var httpClient = &http.Client{Timeout: httpFetchTimeout}
 // el symlink chefake se interpone, lo cual es exactamente lo que queremos).
 var ghCommand = func(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, "gh", args...)
+}
+
+// ghListTimeout acota cuanto puede tardar `gh pr list` / `gh issue list` en
+// el picker R1. Mismo orden de magnitud que httpFetchTimeout — una API que
+// tarda > 10s arruina la UX del picker; preferimos fail rapido y dejar que
+// el usuario tipee el ref a mano.
+const ghListTimeout = 10 * time.Second
+
+// GHListItem es un item del listado abierto del repo (pr o issue). Lo
+// expone el picker R1 para que el handler de teclas pueda navegar. Number
+// + Title bastan para el render; el Number se usa al confirmar para armar
+// la referencia owner/repo#NNN que despues consume resolveGH.
+type GHListItem struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	State  string `json:"state"`
+}
+
+// ghListFn es la fn que el picker llama para listar PRs / issues abiertos
+// del repo activo. Variable a nivel paquete para que los tests la
+// reemplacen sin pasar por PATH (los e2e si pasan por el fake gh; los tests
+// unitarios usan un fake en memoria).
+var ghListFn = defaultGhList
+
+// defaultGhList ejecuta `gh pr list --json number,title,state --state open`
+// (o `gh issue list ...`) sobre el cwd. El cwd se hereda del proceso che,
+// que es justo lo que queremos: el listado refleja el repo del directorio
+// donde el usuario corrio che. Si gh sale != 0, devolvemos el stderr crudo
+// para que el R1 lo muestre inline (mismo patron que resolveGH).
+func defaultGhList(kind string) ([]GHListItem, error) {
+	if kind != "pr" && kind != "issue" {
+		return nil, fmt.Errorf("kind invalido: %q", kind)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), ghListTimeout)
+	defer cancel()
+	cmd := ghCommand(ctx, kind, "list", "--state", "open", "--json", "number,title,state", "--limit", "50")
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("gh %s list fallo: %s", kind, msg)
+	}
+	var items []GHListItem
+	raw := strings.TrimSpace(stdout.String())
+	if raw == "" {
+		// gh devuelve "[]" si no hay items; un stdout vacio igual lo
+		// tratamos como lista vacia para no asustar al usuario con un
+		// error de parse cuando el repo simplemente no tiene PRs.
+		return nil, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return nil, fmt.Errorf("gh %s list devolvio JSON invalido: %v", kind, err)
+	}
+	return items, nil
 }
 
 // resolveInput corre la resolucion eager segun el kind. Devuelve el
