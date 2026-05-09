@@ -311,6 +311,11 @@ type model struct {
 	// exitApp = true si el wizard pidio salida total al menu (q / ctrl+c
 	// confirmados). false significa "volver al menu principal".
 	exitApp bool
+
+	// width es el ancho del terminal en columnas, refrescado via
+	// tea.WindowSizeMsg. Se usa para wrappear inputs de texto largos
+	// (prompt del step) y evitar overflow horizontal.
+	width int
 }
 
 // installedCLIs returns the names of the detected CLIs that are installed.

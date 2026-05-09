@@ -6,6 +6,50 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// wrapText envuelve cada linea logica de s a un ancho maximo de w columnas
+// (chars). Prefiere romper en espacios; si una palabra es mas larga que w
+// hace hard break por char. Newlines existentes se preservan — cada linea
+// logica se wrappea independiente. w <= 0 devuelve s sin tocar (uso para
+// "todavia no se que ancho tiene la terminal").
+func wrapText(s string, w int) string {
+	if w <= 0 {
+		return s
+	}
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		out = append(out, wrapLine(line, w)...)
+	}
+	return strings.Join(out, "\n")
+}
+
+func wrapLine(line string, w int) []string {
+	runes := []rune(line)
+	if len(runes) <= w {
+		return []string{line}
+	}
+	var lines []string
+	for len(runes) > w {
+		breakAt := -1
+		for i := w; i > 0; i-- {
+			if runes[i-1] == ' ' {
+				breakAt = i - 1
+				break
+			}
+		}
+		if breakAt <= 0 {
+			lines = append(lines, string(runes[:w]))
+			runes = runes[w:]
+			continue
+		}
+		lines = append(lines, strings.TrimRight(string(runes[:breakAt]), " "))
+		runes = runes[breakAt+1:]
+	}
+	if len(runes) > 0 {
+		lines = append(lines, string(runes))
+	}
+	return lines
+}
+
 // breadcrumb arma el header "che › ... › <pantalla>" para el View() de cada
 // screen del wizard. El ultimo segmento se renderea en titleStyle (cyan
 // bold dracula) — la pantalla actual destaca; los segmentos previos +

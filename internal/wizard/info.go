@@ -18,6 +18,15 @@ func (m model) updateInfo(key tea.KeyMsg) (model, tea.Cmd) {
 		// siendo el camino de salida.
 		return m.openCancel(ScreenInfo)
 	case "esc":
+		// Si todavia no hay nada en disco (creacion fresca, S1 sin
+		// avanzar), salir directo sin modal — no hay "progreso" que
+		// preguntarle al usuario que hacer. Si ya hay path (volvio desde
+		// S2/S3 o resumio un draft), mantenemos el SC para que pueda
+		// elegir keep/discard.
+		if m.path == "" {
+			m.exitApp = false
+			return m, tea.Quit
+		}
 		return m.openCancel(ScreenInfo)
 	case "tab", "down":
 		m.focus = nextFocus(m.focus)
@@ -162,9 +171,9 @@ func (m model) viewInfo() string {
 	b.WriteString(breadcrumb("Create pipeline", "paso 1/3 · nombre"))
 	b.WriteString("\n\n")
 
-	b.WriteString(renderLabeledField("Nombre", m.nameInput, m.focus == FocusName))
+	b.WriteString(renderLabeledField("Nombre", m.nameInput, m.focus == FocusName, m.width))
 	b.WriteString("\n")
-	b.WriteString(renderLabeledField("Descripcion", m.descInput, m.focus == FocusDescription))
+	b.WriteString(renderLabeledField("Descripcion", m.descInput, m.focus == FocusDescription, m.width))
 	b.WriteString("\n")
 
 	if m.errMsg != "" {
@@ -187,13 +196,20 @@ func (m model) viewInfo() string {
 
 // renderLabeledField imprime label + caja con borde por encima/abajo del
 // contenido. La caja deja en claro donde empieza y donde termina el input,
-// evitando que el placeholder se confunda con texto ya tipeado.
-func renderLabeledField(label string, t textInput, focused bool) string {
+// evitando que el placeholder se confunda con texto ya tipeado. termWidth
+// (de tea.WindowSizeMsg) se usa para wrappear contenido largo dentro del
+// borde — 0 desactiva el wrap (todavia no llego el size).
+func renderLabeledField(label string, t textInput, focused bool, termWidth int) string {
 	style := inputBoxBorder
 	labelText := labelStyle.Render(label)
 	if focused {
 		style = inputBoxBorderFocus
 		labelText = labelText + dimStyle.Render("  ← foco")
 	}
-	return labelText + "\n" + style.Render(t.view(focused))
+	body := t.view(focused)
+	if inner := contentInnerWidth(termWidth); inner > 0 {
+		body = wrapText(body, inner)
+		style = style.Width(inner)
+	}
+	return labelText + "\n" + style.Render(body)
 }

@@ -176,21 +176,14 @@ func TestWizard_S1Collision(t *testing.T) {
 		t.Errorf("pre-existing file got mutated:\n%s", got)
 	}
 
-	// Salir via SC keep (sin path, no toca disco).
+	// Salir directo via esc en S1 sin path — el modal SC no aparece
+	// (nada que guardar, nada que descartar) y caemos directo al menu.
 	mark = p.Mark()
 	if err := p.Send("\x1b"); err != nil {
 		t.Fatalf("send esc: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "Salir del wizard", 3*time.Second) {
-		t.Fatalf("SC modal never opened\n%s", p.Since(mark))
-	}
-	if err := p.Send("1"); err != nil {
-		t.Fatalf("send 1: %v", err)
-	}
-
-	mark = p.Mark()
 	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
-		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+		t.Fatalf("menu never re-rendered after S1 esc\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {
 		t.Fatalf("send q: %v", err)

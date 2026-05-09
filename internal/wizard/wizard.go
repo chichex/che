@@ -21,6 +21,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleEditorReturn(em)
 	}
 
+	if ws, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width = ws.Width
+		return m, nil
+	}
+
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
 		return m, nil
