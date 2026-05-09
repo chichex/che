@@ -16,8 +16,10 @@ import (
 // haga al cerrarse la pantalla. ListActionNone = volver al menu, Exit =
 // salida total (ctrl+c/q), Resume = abrir wizard reanudando un draft,
 // EditReady = abrir wizard sobre un pipeline ready en mode=edit (re-introduce
-// status.stage=summary). enter sobre ready / d / y se manejan inline (no
-// salen del lister) — el caller solo ve Resume/EditReady/Exit/None.
+// status.stage=summary), Run = ejecutar un pipeline ready (H1 del flow de
+// runner — abre la pantalla del runner skeleton). enter sobre ready / d / y
+// se manejan inline (no salen del lister) — el caller solo ve
+// Resume/EditReady/Run/Exit/None.
 type ListAction string
 
 const (
@@ -25,6 +27,7 @@ const (
 	ListActionExit      ListAction = "exit"
 	ListActionResume    ListAction = "resume"
 	ListActionEditReady ListAction = "edit-ready"
+	ListActionRun       ListAction = "run"
 )
 
 // listItem es la metadata renderizable de un pipeline en disco.
@@ -243,10 +246,12 @@ func (m listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.target = sel.path
 			return m, tea.Quit
 		}
-		// ready: la ejecucion sale del wizard, no esta implementada en v1.
-		m.toast = "ejecución de pipelines ready no implementada todavía"
-		m.toastOK = false
-		return m, nil
+		// ready: H1 del flow de runner — enter dispara la screen del
+		// runner skeleton. El caller (cmd/root.go.runMyPipelines) rutea
+		// ListActionRun a runner.Run(target).
+		m.action = ListActionRun
+		m.target = sel.path
+		return m, tea.Quit
 	case "e":
 		if len(m.items) == 0 {
 			return m, nil

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/chichex/che/internal/runner"
 	"github.com/chichex/che/internal/tui"
 	"github.com/chichex/che/internal/wizard"
 	"github.com/spf13/cobra"
@@ -109,6 +110,19 @@ func runMyPipelines() error {
 			exit, err := wizard.RunEditReady(target)
 			if err != nil {
 				return err
+			}
+			if exit {
+				os.Exit(0)
+			}
+		case wizard.ListActionRun:
+			// H1 del flow de runner: ejecutar un pipeline ready abre el
+			// runner skeleton. Tras esc volvemos al lister; tras q salida
+			// total. Errores de load/IsValid se imprimen y volvemos al
+			// lister — H2+ hara el toast inline; H1 deja el surface al
+			// caller para no inflar el contrato.
+			exit, err := runner.Run(target)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
 			}
 			if exit {
 				os.Exit(0)
