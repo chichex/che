@@ -333,4 +333,21 @@ type RunModel struct {
 	// exitApp = true si el usuario pidio salida total (q / ctrl+c). false
 	// significa "volver al lister" (esc).
 	exitApp bool
+
+	// retryRequested = true si el usuario presiono `r` en RF (failed o
+	// cancelled). El caller (runner.Run) detecta el flag al cierre del
+	// program y arma una nueva pasada del runner desde R1 con el input ya
+	// resuelto pre-cargado. El doc fija "crea un run-id nuevo" — se hace
+	// reseteando RunID/RunDir + dejando el ResolvedPayload del Input
+	// intacto para que enterRunning vuelva a generar el run-dir.
+	retryRequested bool
+
+	// terminalWidth / terminalHeight son el tamaño del terminal segun el
+	// ultimo tea.WindowSizeMsg recibido (H10). Lo usa renderLogPane para
+	// dimensionar dinamicamente el viewport del log pane sobre R3 — el cap
+	// fijo de logViewportLines (18) sigue siendo el fallback cuando el
+	// program todavia no recibio un WindowSizeMsg (tests sin pty / antes
+	// del primer render).
+	terminalWidth  int
+	terminalHeight int
 }

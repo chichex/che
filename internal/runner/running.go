@@ -814,11 +814,47 @@ func (m RunModel) viewRunning() string {
 	return b.String()
 }
 
-// logViewportLines es el cap de lineas visibles en el log pane (height del
-// viewport). H5 lo deja fijo en 18 — H6 va a sumar resize dinamico segun
-// tea.WindowSizeMsg. 18 es suficiente para mostrar ~media pantalla en una
-// terminal estandar sin ahogar el header + tracker + footer.
+// logViewportLines es el cap default de lineas visibles en el log pane.
+// H10 agrega resize dinamico via tea.WindowSizeMsg: cuando el modelo conoce
+// terminalHeight > 0, calculamos el cap dinamicamente reservando espacio
+// para header + tracker + footer + modales. Este const sigue siendo el
+// fallback cuando todavia no recibimos un WindowSizeMsg (tests headless o
+// el primer frame antes del resize).
 const logViewportLines = 18
+
+// chromeReservedLines es el numero de lineas que el chrome de R3 (header,
+// steps tracker, separadores, footer) consume fuera del log pane. El calculo
+// del viewport size dinamico (H10) resta este valor al terminalHeight del
+// modelo. El header tipicamente toma 1-2 lineas; el tracker ~N lineas (uno
+// por step) + 1 separador; footer 1 linea. 8 deja margen para modales
+// (cancel/pause) sin que el log pane se coma todo el alto.
+const chromeReservedLines = 8
+
+// minLogViewportLines es el piso del viewport calculado dinamicamente —
+// terminales muy chiquitos (CI con TERM=dumb o splits ultra-finos) no deben
+// degradar el log pane a 0 lineas. Mantenemos al menos 4 para que el usuario
+// vea algo de contexto.
+const minLogViewportLines = 4
+
+// effectiveLogViewportLines devuelve el alto del log pane segun el resize
+// mas reciente (WindowSizeMsg) o el cap fijo si todavia no recibimos uno.
+// Resta el chrome aproximado y el espacio de los rows del tracker (1 por
+// step en el pipeline). Clampea al piso minLogViewportLines para no
+// degradar a 0 en terminales chiquitos.
+func (m RunModel) effectiveLogViewportLines() int {
+	if m.terminalHeight <= 0 {
+		return logViewportLines
+	}
+	rows := len(m.Pipeline.Steps)
+	if rows < 1 {
+		rows = 1
+	}
+	avail := m.terminalHeight - chromeReservedLines - rows
+	if avail < minLogViewportLines {
+		return minLogViewportLines
+	}
+	return avail
+}
 
 // renderLogPane dibuja el viewport del log pane: header del step en LogFocus
 // + las ultimas N lineas del ring buffer del mismo step (segun StickyBottom
@@ -869,9 +905,10 @@ func renderLogPane(m RunModel) string {
 		return b.String()
 	}
 	snap := rb.Snapshot()
-	// Slice visible: tomar las ultimas logViewportLines lineas, ajustando
-	// con LogScrollOffset cuando el usuario scrolleo arriba.
-	visible := windowLines(snap, logViewportLines, m.LogScrollOffset)
+	// Slice visible: tomar las ultimas N lineas, donde N = viewport size
+	// dinamico (H10: resize via WindowSizeMsg). LogScrollOffset corre la
+	// ventana hacia atras cuando el usuario scrollea arriba.
+	visible := windowLines(snap, m.effectiveLogViewportLines(), m.LogScrollOffset)
 	for _, line := range visible {
 		switch line.Kind {
 		case LogLineStderr:

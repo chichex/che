@@ -3056,3 +3056,397 @@ func TestRunner_RCH9RaceSubprocessExitsBeforeAbort(t *testing.T) {
 		t.Errorf("expected stdout.log to contain sentinel, got:\n%s", stdoutRaw)
 	}
 }
+
+// terminalManifest devuelve el body YAML de un manifest terminal (status
+// done/failed/cancelled) con timestamps + un step minimo. Sirve para
+// pre-armar el historial de un slug en los tests de H10 (Run history,
+// chip last run). Mismo shape que el runner.Manifest pero solo con los
+// campos que el chip / la pantalla history consumen.
+func terminalManifest(slug, runID, status string, started, finished time.Time) string {
+	return fmt.Sprintf(`run_id: %s
+pipeline: %s
+started_at: %s
+finished_at: %s
+status: %s
+steps:
+  - idx: 1
+    name: alpha
+    cli: claude
+    status: %s
+    exit_code: 0
+`, runID, slug, started.UTC().Format(time.RFC3339Nano), finished.UTC().Format(time.RFC3339Nano), status, status)
+}
+
+// TestRunner_R4H10ChipDoneInLister cubre el primer test e2e listado en H10:
+// "Run done → assert R4 muestra duracion > 0, path absoluto al result.yaml,
+// y volviendo a R0 el row tiene chip done".
+//
+// Flujo: pipeline 1 step con fake claude que devuelve ok rapido → R4 con
+// duracion + path → esc → R0 → assert chip "done" + sub-linea "last run"
+// + path absoluto al result.yaml en pantalla.
+func TestRunner_R4H10ChipDoneInLister(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmClaudeSkill(t, env.HomeDir, "h10-done")
+	env.ExpectAgent("claude").WhenArgsMatch(`h10-done`).RespondStdout("ok-h10-done", 0)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r4h10-done.yaml": readyYAMLSkillStep("R4H10 Done", "h10-done", "none"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R4H10 Done", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 3*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+		t.Fatalf("R4 never rendered\n%s", p.Since(mark))
+	}
+	r4Snap := p.Since(mark)
+	// R4 debe mencionar el path absoluto al step-01.result.yaml dentro del
+	// run dir bajo HOME del test. El sentinel exacto del path no lo sabemos
+	// (run-id es timestamp), pero verificamos el sufijo esperado.
+	if !strings.Contains(r4Snap, "step-01.result.yaml") {
+		t.Errorf("R4 should mention step-01.result.yaml path, got:\n%s", r4Snap)
+	}
+	// "duracion:" siempre se renderea (zero o no). Verificamos su prefijo.
+	if !strings.Contains(r4Snap, "duracion:") {
+		t.Errorf("R4 should mention duracion, got:\n%s", r4Snap)
+	}
+	// El hint del footer debe incluir "y abrir result.yaml" + "l abrir log"
+	// (H10 footer de R4).
+	if !strings.Contains(r4Snap, "y abrir result.yaml") {
+		t.Errorf("R4 footer should advertise `y abrir result.yaml`, got:\n%s", r4Snap)
+	}
+	if !strings.Contains(r4Snap, "l abrir log") {
+		t.Errorf("R4 footer should advertise `l abrir log`, got:\n%s", r4Snap)
+	}
+
+	// esc → R0 (lister). Despues del run, el row debe tener chip "done"
+	// + sub-linea "last run: now".
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered after esc\n%s", p.Since(mark))
+	}
+	listerSnap := p.Since(mark)
+	if !strings.Contains(listerSnap, "last run:") {
+		t.Errorf("lister should show `last run:` line for ready row post-run, got:\n%s", listerSnap)
+	}
+	if !strings.Contains(listerSnap, "✓ done") {
+		t.Errorf("lister should show `✓ done` chip post-run, got:\n%s", listerSnap)
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Sanity en disco: result.yaml existe en el run-dir creado.
+	runDir := firstRunDir(t, env.HomeDir, "r4h10-done")
+	if _, err := os.Stat(filepath.Join(runDir, "step-01.result.yaml")); err != nil {
+		t.Errorf("expected step-01.result.yaml to exist in run dir, got err=%v", err)
+	}
+}
+
+// TestRunner_RFH10StderrInline cubre el segundo test e2e listado en H10:
+// "Run failed → assert RF muestra stderr inline (mock contiene marker
+// conocido)". Aprovecha el patron de H4 (fake con exit 1 + stderr) y
+// agrega el assert sobre el sentinel del stderr inline (que el render de
+// RF ya muestra desde H4 via FailedStderr/tail). H10 valida que el
+// contrato se mantiene + que el footer de RF anuncia r retry / l log.
+func TestRunner_RFH10StderrInline(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmClaudeSkill(t, env.HomeDir, "h10-stderr")
+	const sentinel = "h10-stderr-sentinel-xyz"
+	env.ExpectAgent("claude").WhenArgsMatch(`h10-stderr`).RespondExitWithError(1, sentinel)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"rfh10-stderr.yaml": readyYAMLSkillStep("RFH10 Stderr", "h10-stderr", "none"),
+	})
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "RFH10 Stderr", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 3*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run fallo", 5*time.Second) {
+		t.Fatalf("RF never rendered\n%s", p.Since(mark))
+	}
+	rfSnap := p.Since(mark)
+	if !strings.Contains(rfSnap, sentinel) {
+		t.Errorf("RF should show stderr sentinel %q inline, got:\n%s", sentinel, rfSnap)
+	}
+	if !strings.Contains(rfSnap, "ultimas lineas") {
+		t.Errorf("RF should show `ultimas lineas` block header, got:\n%s", rfSnap)
+	}
+	if !strings.Contains(rfSnap, "r retry") {
+		t.Errorf("RF footer should advertise `r retry` (H10), got:\n%s", rfSnap)
+	}
+	if !strings.Contains(rfSnap, "l abrir log") {
+		t.Errorf("RF footer should advertise `l abrir log` (H10), got:\n%s", rfSnap)
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	// El lister tras un failed debe mostrar chip "✗ failed".
+	listerSnap := p.Since(mark)
+	if !strings.Contains(listerSnap, "✗ failed") {
+		t.Errorf("lister should show `✗ failed` chip post-failed-run, got:\n%s", listerSnap)
+	}
+
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
+// TestRunner_R0H10RunHistoryListsRuns cubre el tercer test e2e listado en
+// H10: "3 runs históricos pre-armados (manifests directos al fixture); r
+// en R0; assert: lista contiene los 3 con sus timestamps/statuses
+// correctos".
+//
+// Pre-armamos 3 manifests terminales (done, failed, cancelled) con
+// timestamps escalonados. r sobre el row → screen "Run history" → assert
+// que los 3 run-ids aparecen + chips correspondientes.
+func TestRunner_R0H10RunHistoryListsRuns(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r0h10-history.yaml": readyYAML("R0H10 History"),
+	})
+
+	// Slug del pipeline: wizard.Slug("R0H10 History") = "r0h10-history".
+	const slug = "r0h10-history"
+	now := time.Now()
+	// 3 runs terminales, espaciados para que el sort por StartedAt desc
+	// sea deterministico. Run-ids en formato del runner (sortable).
+	seedRunDir(t, env.HomeDir, slug, "2024-12-01T00-00-00",
+		terminalManifest(slug, "2024-12-01T00-00-00", "done", now.Add(-30*time.Minute), now.Add(-29*time.Minute)))
+	seedRunDir(t, env.HomeDir, slug, "2024-12-02T00-00-00",
+		terminalManifest(slug, "2024-12-02T00-00-00", "failed", now.Add(-20*time.Minute), now.Add(-19*time.Minute)))
+	seedRunDir(t, env.HomeDir, slug, "2024-12-03T00-00-00",
+		terminalManifest(slug, "2024-12-03T00-00-00", "cancelled", now.Add(-10*time.Minute), now.Add(-9*time.Minute)))
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R0H10 History", 3*time.Second) {
+		t.Fatalf("lister never rendered\n%s", p.Since(mark))
+	}
+	// El lister muestra el chip del ultimo run (cancelled, el mas reciente).
+	listerSnap := p.Since(mark)
+	if !strings.Contains(listerSnap, "cancelled") {
+		t.Errorf("lister should show last-run chip `cancelled`, got:\n%s", listerSnap)
+	}
+
+	// r → screen Run history.
+	mark = p.Mark()
+	if err := p.Send("r"); err != nil {
+		t.Fatalf("send r: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run history", 3*time.Second) {
+		t.Fatalf("Run history screen never rendered\n%s", p.Since(mark))
+	}
+	historySnap := p.Since(mark)
+	for _, id := range []string{"2024-12-01T00-00-00", "2024-12-02T00-00-00", "2024-12-03T00-00-00"} {
+		if !strings.Contains(historySnap, id) {
+			t.Errorf("Run history should list run-id %s, got:\n%s", id, historySnap)
+		}
+	}
+	// Chips por status.
+	for _, chip := range []string{"✓ done", "✗ failed", "! cancelled"} {
+		if !strings.Contains(historySnap, chip) {
+			t.Errorf("Run history should show chip %q, got:\n%s", chip, historySnap)
+		}
+	}
+
+	// enter sobre el primer run (cancelled, sort desc) → detalle.
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run · R0H10 History", 3*time.Second) {
+		t.Fatalf("Run detail screen never rendered\n%s", p.Since(mark))
+	}
+	detailSnap := p.Since(mark)
+	if !strings.Contains(detailSnap, "2024-12-03T00-00-00") {
+		t.Errorf("detail should show run-id, got:\n%s", detailSnap)
+	}
+
+	// esc detalle → vuelve a Run history list.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (detail→history): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run history", 3*time.Second) {
+		t.Fatalf("Run history never re-rendered after esc from detail\n%s", p.Since(mark))
+	}
+
+	// esc Run history → vuelve al lister.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (history→lister): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered after esc from history\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+}
+
+// TestRunner_R0H10InterruptedChip cubre el cuarto test e2e listado en H10:
+// "Manifest con status:running y started_at > 1h en el fixture; abrir
+// lister; assert: chip interrupted + manifest reescrito a interrupted".
+//
+// Reusa staleRunningManifest (helper ya existente de H8 para recovery).
+// El boot del lister dispara RecoverInterruptedRuns; el chip "last run"
+// se renderea sobre el manifest YA reescrito. Asserts:
+//   - chip "interrupted" visible en R0.
+//   - manifest en disco re-escrito a status: interrupted.
+func TestRunner_R0H10InterruptedChip(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r0h10-interrupt.yaml": readyYAML("R0H10 Interrupt"),
+	})
+	const slug = "r0h10-interrupt"
+	stale := time.Now().Add(-2 * time.Hour)
+	seedRunDir(t, env.HomeDir, slug, "2024-01-01T00-00-00",
+		staleRunningManifest(slug, "2024-01-01T00-00-00", stale))
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R0H10 Interrupt", 3*time.Second) {
+		t.Fatalf("lister never rendered\n%s", p.Since(mark))
+	}
+	listerSnap := p.Since(mark)
+	if !strings.Contains(listerSnap, "interrupted") {
+		t.Errorf("lister should show `interrupted` chip for stale run, got:\n%s", listerSnap)
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Disco: el manifest debe haber sido reescrito a interrupted por la
+	// recovery del boot del lister (mismo path que H8).
+	manifestRaw := readRunFile(t, filepath.Join(env.HomeDir, ".che", "runs",
+		slug, "2024-01-01T00-00-00", "manifest.yaml"))
+	if !strings.Contains(manifestRaw, "status: interrupted") {
+		t.Errorf("expected manifest rewritten to status: interrupted, got:\n%s", manifestRaw)
+	}
+}

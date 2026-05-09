@@ -45,6 +45,14 @@ type listItem struct {
 	// when = LastSavedAt (drafts) o file ModTime (ready). Se usa para sort
 	// desc + render "X ago".
 	when time.Time
+	// slug = wizard.Slug(name) si name != "", fallback al filename. H10 lo
+	// usa para resolver el run dir (~/.che/runs/<slug>/) y leer el ultimo
+	// manifest para el chip "last run".
+	slug string
+	// lastRun es el snapshot del run mas reciente del slug (H10). Si no hay
+	// runs, lastRun.Status == RunStatusNever. Solo se popula para rows
+	// ready — drafts no tienen runs por construccion.
+	lastRun RunSummary
 }
 
 // listModel es el bubbletea model del lister "My pipelines".
@@ -63,6 +71,19 @@ type listModel struct {
 	// delConfirm = render del modal "borrar pipeline".
 	delConfirm bool
 	delCursor  int // 0 = confirmar, 1 = cancelar (default seguro)
+
+	// historyMode (H10): cuando es true, el lister renderea el screen
+	// "Run history" para el row en historyItem. r vuelve al listado;
+	// up/down navegan entre runs; enter abre el detalle del run en
+	// historyDetail. esc tambien sale del modo. La pantalla es inline
+	// (no un program nuevo) porque el set de teclas es chico y el reuso
+	// de Update simplifica el dispatch.
+	historyMode    bool
+	historyItem    listItem
+	historyRuns    []RunSummary
+	historyCursor  int
+	historyDetail  bool
+	historyDetailR RunSummary
 
 	// resultado para el caller
 	action  ListAction
@@ -138,6 +159,16 @@ func loadListItems(homeDir string) ([]listItem, error) {
 			if !p.Status.LastSavedAt.IsZero() {
 				item.when = p.Status.LastSavedAt
 			}
+		}
+		// Slug + lastRun chip (H10): solo para rows ready. Drafts no tienen
+		// runs (no llegaron a R3). El slug se resuelve igual que el runner
+		// (Slug del name, fallback al filename sin extension).
+		item.slug = Slug(item.name)
+		if item.slug == "" {
+			item.slug = strings.TrimSuffix(name, ".yaml")
+		}
+		if !item.isDraft {
+			item.lastRun = LastRunFor(homeDir, item.slug)
 		}
 		items = append(items, item)
 	}
@@ -215,6 +246,9 @@ func (m listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.delConfirm {
 		return m.updateDeleteConfirm(key)
 	}
+	if m.historyMode {
+		return m.updateHistory(key)
+	}
 
 	switch key.String() {
 	case "ctrl+c", "q":
@@ -280,6 +314,76 @@ func (m listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		sel := m.items[m.cursor]
 		return m, openEditorCmd(sel.path)
+	case "r":
+		// H10: r abre la pantalla "Run history" del row seleccionado.
+		// El listado es inline (no un program nuevo) — el resto de las
+		// teclas se redirige al sub-handler updateHistory.
+		if len(m.items) == 0 {
+			return m, nil
+		}
+		sel := m.items[m.cursor]
+		runs := RunHistoryFor(m.homeDir, sel.slug)
+		m.historyMode = true
+		m.historyItem = sel
+		m.historyRuns = runs
+		m.historyCursor = 0
+		m.historyDetail = false
+		m.historyDetailR = RunSummary{}
+		m.toast = ""
+		return m, nil
+	}
+	return m, nil
+}
+
+// updateHistory dispatchea las teclas mientras estamos en el sub-screen
+// "Run history" o en el detalle de un run. esc sale del modo (vuelve al
+// listado principal); enter sobre un run abre el detalle; enter / esc en
+// el detalle vuelve al listado de runs (no al menu principal — el doc fija
+// que esc en el detalle vuelve a la lista de runs).
+func (m listModel) updateHistory(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.historyDetail {
+		switch key.String() {
+		case "ctrl+c", "q":
+			m.action = ListActionExit
+			m.exitApp = true
+			return m, tea.Quit
+		case "esc", "enter":
+			m.historyDetail = false
+			m.historyDetailR = RunSummary{}
+			return m, nil
+		}
+		return m, nil
+	}
+	switch key.String() {
+	case "ctrl+c", "q":
+		m.action = ListActionExit
+		m.exitApp = true
+		return m, tea.Quit
+	case "esc", "r":
+		// r toggle off (volver al listado), esc tambien.
+		m.historyMode = false
+		m.historyItem = listItem{}
+		m.historyRuns = nil
+		m.historyCursor = 0
+		return m, nil
+	case "up", "k":
+		if m.historyCursor > 0 {
+			m.historyCursor--
+		}
+		return m, nil
+	case "down", "j":
+		if m.historyCursor < len(m.historyRuns)-1 {
+			m.historyCursor++
+		}
+		return m, nil
+	case "enter", " ":
+		if len(m.historyRuns) == 0 {
+			return m, nil
+		}
+		sel := m.historyRuns[m.historyCursor]
+		m.historyDetail = true
+		m.historyDetailR = sel
+		return m, nil
 	}
 	return m, nil
 }
@@ -350,11 +454,24 @@ func (m listModel) applyDelete() (tea.Model, tea.Cmd) {
 var (
 	chipReadyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#50FA7B")).Bold(true)
 	chipDraftStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F1FA8C")).Bold(true)
+	// chipFailStyle / chipWarnStyle / chipInfoStyle son los chips del
+	// "last run" por status (H10). Rojo para failed, amarillo para
+	// cancelled, gris para interrupted/never. Done reusa chipReadyStyle
+	// (verde — mismo color que [ready]).
+	chipFailStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555")).Bold(true)
+	chipWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F1FA8C")).Bold(true)
+	chipInfoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4"))
 )
 
 func (m listModel) View() string {
 	if m.delConfirm {
 		return m.viewDelete()
+	}
+	if m.historyMode {
+		if m.historyDetail {
+			return m.viewHistoryDetail()
+		}
+		return m.viewHistory()
 	}
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("My pipelines"))
@@ -385,7 +502,7 @@ func (m listModel) View() string {
 	}
 
 	b.WriteString("\n")
-	b.WriteString(hintStyle.Render("↑/↓ navegar · enter abrir · e editar ready · d borrar · y abrir en $EDITOR · esc volver · q salir"))
+	b.WriteString(hintStyle.Render("↑/↓ navegar · enter abrir · e editar ready · d borrar · y abrir en $EDITOR · r history · esc volver · q salir"))
 	b.WriteString("\n")
 	return b.String()
 }
@@ -424,6 +541,30 @@ func renderListRow(it listItem) string {
 		}
 	} else if it.nSteps > 0 {
 		row += "  " + dimStyle.Italic(true).Render(fmt.Sprintf("%d steps", it.nSteps))
+	}
+	// H10: para rows ready agregamos una sub-linea con "last run: X ago" +
+	// chip del status. Si no hay runs, omitimos la linea (no agregamos
+	// "never" inline para no inflar el listado).
+	if !it.isDraft && it.lastRun.Status != "" && it.lastRun.Status != RunStatusNever {
+		chipText := ChipForStatus(it.lastRun.Status)
+		var styledChip string
+		switch it.lastRun.Status {
+		case RunStatusDone:
+			styledChip = chipReadyStyle.Render(chipText)
+		case RunStatusFailed:
+			styledChip = chipFailStyle.Render(chipText)
+		case RunStatusCancelled:
+			styledChip = chipWarnStyle.Render(chipText)
+		case RunStatusInterrupted, RunStatusRunning:
+			styledChip = chipInfoStyle.Render(chipText)
+		default:
+			styledChip = dimStyle.Render(chipText)
+		}
+		when := relTime(it.lastRun.StartedAt)
+		if when == "" {
+			when = "?"
+		}
+		row += "\n    " + dimStyle.Italic(true).Render(fmt.Sprintf("last run: %s", when)) + "  " + styledChip
 	}
 	return row
 }
@@ -541,4 +682,130 @@ func (m listModel) viewDelete() string {
 	b.WriteString(hintStyle.Render("↑/↓ navegar · enter confirmar · esc volver"))
 	b.WriteString("\n")
 	return modalBorder.Render(b.String())
+}
+
+// viewHistory renderea la pantalla "Run history" del row historyItem (H10):
+// titulo + lista de runs con timestamp + status chip + duracion. Si no hay
+// runs muestra placeholder. esc / r vuelven al listado principal; enter
+// abre el detalle.
+func (m listModel) viewHistory() string {
+	var b strings.Builder
+	title := "Run history"
+	if m.historyItem.name != "" {
+		title += " · " + m.historyItem.name
+	}
+	b.WriteString(titleStyle.Render(title))
+	b.WriteString("\n\n")
+	if len(m.historyRuns) == 0 {
+		b.WriteString(dimStyle.Render("(sin runs todavia para este pipeline)"))
+		b.WriteString("\n\n")
+		b.WriteString(hintStyle.Render("esc / r volver al listado · q salir"))
+		b.WriteString("\n")
+		return b.String()
+	}
+	for i, r := range m.historyRuns {
+		row := renderHistoryRow(r)
+		if i == m.historyCursor {
+			b.WriteString(selectedItem.Render("> ") + row + "\n")
+		} else {
+			b.WriteString("  " + row + "\n")
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(hintStyle.Render("↑/↓ navegar · enter ver detalle · esc / r volver al listado · q salir"))
+	b.WriteString("\n")
+	return b.String()
+}
+
+// renderHistoryRow es el row del listado "Run history": run-id (truncado a
+// 19 chars asi entra el timestamp completo "2026-05-08T14-32-11"), tiempo
+// relativo, chip status, duracion.
+func renderHistoryRow(r RunSummary) string {
+	id := r.RunID
+	if id == "" {
+		id = "(sin id)"
+	}
+	const idWidth = 22
+	if len([]rune(id)) > idWidth {
+		id = string([]rune(id)[:idWidth-1]) + "…"
+	}
+	pad := idWidth - len([]rune(id))
+	if pad < 0 {
+		pad = 0
+	}
+	idPart := mutedItem.Render(id + strings.Repeat(" ", pad))
+
+	when := relTime(r.StartedAt)
+	if when == "" {
+		when = "?"
+	}
+	whenPart := dimStyle.Render(fmt.Sprintf("%-10s", when))
+
+	chipText := ChipForStatus(r.Status)
+	var styledChip string
+	switch r.Status {
+	case RunStatusDone:
+		styledChip = chipReadyStyle.Render(chipText)
+	case RunStatusFailed:
+		styledChip = chipFailStyle.Render(chipText)
+	case RunStatusCancelled:
+		styledChip = chipWarnStyle.Render(chipText)
+	case RunStatusInterrupted, RunStatusRunning:
+		styledChip = chipInfoStyle.Render(chipText)
+	default:
+		styledChip = dimStyle.Render(chipText)
+	}
+
+	row := idPart + "  " + whenPart + "  " + styledChip
+	if dur := formatRunDuration(r.Duration()); dur != "" {
+		row += "  " + dimStyle.Italic(true).Render(dur)
+	}
+	return row
+}
+
+// viewHistoryDetail renderea el detalle read-only de un run (H10): mismo
+// layout que el R4/RF del runner pero sin teclas de retry/editor — esto
+// es solo lectura del manifest. enter / esc vuelve al listado de runs.
+func (m listModel) viewHistoryDetail() string {
+	r := m.historyDetailR
+	var b strings.Builder
+	title := "Run · " + m.historyItem.name
+	switch r.Status {
+	case RunStatusDone:
+		b.WriteString(chipReadyStyle.Render(title + " · ✓ done"))
+	case RunStatusFailed:
+		b.WriteString(chipFailStyle.Render(title + " · ✗ failed"))
+	case RunStatusCancelled:
+		b.WriteString(chipWarnStyle.Render(title + " · ! cancelled"))
+	case RunStatusInterrupted:
+		b.WriteString(chipInfoStyle.Render(title + " · ? interrupted"))
+	case RunStatusRunning:
+		b.WriteString(chipInfoStyle.Render(title + " · ⏳ running"))
+	default:
+		b.WriteString(titleStyle.Render(title))
+	}
+	b.WriteString("\n\n")
+	b.WriteString(dimStyle.Render("run id: " + r.RunID))
+	b.WriteString("\n")
+	if !r.StartedAt.IsZero() {
+		b.WriteString(dimStyle.Render("started: " + r.StartedAt.UTC().Format(time.RFC3339)))
+		b.WriteString("\n")
+	}
+	if !r.FinishedAt.IsZero() {
+		b.WriteString(dimStyle.Render("finished: " + r.FinishedAt.UTC().Format(time.RFC3339)))
+		b.WriteString("\n")
+	}
+	if dur := formatRunDuration(r.Duration()); dur != "" {
+		b.WriteString(dimStyle.Render("duracion: " + dur))
+		b.WriteString("\n")
+	}
+	if r.RunDir != "" {
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render("run dir: " + r.RunDir))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
+	b.WriteString(hintStyle.Render("enter / esc volver al listado de runs · q salir"))
+	b.WriteString("\n")
+	return b.String()
 }

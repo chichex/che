@@ -32,23 +32,52 @@ func Run(path string) (exitApp bool, err error) {
 		return false, fmt.Errorf("runner: pipeline invalido: %w", verr)
 	}
 
-	m := RunModel{
-		Pipeline: p,
-		path:     path,
-	}
-	m = m.enterFirstScreen()
+	// Retry loop (H10): si el usuario pidio `r` en RF, re-armamos el
+	// runner desde R1 con el input pre-cargado. El doc fija "crea un
+	// run-id nuevo" — lo logramos reseteando RunID/RunDir y dejando que
+	// enterRunning genere un nuevo timestamp + dir. Cada pasada es un
+	// program nuevo (state limpio) — el ResolvedPayload del input se
+	// preserva entre pasadas a traves de prevInput.
+	var prevInput *InputState
+	for {
+		m := RunModel{
+			Pipeline: p,
+			path:     path,
+		}
+		if prevInput != nil {
+			m.Input = *prevInput
+		}
+		m = m.enterFirstScreen()
+		// Si tenemos un input pre-resuelto, pre-poblamos el textBuf de R1
+		// para que el usuario pueda revisarlo / modificarlo antes del
+		// retry. enterFirstScreen ya inicializo el inputUI segun el kind;
+		// solo necesitamos sobrescribir el contenido.
+		if prevInput != nil && m.Screen == ScreenInput && prevInput.Value != "" {
+			m.inputUI.textBuf.runes = []rune(prevInput.Value)
+			m.inputUI.textBuf.cursor = len(m.inputUI.textBuf.runes)
+		}
 
-	final, err := tea.NewProgram(m).Run()
-	if err != nil {
-		return false, err
+		final, runErr := tea.NewProgram(m).Run()
+		if runErr != nil {
+			return false, runErr
+		}
+		mm, ok := final.(RunModel)
+		if !ok {
+			// Tipo inesperado del program — tratamos como exit total para
+			// no devolver al usuario a un loop infinito sobre el lister.
+			return true, nil
+		}
+		if mm.retryRequested && !mm.exitApp {
+			// Re-loop con el input ya resuelto (no obligamos al usuario a
+			// re-tipear / re-fetchear). Si el step 0 era input=none, no
+			// hay nada que pre-cargar pero igual reintentamos desde R1
+			// (que sera skipeado por enterFirstScreen).
+			pi := mm.Input
+			prevInput = &pi
+			continue
+		}
+		return mm.exitApp, nil
 	}
-	mm, ok := final.(RunModel)
-	if !ok {
-		// Tipo inesperado del program — tratamos como exit total para no
-		// devolver al usuario a un loop infinito sobre el lister.
-		return true, nil
-	}
-	return mm.exitApp, nil
 }
 
 // enterFirstScreen elige la screen inicial segun el kind del input del step 0.
@@ -94,7 +123,34 @@ func (m RunModel) Init() tea.Cmd { return nil }
 // "volver al lister" vs "salida total" segun el contexto (p.ej. en R1 ctrl+c
 // sale total, esc vuelve al lister). H4 agrega ScreenRunning (que tambien
 // procesa stepDoneMsg, no solo teclas) y los terminales R4/RF.
+//
+// H10: el program ahora consume tea.WindowSizeMsg (resize del terminal) y
+// editorReturnedMsg (vuelta de tea.ExecProcess en R4/RF). Ambos llegan
+// fuera del flujo de teclas — los procesamos antes del switch por screen.
 func (m RunModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Resize del terminal: aplica a todas las screens. Solo cacheamos el
+	// shape — el render decide como reflowear (R3 lo usa para dimensionar
+	// el log pane; las demas screens no dependen del width/height).
+	if ws, ok := msg.(tea.WindowSizeMsg); ok {
+		m.terminalWidth = ws.Width
+		m.terminalHeight = ws.Height
+		// ScreenRunning igual quiere ver el msg (no hay side-effects, pero
+		// si en el futuro queremos un re-layout especifico, esto lo deja
+		// abierto). Hoy alcanza con el cache + un re-render natural.
+		return m, nil
+	}
+	// editorReturnedMsg llega tras tea.ExecProcess (y/l en R4 o l en RF).
+	// El handler dedicado per screen es no-op — la TUI ya volvio al frente
+	// y el View() siguiente se encarga del re-render.
+	if er, ok := msg.(editorReturnedMsg); ok {
+		switch m.Screen {
+		case ScreenDone:
+			return m.updateDoneEditorReturn(er)
+		case ScreenFailed:
+			return m.updateFailedEditorReturn(er)
+		}
+		return m, nil
+	}
 	// ScreenRunning recibe ademas de KeyMsg el stepDoneMsg de la goroutine
 	// del spawn — por eso pasamos el msg crudo, no el key.
 	if m.Screen == ScreenRunning {
