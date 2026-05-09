@@ -243,6 +243,13 @@ type RunModel struct {
 	RunID  string
 	RunDir string
 
+	// RunStartedAt es el timestamp del enterRunning (cuando arranca el
+	// run, no el step). H8 lo usa para popular el header del manifest de
+	// forma consistente entre snapshots intermedios y el cierre — antes de
+	// H8 los snapshots intermedios usaban fallbackStart=step.StartedAt y
+	// pisaban el started_at original del manifest con cada step.
+	RunStartedAt time.Time
+
 	// Steps es el slice 1-indexed (Steps[0].Idx==1) que vive durante R3 +
 	// se renderea en R4/RF. H4 lo crea con un solo elemento (el step 0 del
 	// pipeline); H6 va a llenar con los N steps reales.

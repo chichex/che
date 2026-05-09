@@ -2406,3 +2406,385 @@ func TestRunner_R3H7ValidatorPauseContinue(t *testing.T) {
 		t.Errorf("expected final_verdict: human-override, got:\n%s", manifestRaw)
 	}
 }
+
+// seedRunDir crea ~/.che/runs/<slug>/<runID>/ con un manifest.yaml de
+// contenido controlado. Lo usan los tests de H8 para pre-armar runs viejos
+// (recovery) o ejercitar el GC. Devuelve el runDir absoluto creado.
+func seedRunDir(t *testing.T, home, slug, runID, manifestBody string) string {
+	t.Helper()
+	runDir := filepath.Join(home, ".che", "runs", slug, runID)
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatalf("mkdir %s: %v", runDir, err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "manifest.yaml"), []byte(manifestBody), 0o600); err != nil {
+		t.Fatalf("write manifest %s: %v", runDir, err)
+	}
+	return runDir
+}
+
+// staleRunningManifest devuelve el body YAML de un manifest con
+// status:running y started_at fijado a `started`. Sirve para los tests de
+// recovery de H8: con `started > 1h` debe re-escribirse a interrupted al
+// boot del lister.
+func staleRunningManifest(slug, runID string, started time.Time) string {
+	return fmt.Sprintf(`run_id: %s
+pipeline: %s
+started_at: %s
+status: running
+steps:
+  - idx: 1
+    name: alpha
+    cli: claude
+    status: running
+    exit_code: 0
+`, runID, slug, started.UTC().Format(time.RFC3339Nano))
+}
+
+// TestRunner_R0H8RecoverInterruptedRun cubre el primer test e2e listado
+// en H8: pre-armar un manifest con status:running + started_at > 1h, abrir
+// el lister (My pipelines) → assert: la recovery del boot lo reescribio a
+// status:interrupted (best-effort, sin tocar nada que sea reciente).
+//
+// Decision: en vez de simular un SIGKILL real al PID de che (lo que el
+// doc llama "integrationcito"), pre-seedeamos directamente el manifest
+// con started_at en el pasado. La logica que se ejercita es la misma —
+// la recovery rewriting es el unico path testeable de forma deterministica
+// en e2e (un SIGKILL "real" deja el manifest en disco; la recovery lo
+// captura igual con started_at viejo, que es lo unico que importa para
+// el cap de 1h).
+func TestRunner_R0H8RecoverInterruptedRun(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	// Pre-armar el pipeline ready (necesario para que el lister tenga al
+	// menos un row visible — la recovery se dispara al boot independiente
+	// de si hay items renderizables).
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r0h8-recover.yaml": readyYAML("R0H8 Recover"),
+	})
+
+	// Pre-armar dos run dirs viejos en el mismo slug:
+	//   - stale (started_at -2h) → debe reescribirse a interrupted.
+	//   - fresh (started_at -5min) → defensive, debe quedar en running.
+	stale := time.Now().Add(-2 * time.Hour)
+	fresh := time.Now().Add(-5 * time.Minute)
+	seedRunDir(t, env.HomeDir, "r0h8-recover", "2024-01-01T00-00-00",
+		staleRunningManifest("r0h8-recover", "2024-01-01T00-00-00", stale))
+	seedRunDir(t, env.HomeDir, "r0h8-recover", "2025-01-01T00-00-00",
+		staleRunningManifest("r0h8-recover", "2025-01-01T00-00-00", fresh))
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	// Entrar a "My pipelines" → dispara RecoverInterruptedRuns en el boot
+	// del lister (cmd/root.go.runMyPipelines).
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R0H8 Recover", 3*time.Second) {
+		t.Fatalf("lister never rendered the entry\n%s", p.Since(mark))
+	}
+
+	// Cleanup minimo — no necesitamos hacer nada mas en la TUI; el assert
+	// es sobre disco. esc → menu, q → exit.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Disco: stale → interrupted; fresh → running (intacto).
+	staleRaw := readRunFile(t, filepath.Join(env.HomeDir, ".che", "runs",
+		"r0h8-recover", "2024-01-01T00-00-00", "manifest.yaml"))
+	if !strings.Contains(staleRaw, "status: interrupted") {
+		t.Errorf("expected stale manifest to be rewritten to status: interrupted, got:\n%s", staleRaw)
+	}
+	freshRaw := readRunFile(t, filepath.Join(env.HomeDir, ".che", "runs",
+		"r0h8-recover", "2025-01-01T00-00-00", "manifest.yaml"))
+	if !strings.Contains(freshRaw, "status: running") {
+		t.Errorf("expected fresh manifest to keep status: running (started_at < 1h ago), got:\n%s", freshRaw)
+	}
+}
+
+// TestRunner_R3H8GCKeepsLatestN cubre el segundo test e2e listado en H8:
+// pre-armar 15 dirs con mtimes escalonados, disparar un run nuevo, assert
+// que solo los ultimos 10 (mas el nuevo creado por el run = 11) quedan en
+// disco. El cap default es 10 (env CHE_RUN_HISTORY override).
+//
+// Para acelerar el test usamos CHE_RUN_HISTORY=3: pre-armamos 5 dirs +
+// disparamos 1 run = expected 3 historicos + 1 nuevo = 4 dirs. La logica
+// es identica al caso de 15/10 pero corre instantaneamente.
+func TestRunner_R3H8GCKeepsLatestN(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	// Cap reducido para mantener el test rapido. La logica es la misma que
+	// con 10 — el cap es solo un parametro.
+	env.SetEnv("CHE_RUN_HISTORY", "3")
+
+	preArmClaudeSkill(t, env.HomeDir, "h8-gc")
+	env.ExpectAgent("claude").WhenArgsMatch(`h8-gc`).RespondStdout("ok-h8-gc", 0)
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h8-gc.yaml": readyYAMLSkillStep("R3H8 GC", "h8-gc", "none"),
+	})
+
+	// Pre-armar 5 run dirs viejos con mtimes escalonados (1m de spread).
+	// El que tenga mtime mas viejo va a desaparecer; los 3 mas recientes
+	// sobreviven al GC.
+	slugDir := filepath.Join(env.HomeDir, ".che", "runs", "r3h8-gc")
+	if err := os.MkdirAll(slugDir, 0o700); err != nil {
+		t.Fatalf("mkdir slugDir: %v", err)
+	}
+	base := time.Now().Add(-2 * time.Hour) // bien en el pasado para no chocar con el run real
+	preArmedNames := []string{}
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("seed-%02d", i)
+		dir := filepath.Join(slugDir, name)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir seed: %v", err)
+		}
+		// Manifest minimo (status terminal → no participa de la recovery).
+		_ = os.WriteFile(filepath.Join(dir, "manifest.yaml"),
+			[]byte(fmt.Sprintf("run_id: %s\nstatus: done\n", name)), 0o600)
+		mtime := base.Add(time.Duration(i) * time.Minute)
+		if err := os.Chtimes(dir, mtime, mtime); err != nil {
+			t.Fatalf("chtimes seed: %v", err)
+		}
+		preArmedNames = append(preArmedNames, name)
+	}
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	// Disparar el run completo (R0 → R1 → R2 → R3 → R4). El GC corre en
+	// initRunDir antes de crear el run-id nuevo.
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H8 GC", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "Run completo", 5*time.Second) {
+		t.Fatalf("R4 never rendered\n%s", p.Since(mark))
+	}
+
+	// Cleanup — esc → lister, esc → menu, q → exit.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Disco: el slugDir debe tener exactamente 4 subdirs (cap 3 + 1 nuevo).
+	entries, err := os.ReadDir(slugDir)
+	if err != nil {
+		t.Fatalf("read slugDir: %v", err)
+	}
+	var dirs []string
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs = append(dirs, e.Name())
+		}
+	}
+	if len(dirs) != 4 {
+		t.Fatalf("expected 4 dirs (cap=3 + 1 new), got %d: %v", len(dirs), dirs)
+	}
+	// El seed mas viejo (seed-00) y seed-01 deben haberse borrado; los
+	// 3 mas recientes (seed-02, seed-03, seed-04) sobreviven. El nuevo
+	// run-id se identifica por NO estar en preArmedNames.
+	survived := map[string]bool{}
+	for _, d := range dirs {
+		survived[d] = true
+	}
+	for _, expected := range []string{"seed-02", "seed-03", "seed-04"} {
+		if !survived[expected] {
+			t.Errorf("expected %s to survive GC, got dirs: %v", expected, dirs)
+		}
+	}
+	for _, expected := range []string{"seed-00", "seed-01"} {
+		if survived[expected] {
+			t.Errorf("expected %s to be removed by GC, got dirs: %v", expected, dirs)
+		}
+	}
+}
+
+// TestRunner_R3H8AtomicityFaultInject cubre el tercer test e2e listado en
+// H8: kill entre writeFile(.tmp) y Rename via env
+// CHE_FAULT_INJECT_BEFORE_RENAME=1; assert: manifest viejo intacto + .tmp
+// huerfano.
+//
+// Setup: pre-armamos un run dir viejo en el mismo slug con un manifest
+// "done" terminal (para que la recovery del lister no lo toque). El run
+// nuevo va a fallar al inicio porque initManifest dispara el fault inject
+// — pero el run dir ya esta creado y va a contener un manifest.yaml.tmp
+// huerfano.
+//
+// Asserts:
+//   - el manifest viejo (en su run dir) sigue exactamente como lo
+//     pre-armamos — el fault inject solo afecta al manifest del run nuevo.
+//   - el run nuevo aterriza en RF (initManifest fallo → enterRunning va
+//     a ScreenFailed).
+//   - el run dir nuevo contiene manifest.yaml.tmp y NO manifest.yaml.
+func TestRunner_R3H8AtomicityFaultInject(t *testing.T) {
+	t.Parallel()
+	env := harness.New(t)
+
+	env.SetEnv("CHE_FAULT_INJECT_BEFORE_RENAME", "1")
+
+	preArmClaudeSkill(t, env.HomeDir, "h8-atom")
+	env.ExpectAgent("claude").WhenArgsMatch(`h8-atom`).RespondStdout("ok-h8-atom", 0)
+	preArmPipelinesDir(t, env.HomeDir, map[string]string{
+		"r3h8-atom.yaml": readyYAMLSkillStep("R3H8 Atom", "h8-atom", "none"),
+	})
+
+	// Pre-armar un run "viejo" con manifest done. Anclamos started_at en
+	// 2025 (no triggerea recovery por sí mismo: status:done → la recovery
+	// lo skipea).
+	oldRunDir := seedRunDir(t, env.HomeDir, "r3h8-atom", "old-run-id", `run_id: old-run-id
+pipeline: r3h8-atom
+status: done
+started_at: 2025-01-01T00:00:00Z
+finished_at: 2025-01-01T00:01:00Z
+steps:
+  - idx: 1
+    name: alpha
+    status: done
+    exit_code: 0
+`)
+	oldManifest := readRunFile(t, filepath.Join(oldRunDir, "manifest.yaml"))
+
+	p := env.StartPTY()
+	defer p.Close()
+
+	if !p.WaitForOutput(t, "Create pipeline", 3*time.Second) {
+		t.Fatalf("menu never rendered\n%s", p.Snapshot())
+	}
+	mark := p.Mark()
+	if err := p.Send("1"); err != nil {
+		t.Fatalf("send 1: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "R3H8 Atom", 3*time.Second) {
+		t.Fatalf("entry never rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "todo listo", 5*time.Second) {
+		t.Fatalf("preflight never reached todo listo:\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\r"); err != nil {
+		t.Fatalf("send enter: %v", err)
+	}
+	// initManifest falla → enterRunning aterriza en ScreenFailed (RF).
+	if !p.WaitForOutputSince(t, mark, "Run fallo", 5*time.Second) {
+		t.Fatalf("RF never rendered\n%s", p.Since(mark))
+	}
+	if !strings.Contains(p.Since(mark), "fault inject") {
+		t.Errorf("expected RF to mention 'fault inject' in error, got:\n%s", p.Since(mark))
+	}
+
+	// Cleanup.
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc: %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "My pipelines", 3*time.Second) {
+		t.Fatalf("lister never re-rendered\n%s", p.Since(mark))
+	}
+	mark = p.Mark()
+	if err := p.Send("\x1b"); err != nil {
+		t.Fatalf("send esc (lister→menu): %v", err)
+	}
+	if !p.WaitForOutputSince(t, mark, "0-3 jump", 3*time.Second) {
+		t.Fatalf("menu never re-rendered\n%s", p.Since(mark))
+	}
+	if err := p.Send("q"); err != nil {
+		t.Fatalf("send q: %v", err)
+	}
+	res := p.Wait(t, 3*time.Second)
+	if res.ExitCode != 0 {
+		t.Fatalf("expected exit 0, got %d", res.ExitCode)
+	}
+
+	// Disco: manifest viejo intacto.
+	oldManifestNow := readRunFile(t, filepath.Join(oldRunDir, "manifest.yaml"))
+	if oldManifestNow != oldManifest {
+		t.Errorf("expected old manifest unchanged after fault inject;\nwas:\n%s\nnow:\n%s", oldManifest, oldManifestNow)
+	}
+
+	// Disco: el run nuevo dejo un .tmp huerfano y NO manifest.yaml. El
+	// run dir nuevo es el unico subdir de slugDir distinto a "old-run-id".
+	slugDir := filepath.Join(env.HomeDir, ".che", "runs", "r3h8-atom")
+	entries, err := os.ReadDir(slugDir)
+	if err != nil {
+		t.Fatalf("read slugDir: %v", err)
+	}
+	var newRunDir string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if e.Name() == "old-run-id" {
+			continue
+		}
+		newRunDir = filepath.Join(slugDir, e.Name())
+		break
+	}
+	if newRunDir == "" {
+		t.Fatalf("expected a new run dir to be created next to old-run-id, got entries: %v", entries)
+	}
+	// .tmp huerfano presente.
+	if _, err := os.Stat(filepath.Join(newRunDir, "manifest.yaml.tmp")); err != nil {
+		t.Errorf("expected manifest.yaml.tmp orphan in %s, stat err=%v", newRunDir, err)
+	}
+	// manifest.yaml NO existe en el run nuevo.
+	if _, err := os.Stat(filepath.Join(newRunDir, "manifest.yaml")); !os.IsNotExist(err) {
+		t.Errorf("expected NO manifest.yaml in new run dir (rename never happened), stat err=%v", err)
+	}
+}

@@ -85,6 +85,11 @@ func Execute() {
 // flujo "abrir → cancelar → ver lista actualizada" no necesita pasar por el
 // menu principal cada vez.
 func runMyPipelines() error {
+	// H8 recovery: al boot del lister, reescribir a `interrupted` los
+	// manifests con status:running y started_at > 1h. Best-effort — un
+	// error en la recovery NO debe frenar el lister (el usuario sigue
+	// pudiendo ver / borrar / re-correr pipelines).
+	_ = runner.RecoverInterruptedRuns("")
 	for {
 		action, target, exitApp, err := wizard.RunList()
 		if err != nil {

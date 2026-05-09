@@ -51,7 +51,15 @@ func makeRunID(slugDir string, base time.Time) (string, string) {
 }
 
 // initRunDir crea ~/.che/runs/<slug>/<run-id>/ con permisos 0700 y devuelve
-// (runID, runDir, error).
+// (runID, runDir, error). H8 dispara el GC del slug-dir ANTES de crear el
+// nuevo run-dir: asi el cap de retencion se aplica sobre el snapshot
+// historico (sin contar el run que estamos por crear). El doc fija
+// `CHE_RUN_HISTORY` (default 10) como cap; con 15 dirs preexistentes y
+// cap=10 quedan 10 + 1 nuevo = 11.
+//
+// El GC es best-effort: errores de read/remove no abortan el run (un run
+// fresco con un GC roto sigue siendo mejor que abortar; el doc lo lista
+// como criterio de aceptacion solo para "no se acumulen").
 func initRunDir(p wizard.Pipeline) (string, string, error) {
 	slug := wizard.Slug(p.Name)
 	if slug == "" {
@@ -62,6 +70,8 @@ func initRunDir(p wizard.Pipeline) (string, string, error) {
 	if err := os.MkdirAll(slugDir, 0o700); err != nil {
 		return "", "", fmt.Errorf("mkdir %s: %w", slugDir, err)
 	}
+	// GC del slug-dir antes de crear el nuevo run-dir (H8). best-effort.
+	_ = gcRunHistory(slugDir, runHistoryCap())
 	id, runDir := makeRunID(slugDir, nowFn())
 	if err := os.MkdirAll(runDir, 0o700); err != nil {
 		return "", "", fmt.Errorf("mkdir %s: %w", runDir, err)
@@ -96,6 +106,13 @@ func enterRunning(m RunModel) (RunModel, tea.Cmd) {
 	}
 	m.RunID = id
 	m.RunDir = runDir
+	// H8: RunStartedAt fija el started_at del manifest a nivel run. Lo
+	// usamos en TODOS los snapshots posteriores para que el header del
+	// manifest sea consistente entre updates intermedios y el cierre — sin
+	// esto, los snapshots usaban step.StartedAt y pisaban el original con
+	// cada step, complicando la heuristica de recovery (que mira
+	// started_at).
+	m.RunStartedAt = time.Now().UTC()
 
 	// Steps slice: H6 inicializa TODOS los steps del pipeline en pending +
 	// crea el ring buffer correspondiente para cada uno (LogBuffers idx
@@ -120,7 +137,7 @@ func enterRunning(m RunModel) (RunModel, tea.Cmd) {
 	m.StickyBottom = true
 	m.LogScrollOffset = 0
 
-	if _, err := initManifest(m.Pipeline, id, runDir, m.path, m.Input.Kind, m.Input.Value, stepRuns); err != nil {
+	if _, err := initManifest(m.Pipeline, id, runDir, m.path, m.Input.Kind, m.Input.Value, m.RunStartedAt, stepRuns); err != nil {
 		m.Screen = ScreenFailed
 		m.FailedStderr = err.Error()
 		m.Steps[0].Status = StepStatusFailed
@@ -180,6 +197,13 @@ func startStep(m RunModel, idx int) (RunModel, tea.Cmd) {
 	m.LogScrollOffset = 0
 	m.Steps[idx].Status = StepStatusRunning
 	m.Steps[idx].StartedAt = time.Now()
+
+	// H8: snapshot atomico del manifest al ARRANCAR el step (start de cada
+	// step, segun los criterios de aceptacion). Asi si el proceso muere
+	// mientras el subprocess corre, el manifest refleja steps[idx].status:
+	// running con started_at populado — la recovery del lister lo va a
+	// reescribir a interrupted post-1h.
+	_ = writeManifest(m.RunDir, manifestRunningSnapshot(m, m.Steps[idx].StartedAt))
 
 	// runState fresco por step (cancel + lineCh exclusivos del subprocess
 	// actual). Sobreescribe cualquier remanente del step anterior — ese ya
@@ -500,6 +524,12 @@ func startValidator(m RunModel, idx int, stepStdout string) (RunModel, tea.Cmd) 
 	m.LogFocus = idx
 	m.ValidatorActive = true
 
+	// H8: snapshot atomico al arrancar el validator loop (start de cada
+	// validator loop, segun criterio de aceptacion). El bloque
+	// validator.loops_run del manifest refleja la nueva vuelta apenas
+	// arranca.
+	_ = writeManifest(m.RunDir, manifestRunningSnapshot(m, m.Steps[idx].StartedAt))
+
 	m.runState = &runState{requestCancel: make(chan struct{}, 1)}
 	cmd := runValidator(step, stepStdout, m.RunDir, idx+1, loop, m.runState)
 	return m, cmd
@@ -536,6 +566,15 @@ func (m RunModel) handleValidatorDone(msg validatorDoneMsg) (tea.Model, tea.Cmd)
 		RawStdout: truncateForRecord(msg.RawStdout),
 	})
 	m.Steps[idx].Validator.LastFeedback = msg.Verdict.Feedback
+
+	// H8: snapshot atomico al CERRAR el validator loop (end de cada
+	// validator loop). Hace que el bloque validator.last_feedback +
+	// loops_run quede persistido apenas se conoce — independientemente del
+	// branch siguiente (ok, retry, max_loops...). advanceAfterValidator y
+	// rerunStepWithFeedback van a re-escribir despues con su propia
+	// transicion; esta linea garantiza que un crash entre las dos NO deje
+	// el manifest sin la auditoria del loop que acaba de cerrar.
+	_ = writeManifest(m.RunDir, manifestRunningSnapshot(m, m.Steps[idx].StartedAt))
 
 	if msg.Verdict.Status == VerdictOk {
 		m.Steps[idx].Validator.FinalVerdict = FinalVerdictOk
@@ -643,14 +682,18 @@ func mergeFeedbackIntoPayload(payload, feedback string) string {
 
 // baseManifestForRun arma el header del manifest con los campos que no
 // cambian a lo largo del run. closeManifest le pisa Status/FinishedAt y
-// regenera Steps[] desde m.Steps. startedAt se toma del primer stepDoneMsg
-// que llego — no es exacto (puede haber un gap entre initRunDir y el primer
-// Start) pero alcanza para H6; H8 va a popular un timestamp del enterRunning.
+// regenera Steps[] desde m.Steps. H8 prefiere m.RunStartedAt (capturado en
+// enterRunning) sobre fallbackStart — si por alguna razon RunStartedAt
+// quedo zero (defensive: tests viejos / paths edge), caemos al fallback.
 func baseManifestForRun(m RunModel, fallbackStart time.Time) Manifest {
+	started := m.RunStartedAt
+	if started.IsZero() {
+		started = fallbackStart
+	}
 	return Manifest{
 		RunID:        m.RunID,
 		Pipeline:     m.Pipeline.Name,
-		StartedAt:    fallbackStart,
+		StartedAt:    started,
 		PipelinePath: m.path,
 		InputKind:    m.Input.Kind,
 		InputValue:   m.Input.Value,
