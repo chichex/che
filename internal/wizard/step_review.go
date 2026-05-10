@@ -178,13 +178,13 @@ func (m model) viewStepReview() string {
 		b.WriteString("\n")
 	}
 	if s := strings.TrimSpace(m.stepEdit.review.Summary); s != "" {
-		b.WriteString(dimStyle.Render(wrapText(s, contentInnerWidth(m.width))))
+		b.WriteString(dimStyle.Render(WrapText(s, ContentInnerWidth(m.width))))
 		b.WriteString("\n\n")
 	}
 	if s := strings.TrimSpace(m.stepEdit.review.Suggested); s != "" {
 		b.WriteString(labelStyle.Render("Sugerencia:"))
 		b.WriteString("\n")
-		b.WriteString(inputBoxBorder.Render(wrapText(s, contentInnerWidth(m.width))))
+		b.WriteString(inputBoxBorder.Render(WrapText(s, ContentInnerWidth(m.width))))
 		b.WriteString("\n\n")
 	}
 
