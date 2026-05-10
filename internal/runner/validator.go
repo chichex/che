@@ -30,9 +30,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/chichex/che/internal/runner/parser"
 	"github.com/chichex/che/internal/wizard"
 	"gopkg.in/yaml.v3"
 )
@@ -363,10 +365,21 @@ func defaultValidatorSpawnCmd(step wizard.Step, payload string) (*exec.Cmd, erro
 }
 
 // runValidator arranca el subprocess del validator del step y devuelve un
-// tea.Cmd que se resuelve en validatorDoneMsg. En vez de streaming linea
-// por linea (como runStep), corremos el validator en modo blocking via
-// goroutine: el output completo lo tenemos al final, lo parseamos y
-// emitimos un solo msg al canal del runState.
+// tea.Cmd que se resuelve en validatorDoneMsg. Modo STREAMING (igual que
+// runStep): pipes de stdout/stderr → goroutines de tee que escanean linea
+// por linea, escriben a disco, parsean para el log pane y empujan
+// stepLineMsg al lineCh con el idx del step que se esta validando. Al
+// terminar el subprocess, una goroutine de wait emite el validatorDoneMsg
+// con el stdout completo capturado en buffer para que parseVerdict lo
+// procese.
+//
+// Por que streaming: antes de este fix el validator hacia cmd.Run() bloqueante
+// con stdout/stderr a buffers — el log pane del TUI quedaba vacio durante
+// todo el loop del validator (validators tipo claude/codex con stream-json
+// pueden tardar minutos y el usuario no veia output). Reusamos teeStream
+// con el idx del step (1-based) para que las lineas del validator caigan
+// en el mismo ring buffer (LogBuffer) del step — visualmente el validator
+// es continuacion del step que esta auditando.
 //
 // Fail modes (todos terminan en validatorDoneMsg con un Verdict resuelto):
 //   - cmd.Start error → SpawnErr poblado, Verdict fail con feedback "spawn error: ..."
@@ -380,7 +393,9 @@ func defaultValidatorSpawnCmd(step wizard.Step, payload string) (*exec.Cmd, erro
 // del program.
 func runValidator(step wizard.Step, payload string, runDir string, stepIdx, loop int, state *runState) tea.Cmd {
 	startedAt := time.Now()
-	state.lineCh = make(chan tea.Msg, 8)
+	// Buffer generoso (igual que runStep) para amortiguar bursts de
+	// stream-json del validator sin bloquear el scanner.
+	state.lineCh = make(chan tea.Msg, 256)
 
 	// El "step" sintetico para buildSpawnArgs: copiamos el bloque
 	// validator del step original como si fuera un step independiente.
@@ -409,29 +424,164 @@ func runValidator(step wizard.Step, payload string, runDir string, stepIdx, loop
 		return waitForLine(state.lineCh)
 	}
 
+	stdoutPath := validatorStdoutPath(runDir, stepIdx, loop)
+	stderrPath := validatorStderrPath(runDir, stepIdx, loop)
+
+	// Files de log (stdout.log + stderr.log del validator). Si abrir
+	// cualquiera falla, caemos a "spawn error" sintetico — el run no debe
+	// quedarse colgado por un fs problem.
+	stdoutFile, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		go func() {
+			state.lineCh <- validatorDoneMsg{
+				StepIdx: stepIdx,
+				Loop:    loop,
+				Verdict: Verdict{
+					Status:   VerdictFail,
+					Feedback: fmt.Sprintf("spawn error: open stdout.log: %v", err),
+				},
+				SpawnErr:  err.Error(),
+				StartedAt: startedAt,
+				EndedAt:   time.Now(),
+			}
+		}()
+		return waitForLine(state.lineCh)
+	}
+	stderrFile, err := os.OpenFile(stderrPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		_ = stdoutFile.Close()
+		go func() {
+			state.lineCh <- validatorDoneMsg{
+				StepIdx: stepIdx,
+				Loop:    loop,
+				Verdict: Verdict{
+					Status:   VerdictFail,
+					Feedback: fmt.Sprintf("spawn error: open stderr.log: %v", err),
+				},
+				SpawnErr:  err.Error(),
+				StartedAt: startedAt,
+				EndedAt:   time.Now(),
+			}
+		}()
+		return waitForLine(state.lineCh)
+	}
+
+	// Pipes para streamear stdout/stderr linea por linea. Necesarios para
+	// que teeStream pueda escanear sin bloquear al subprocess.
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = stdoutFile.Close()
+		_ = stderrFile.Close()
+		go func() {
+			state.lineCh <- validatorDoneMsg{
+				StepIdx: stepIdx,
+				Loop:    loop,
+				Verdict: Verdict{
+					Status:   VerdictFail,
+					Feedback: fmt.Sprintf("spawn error: stdout pipe: %v", err),
+				},
+				SpawnErr:  err.Error(),
+				StartedAt: startedAt,
+				EndedAt:   time.Now(),
+			}
+		}()
+		return waitForLine(state.lineCh)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		_ = stdoutFile.Close()
+		_ = stderrFile.Close()
+		go func() {
+			state.lineCh <- validatorDoneMsg{
+				StepIdx: stepIdx,
+				Loop:    loop,
+				Verdict: Verdict{
+					Status:   VerdictFail,
+					Feedback: fmt.Sprintf("spawn error: stderr pipe: %v", err),
+				},
+				SpawnErr:  err.Error(),
+				StartedAt: startedAt,
+				EndedAt:   time.Now(),
+			}
+		}()
+		return waitForLine(state.lineCh)
+	}
+
+	setProcAttrs(cmd)
+
 	state.mu.Lock()
 	state.cmd = cmd
+	state.stdoutPath = stdoutPath
+	state.stderrPath = stderrPath
 	state.mu.Unlock()
 
+	if startErr := cmd.Start(); startErr != nil {
+		_ = stdoutFile.Close()
+		_ = stderrFile.Close()
+		go func() {
+			state.lineCh <- validatorDoneMsg{
+				StepIdx: stepIdx,
+				Loop:    loop,
+				Verdict: Verdict{
+					Status:   VerdictFail,
+					Feedback: fmt.Sprintf("spawn error: %v", startErr),
+				},
+				SpawnErr:  startErr.Error(),
+				StartedAt: startedAt,
+				EndedAt:   time.Now(),
+			}
+		}()
+		return waitForLine(state.lineCh)
+	}
+
+	// Buffer en RAM para capturar el stdout completo del validator. lo
+	// necesitamos al final para parseVerdict + RawStdout en el msg.
+	var stdoutBuf, stderrBuf strings.Builder
+	var bufMu sync.Mutex
+
+	// Parser por CLI del validator: claude (stream-json) → claude.go;
+	// codex/gemini/opencode → raw line-by-line. Asi el log pane muestra
+	// "> <texto>" / "· tool: ..." para claude, y lineas crudas para los
+	// otros — mismo contrato que el step principal.
+	p := parser.ForCLI(step.Validator.CLI)
+
+	// Cancel: si el modal RC manda requestCancel, killeamos el subprocess.
+	waitDone := make(chan struct{})
 	go func() {
-		// Capturamos stdout/stderr en buffers (modo blocking — el
-		// validator no necesita streaming linea por linea: lo unico que
-		// importa es el verdict final). Output no escala — los validators
-		// son CLIs tipicas que devuelven 1-2 KB.
-		var stdoutBuf, stderrBuf strings.Builder
-		cmd.Stdout = &stdoutBuf
-		cmd.Stderr = &stderrBuf
-		setProcAttrs(cmd)
+		select {
+		case <-state.requestCancel:
+			state.mu.Lock()
+			state.cancelled = true
+			state.mu.Unlock()
+			signalCancel(cmd, killGrace())
+		case <-waitDone:
+		}
+	}()
 
-		runErr := cmd.Run()
+	var teeWG sync.WaitGroup
+	teeWG.Add(2)
+	// stdout: parser por CLI + log pane via stepLineMsg{Idx: stepIdx}. El
+	// idx 1-based matchea con el del step que se esta validando — las
+	// lineas del validator caen en el mismo ring buffer del step (el
+	// usuario las ve como continuacion natural).
+	go teeStream(stepIdx, stdoutPipe, stdoutFile, &stdoutBuf, &bufMu, p, nil, false, state, &teeWG)
+	// stderr: pass-through raw, marcado como Stderr=true (renderer lo pinta
+	// en rojo dimmed).
+	go teeStream(stepIdx, stderrPipe, stderrFile, &stderrBuf, &bufMu, parser.Raw(), nil, true, state, &teeWG)
+
+	go func() {
+		teeWG.Wait()
+		runErr := cmd.Wait()
+		close(waitDone)
+		_ = stdoutFile.Sync()
+		_ = stdoutFile.Close()
+		_ = stderrFile.Sync()
+		_ = stderrFile.Close()
 		endedAt := time.Now()
-		stdoutCopy := stdoutBuf.String()
-		stderrCopy := stderrBuf.String()
 
-		// Persistimos stdout/stderr a disco sincronicamente — el verdict
-		// se escribe en handleValidatorDone (en el thread del program).
-		_ = writeFileSync(validatorStdoutPath(runDir, stepIdx, loop), stdoutCopy)
-		_ = writeFileSync(validatorStderrPath(runDir, stepIdx, loop), stderrCopy)
+		bufMu.Lock()
+		stdoutCopy := stdoutBuf.String()
+		bufMu.Unlock()
 
 		exitCode := 0
 		spawnErr := ""
@@ -471,12 +621,6 @@ func runValidator(step wizard.Step, payload string, runDir string, stepIdx, loop
 	}()
 
 	return waitForLine(state.lineCh)
-}
-
-// writeFileSync escribe data en path con permisos 0600 (alineado con el
-// resto de los archivos del run dir) y devuelve el primer error.
-func writeFileSync(path, data string) error {
-	return os.WriteFile(path, []byte(data), 0o600)
 }
 
 // writeVerdict serializa + escribe step-NN.validator.0K.verdict.yaml. El
