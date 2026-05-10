@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -493,4 +494,123 @@ func TestParseVerdict_ExplicitFeedbackNotRawOnly(t *testing.T) {
 	if v.RawFeedbackOnly {
 		t.Errorf("expected RawFeedbackOnly=false when feedback is explicit, got true")
 	}
+}
+
+// TestBuildInfraFailFeedback_CodexErrorEvent cubre el caso 1 del helper:
+// stdout de codex con un evento stream-json {"type":"error","message":"..."}
+// -> feedback contiene el message y el prefijo anti role-confusion.
+func TestBuildInfraFailFeedback_CodexErrorEvent(t *testing.T) {
+	stdout := `{"type":"thread.started","thread_id":"abc"}
+{"type":"error","message":"Codex ran out of room in the context window"}
+{"type":"turn.failed"}
+`
+	fb, infraFail := buildInfraFailFeedback("codex", 1, stdout, "")
+	if !infraFail {
+		t.Errorf("expected infraFail=true for codex error event, got false")
+	}
+	if !strings.Contains(fb, "Codex ran out of room") {
+		t.Errorf("expected error.message in feedback, got %q", fb)
+	}
+	if !strings.Contains(fb, "El validator no pudo evaluar") {
+		t.Errorf("expected anti role-confusion prefix, got %q", fb)
+	}
+	if !strings.Contains(fb, "cli=codex") {
+		t.Errorf("expected cli=codex in feedback, got %q", fb)
+	}
+	if !strings.Contains(fb, "exit=1") {
+		t.Errorf("expected exit=1 in feedback, got %q", fb)
+	}
+}
+
+// TestBuildInfraFailFeedback_FallbackTail cubre el caso 2: stderr con 15
+// lineas -> feedback contiene las ultimas 10 lineas, no las primeras.
+func TestBuildInfraFailFeedback_FallbackTail(t *testing.T) {
+	var lines []string
+	for i := 1; i <= 15; i++ {
+		lines = append(lines, fmt.Sprintf("linea %d de stderr", i))
+	}
+	stderr := strings.Join(lines, "\n")
+
+	fb, infraFail := buildInfraFailFeedback("claude", 2, "", stderr)
+	if !infraFail {
+		t.Errorf("expected infraFail=true for tail fallback, got false")
+	}
+	// Debe contener las ultimas 10 lineas (linea 6 a 15), no la primera.
+	if strings.Contains(fb, "linea 1 de stderr") {
+		t.Errorf("expected first 5 lines excluded from tail, but found 'linea 1 de stderr' in %q", fb)
+	}
+	if !strings.Contains(fb, "linea 15 de stderr") {
+		t.Errorf("expected last line in tail, got %q", fb)
+	}
+	if !strings.Contains(fb, "linea 6 de stderr") {
+		t.Errorf("expected line 6 in tail (first of last 10), got %q", fb)
+	}
+	if !strings.Contains(fb, "El validator no pudo evaluar") {
+		t.Errorf("expected anti role-confusion prefix, got %q", fb)
+	}
+}
+
+// TestBuildInfraFailFeedback_EmptyOutputs cubre el caso 3: stdout="" +
+// stderr="" -> feedback = "validator exit 137" (compat con comportamiento
+// anterior), infraFail=false.
+func TestBuildInfraFailFeedback_EmptyOutputs(t *testing.T) {
+	fb, infraFail := buildInfraFailFeedback("gemini", 137, "", "")
+	if infraFail {
+		t.Errorf("expected infraFail=false for empty outputs fallback, got true")
+	}
+	if fb != "validator exit 137" {
+		t.Errorf("expected compat fallback 'validator exit 137', got %q", fb)
+	}
+}
+
+// TestBuildInfraFailFeedback_TruncatedTo4KB cubre el cap de 4 KB: un stderr
+// muy largo (10 KB de texto) produce un feedback truncado con sufijo
+// "(truncado)". El cap es 4 KB + el overhead del sufijo "\n... (truncado)"
+// (15 bytes) — consistente con el contrato de truncateForRecord.
+func TestBuildInfraFailFeedback_TruncatedTo4KB(t *testing.T) {
+	// 10 KB de stderr para forzar el truncamiento.
+	longLine := strings.Repeat("x", 1000)
+	var lines []string
+	for i := 0; i < 10; i++ {
+		lines = append(lines, longLine)
+	}
+	stderr := strings.Join(lines, "\n")
+
+	fb, infraFail := buildInfraFailFeedback("opencode", 1, "", stderr)
+	if !infraFail {
+		t.Errorf("expected infraFail=true, got false")
+	}
+	// truncateForRecord devuelve s[:4096] + "\n... (truncado)" (15 bytes)
+	// asi que el maximo posible es 4096 + 15 = 4111 bytes.
+	const maxBytes = 4*1024 + 15
+	if len(fb) > maxBytes {
+		t.Errorf("feedback exceeds 4 KB cap (incl. suffix): len=%d, max=%d", len(fb), maxBytes)
+	}
+	if !strings.Contains(fb, "(truncado)") {
+		t.Errorf("expected '(truncado)' suffix when truncated, got %q", fb[:min(200, len(fb))])
+	}
+}
+
+// TestBuildInfraFailFeedback_Wrapping cubre que el feedback siempre empieza
+// con el prefijo anti role-confusion cuando hay output (casos 1 y 2).
+func TestBuildInfraFailFeedback_Wrapping(t *testing.T) {
+	fb, _ := buildInfraFailFeedback("codex", 1, `{"type":"error","message":"timeout"}`, "")
+	const wantPrefix = "El validator no pudo evaluar tu output por una falla de infra"
+	if !strings.HasPrefix(fb, wantPrefix) {
+		t.Errorf("expected feedback to start with anti role-confusion prefix, got %q", fb[:min(100, len(fb))])
+	}
+	// Y el caso 2 (tail fallback) tambien debe tener el prefijo.
+	fb2, _ := buildInfraFailFeedback("gemini", 2, "", "algo de stderr")
+	if !strings.HasPrefix(fb2, wantPrefix) {
+		t.Errorf("expected tail-fallback feedback to start with prefix, got %q", fb2[:min(100, len(fb2))])
+	}
+}
+
+// min es un helper local para los tests de truncamiento (evita importar
+// slices solo para esto).
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

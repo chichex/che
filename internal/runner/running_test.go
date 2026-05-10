@@ -162,6 +162,37 @@ func TestIsRawVerdictFallback_Patterns(t *testing.T) {
 	}
 }
 
+// TestMergeFeedbackIntoPayload_InfraFailPrepended cubre el comportamiento con
+// feedback de infra-fail (plan #115): el wrapping generado por
+// buildInfraFailFeedback empieza con "El validator no pudo evaluar..." y
+// NO matchea el patron `^verdict: \w+$` de isRawVerdictFallback, asi que
+// mergeFeedbackIntoPayload lo prependea al payload sin filtrarlo.
+func TestMergeFeedbackIntoPayload_InfraFailPrepended(t *testing.T) {
+	// Feedback tipico de buildInfraFailFeedback (caso 1: codex error event).
+	infraFeedback := "El validator no pudo evaluar tu output por una falla de infra " +
+		"(no por un problema del trabajo). Reintenta el step manteniendo el output. " +
+		"Detalle: validator (cli=codex) infra-failed exit=1: Codex ran out of room in the context window"
+
+	got := mergeFeedbackIntoPayload("PAYLOAD", infraFeedback)
+
+	// El feedback de infra-fail NO debe ser suprimido por isRawVerdictFallback.
+	if got == "PAYLOAD" {
+		t.Errorf("infra-fail feedback was incorrectly suppressed by isRawVerdictFallback")
+	}
+	// El bloque "FEEDBACK del validator" debe estar presente.
+	if !strings.Contains(got, "FEEDBACK del validator") {
+		t.Errorf("expected FEEDBACK block prepended, got %q", got)
+	}
+	// El contenido del feedback debe estar en el output.
+	if !strings.Contains(got, "Codex ran out of room") {
+		t.Errorf("expected infra-fail detail in prepended payload, got %q", got)
+	}
+	// El payload original debe estar al final.
+	if !strings.HasSuffix(got, "PAYLOAD") {
+		t.Errorf("expected original payload preserved at end, got %q", got)
+	}
+}
+
 // TestStepEventsPath_Rotation cubre Fix 4 (#107): cada corrida del step
 // (eventsRun K, 1-based) escribe a su propio archivo
 // `step-NN.events.RUN-K.jsonl`. Si eventsRun <= 0, caemos al nombre legacy

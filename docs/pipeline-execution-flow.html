@@ -2215,6 +2215,83 @@ enter / esc volver al menu · r retry · l abrir log · q / ctrl+c salir</div>
         <code>step-NN.events.RUN-K.jsonl</code> — los reruns por validator
         ya no pisan el log original.</li>
     </ul>
+
+    <h3>6 · R3 — feedback accionable cuando el validator sale con exit != 0 (PR #117)</h3>
+    <p>
+      Hasta este fix, cuando el subprocess del validator terminaba con
+      <code>exit_code != 0</code>, <code>runValidator</code> seteaba
+      <code>Verdict.Feedback = "validator exit N"</code> y descartaba el
+      stdout/stderr capturados. El step reintentaba a ciegas con ese string
+      pelado, derivando en cascada de role-confusion (el modelo del step
+      empezaba a emitir <code>verdict: approve</code> en su propio output).
+    </p>
+    <p>
+      Fix: el nuevo helper <code>buildInfraFailFeedback(cli, exitCode, stdout,
+      stderr)</code> en <code>internal/runner/validator.go</code> aplica el
+      siguiente orden de fallback:
+    </p>
+    <ol>
+      <li><strong>Codex stream-json error event</strong>: si
+        <code>cli == "codex"</code> y el stdout del validator contiene una
+        línea JSON con <code>{"type":"error","message":"..."}</code> (o
+        <code>"type":"turn.failed"</code>), se extrae el
+        <code>message</code>. Feedback:
+        <code>"validator (cli=codex) infra-failed exit=N: &lt;message&gt;"</code>.
+        Helper auxiliar: <code>extractStreamJSONErrorMessage(stdout)</code>
+        (itera línea por línea, retorna <code>""</code> si nada matchea).
+      </li>
+      <li><strong>Tail de stderr/stdout</strong>: si no hay error event
+        parseable (cualquier CLI), se toman las últimas 10 líneas no vacías
+        de stderr; si stderr está vacío, de stdout. Feedback:
+        <code>"validator (cli=&lt;X&gt;) infra-failed exit=&lt;N&gt;:
+        &lt;últimas líneas&gt;"</code>.
+      </li>
+      <li><strong>Fallback compat</strong>: si ambos stdout y stderr están
+        vacíos, retorna <code>"validator exit N"</code> (comportamiento
+        anterior, sin marcar <code>InfraFail</code>).
+      </li>
+    </ol>
+    <p>
+      <strong>Wrapping anti role-confusion</strong>: en los casos 1 y 2, el
+      feedback se envuelve con el prefijo
+      <em>"El validator no pudo evaluar tu output por una falla de infra
+      (no por un problema del trabajo). Reintenta el step manteniendo el
+      output. Detalle: …"</em>. El wrapping vive dentro de
+      <code>buildInfraFailFeedback</code> para que <code>Verdict.Feedback</code>
+      persistido en <code>verdict.yaml</code> sea el string accionable final.
+    </p>
+    <p>
+      <strong>Cap de 4 KiB</strong>: el resultado se trunca reusando
+      <code>truncateForRecord</code> (<code>s[:4096] + "\n... (truncado)"</code>),
+      la misma función que limita el <code>raw_stdout</code> de
+      <code>verdict.yaml</code>. El cap se aplica <em>después</em> del
+      wrapping para acotar el contexto del rerun sin recortar el prefijo
+      explicativo.
+    </p>
+    <p>
+      <strong>Campo <code>Verdict.InfraFail bool</code></strong>: nuevo campo
+      en la struct <code>Verdict</code> (<code>validator.go</code>) con tag
+      <code>yaml:"-"</code> (no persistido en <code>verdict.yaml</code>).
+      Se setea a <code>true</code> en los casos 1 y 2 de
+      <code>buildInfraFailFeedback</code>. Paralelo a
+      <code>Verdict.RawFeedbackOnly</code>; disponible para futuros
+      consumidores (por ejemplo, una opción
+      <code>on_validator_infra_fail</code> en el schema del step) sin cambiar
+      el shape del manifest YAML.
+    </p>
+    <p>
+      <strong>Propagación de stderr</strong>: <code>runValidator</code> ahora
+      propaga <code>stderrBuf.String()</code> al campo <code>RawStderr</code>
+      del <code>validatorDoneMsg</code> (paralelo a <code>RawStdout</code>),
+      necesario para que <code>buildInfraFailFeedback</code> pueda examinar
+      stderr sin leer el archivo de log.
+    </p>
+    <p>
+      <code>mergeFeedbackIntoPayload</code> y <code>isRawVerdictFallback</code>
+      (<code>running.go</code>) no se tocan: el feedback wrappeado nunca
+      matchea el patrón <code>^verdict: &lt;token&gt;$</code>, así que el
+      filtro defensivo no lo filtra y el prepend funciona sin cambios.
+    </p>
   </section>
 
   <footer>
