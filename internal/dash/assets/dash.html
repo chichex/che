@@ -466,14 +466,6 @@ const Sidebar = ({ pipelines, runs, selectedSlug, onSelect, fadedSlugs }) => {
   const ready = pipelines.filter(p => p.status === "ready");
   const drafts = pipelines.filter(p => p.status === "draft");
 
-  // last_run: prefer live runs table, fallback to pipeline.last_run from API
-  const lastRun = (slug) => {
-    const fromRuns = (runs[slug] || [])[0];
-    if (fromRuns) return fromRuns;
-    if (p && p.last_run) return p.last_run; // closure — handled per Row
-    return null;
-  };
-
   const Row = ({ p }) => {
     const fromRuns = (runs[p.slug] || [])[0];
     const last = fromRuns || p.last_run || null;

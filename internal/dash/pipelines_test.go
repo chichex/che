@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chichex/che/internal/wizard"
 )
@@ -189,5 +190,105 @@ func TestDetailFound(t *testing.T) {
 	}
 	if detail.Steps[1].Validator != nil {
 		t.Errorf("step[1] should have no validator")
+	}
+}
+
+// ── last_run field tests ───────────────────────────────────────────────────
+
+// writeRunManifest creates a minimal manifest.yaml under runsDir/slug/runID/.
+func writeRunManifest(t *testing.T, runsDir, slug, runID, status string, startedAt time.Time) {
+	t.Helper()
+	dir := filepath.Join(runsDir, slug, runID)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	content := "run_id: " + runID + "\npipeline: " + slug + "\nstatus: " + status + "\nstarted_at: " + startedAt.UTC().Format(time.RFC3339) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "manifest.yaml"), []byte(content), 0o600); err != nil {
+		t.Fatalf("writeRunManifest %s/%s: %v", slug, runID, err)
+	}
+}
+
+// TestListPipelines_LastRunPresent verifies that /api/pipelines includes
+// last_run={id, status, started_at} when the pipeline has a run.
+func TestListPipelines_LastRunPresent(t *testing.T) {
+	pipelinesDir := t.TempDir()
+	runsDir := t.TempDir()
+
+	writeYAML(t, pipelinesDir, "my-pipe", wizard.Pipeline{
+		Name:  "My Pipe",
+		Steps: []wizard.Step{{Name: "step1", CLI: "claude", Kind: "prompt"}},
+	})
+
+	startedAt := time.Now().UTC().Truncate(time.Second)
+	writeRunManifest(t, runsDir, "my-pipe", "run-abc", "done", startedAt)
+
+	// Invalidate cache to avoid stale TTL entries from other tests.
+	lastRunCache.mu.Lock()
+	lastRunCache.entries = make(map[string]lastRunCacheEntry)
+	lastRunCache.mu.Unlock()
+
+	rr := getJSON(t, handleListPipelines(pipelinesDir, runsDir), "/api/pipelines")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+
+	var list []pipelineJSON
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("want 1 pipeline, got %d", len(list))
+	}
+	p := list[0]
+	if p.LastRun == nil {
+		t.Fatal("want last_run present, got nil")
+	}
+	if p.LastRun.ID != "run-abc" {
+		t.Errorf("last_run.id: want run-abc, got %q", p.LastRun.ID)
+	}
+	if p.LastRun.Status != "done" {
+		t.Errorf("last_run.status: want done, got %q", p.LastRun.Status)
+	}
+	if p.LastRun.StartedAt == "" {
+		t.Errorf("last_run.started_at: want non-empty, got empty")
+	}
+}
+
+// TestListPipelines_LastRunOmitted verifies that last_run is omitted (omitempty)
+// when there are no runs for the pipeline.
+func TestListPipelines_LastRunOmitted(t *testing.T) {
+	pipelinesDir := t.TempDir()
+	runsDir := t.TempDir()
+
+	writeYAML(t, pipelinesDir, "no-runs-pipe", wizard.Pipeline{
+		Name:  "No Runs",
+		Steps: []wizard.Step{{Name: "s1", CLI: "claude", Kind: "prompt"}},
+	})
+
+	// Invalidate cache.
+	lastRunCache.mu.Lock()
+	lastRunCache.entries = make(map[string]lastRunCacheEntry)
+	lastRunCache.mu.Unlock()
+
+	rr := getJSON(t, handleListPipelines(pipelinesDir, runsDir), "/api/pipelines")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+
+	var list []pipelineJSON
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("want 1 pipeline, got %d", len(list))
+	}
+	if list[0].LastRun != nil {
+		t.Errorf("want last_run omitted, got %+v", list[0].LastRun)
+	}
+
+	// Also verify JSON does not contain "last_run" key at all.
+	rawJSON := rr.Body.String()
+	if strings.Contains(rawJSON, "last_run") {
+		t.Errorf("last_run should be omitted from JSON, got: %s", rawJSON)
 	}
 }

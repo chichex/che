@@ -23,7 +23,9 @@ import (
 	"github.com/chichex/che/internal/runner"
 )
 
-const heartbeatInterval = 15 * time.Second
+// heartbeatInterval is the idle period between SSE heartbeat comments.
+// Declared as var so tests can shorten it without spawning a real ticker for 15s.
+var heartbeatInterval = 15 * time.Second
 
 // handleEvents returns an http.HandlerFunc for SSE per-run events.
 // runsDir is the base directory for run data (~/.che/runs).

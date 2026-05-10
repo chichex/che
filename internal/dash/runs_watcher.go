@@ -152,9 +152,11 @@ func (w *runsWatcher) tick(snapshot map[runKey]runSnapshot) {
 					w.bus.PublishGlobal(Event{
 						Type: EventRunStarted,
 						Payload: map[string]any{
-							"slug":       slug,
-							"run_id":     runID,
-							"started_at": startedAt,
+							"slug":        slug,
+							"run_id":      runID,
+							"started_at":  startedAt,
+							"input_kind":  m.InputKind,
+							"input_value": m.InputValue,
 						},
 					})
 				}
