@@ -53,8 +53,8 @@ func TestInterpolateInput_Multiple(t *testing.T) {
 }
 
 // TestBuildSpawnArgs_StepContentInterpolated verifica end-to-end que un
-// step con `{{INPUT}}` en su content queda sustituido por el payload en
-// los args del subprocess. Es el contrato real de Fix 1.
+// step codex con `{{INPUT}}` en su content queda sustituido por el payload
+// en stdin (Fix #114: codex ya no lleva el content por argv).
 func TestBuildSpawnArgs_StepContentInterpolated(t *testing.T) {
 	step := wizard.Step{
 		CLI:     "codex",
@@ -65,16 +65,156 @@ func TestBuildSpawnArgs_StepContentInterpolated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("defaultSpawnCmd error: %v", err)
 	}
-	// args = [codex, exec, --json, <content sustituido>]
-	if len(cmd.Args) < 4 {
-		t.Fatalf("expected >= 4 args, got %d: %#v", len(cmd.Args), cmd.Args)
+	// Fix #114: args = [codex, exec, --json] — sin content en argv.
+	// El content interpolado viaja por stdin.
+	if len(cmd.Args) != 3 {
+		t.Fatalf("expected 3 args (codex exec --json), got %d: %#v", len(cmd.Args), cmd.Args)
 	}
-	contentArg := cmd.Args[3]
-	if strings.Contains(contentArg, "{{INPUT}}") {
-		t.Errorf("step.Content paso al subprocess con {{INPUT}} literal: %q", contentArg)
+	// Verificar que stdin contiene el payload sustituido (no el placeholder literal).
+	sr, ok := cmd.Stdin.(*strings.Reader)
+	if !ok {
+		t.Fatalf("cmd.Stdin no es *strings.Reader para codex")
 	}
-	if !strings.Contains(contentArg, "PAYLOAD-X") {
-		t.Errorf("step.Content no contiene el payload sustituido: %q", contentArg)
+	buf := make([]byte, sr.Len())
+	_, _ = sr.Read(buf)
+	stdinStr := string(buf)
+	if strings.Contains(stdinStr, "{{INPUT}}") {
+		t.Errorf("stdin de codex contiene {{INPUT}} literal: %q", stdinStr)
+	}
+	if !strings.Contains(stdinStr, "PAYLOAD-X") {
+		t.Errorf("stdin de codex no contiene el payload sustituido: %q", stdinStr)
+	}
+}
+
+// TestBuildSpawnArgs_CodexExcludesContent valida que buildSpawnArgs para
+// codex devuelve exactamente ["exec", "--json"] sin el content en argv (Fix #114).
+func TestBuildSpawnArgs_CodexExcludesContent(t *testing.T) {
+	step := wizard.Step{
+		CLI:     "codex",
+		Kind:    wizard.KindPrompt,
+		Content: "prompt largo que no debe viajar por argv",
+	}
+	args, err := buildSpawnArgs(step)
+	if err != nil {
+		t.Fatalf("buildSpawnArgs error: %v", err)
+	}
+	want := []string{"exec", "--json"}
+	if len(args) != len(want) {
+		t.Fatalf("buildSpawnArgs codex: expected %v, got %v", want, args)
+	}
+	for i, w := range want {
+		if args[i] != w {
+			t.Errorf("args[%d]: expected %q, got %q", i, w, args[i])
+		}
+	}
+	// El content NO debe aparecer en ningún arg.
+	for _, a := range args {
+		if strings.Contains(a, "prompt largo") {
+			t.Errorf("buildSpawnArgs codex incluye el content en argv: %q", a)
+		}
+	}
+}
+
+// TestDefaultSpawnCmd_CodexStdinHasContent valida que para codex, cmd.Stdin
+// contiene el content interpolado y NO el payload pelado cuando el content
+// embebe {{INPUT}} (Fix #114).
+func TestDefaultSpawnCmd_CodexStdinHasContent(t *testing.T) {
+	step := wizard.Step{
+		CLI:     "codex",
+		Kind:    wizard.KindPrompt,
+		Content: "procesa:\n<<<\n{{INPUT}}\n>>>",
+	}
+	payload := "payload-pelado"
+	cmd, err := defaultSpawnCmd(step, payload)
+	if err != nil {
+		t.Fatalf("defaultSpawnCmd error: %v", err)
+	}
+	sr, ok := cmd.Stdin.(*strings.Reader)
+	if !ok {
+		t.Fatalf("cmd.Stdin no es *strings.Reader para codex")
+	}
+	buf := make([]byte, sr.Len())
+	_, _ = sr.Read(buf)
+	stdinStr := string(buf)
+	// Stdin debe contener el content (con payload interpolado inline).
+	if !strings.Contains(stdinStr, "procesa:") {
+		t.Errorf("stdin no contiene el content del prompt: %q", stdinStr)
+	}
+	if !strings.Contains(stdinStr, payload) {
+		t.Errorf("stdin no contiene el payload interpolado: %q", stdinStr)
+	}
+	// Stdin NO debe ser SOLO el payload pelado (debe tener el content tambien).
+	if stdinStr == payload {
+		t.Errorf("stdin es solo el payload pelado — el content no viajo por stdin")
+	}
+}
+
+// TestBuildSpawnArgs_NonCodexCLIs_NoRegression valida que claude/gemini/opencode
+// mantienen el content en argv (sin regresion por Fix #114).
+func TestBuildSpawnArgs_NonCodexCLIs_NoRegression(t *testing.T) {
+	cases := []struct {
+		cli     string
+		kind    string
+		content string
+		wantArg string // fragmento que debe aparecer en algun arg
+	}{
+		{"claude", wizard.KindPrompt, "mi prompt claude", "mi prompt claude"},
+		{"gemini", wizard.KindPrompt, "mi prompt gemini", "mi prompt gemini"},
+		{"opencode", wizard.KindPrompt, "mi prompt opencode", "mi prompt opencode"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.cli, func(t *testing.T) {
+			step := wizard.Step{CLI: tc.cli, Kind: tc.kind, Content: tc.content}
+			args, err := buildSpawnArgs(step)
+			if err != nil {
+				t.Fatalf("buildSpawnArgs(%s) error: %v", tc.cli, err)
+			}
+			found := false
+			for _, a := range args {
+				if strings.Contains(a, tc.wantArg) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("%s: content %q no aparece en argv %v", tc.cli, tc.wantArg, args)
+			}
+		})
+	}
+}
+
+// TestDefaultSpawnCmd_CodexLargePayload verifica que un step codex con un
+// payload sintetico de >= 512 KB arma el cmd sin error, los args quedan
+// acotados (sin el payload en argv), y stdin contiene el payload completo
+// (via content interpolado con {{INPUT}}) — Fix #114.
+func TestDefaultSpawnCmd_CodexLargePayload(t *testing.T) {
+	// Payload sintetico de 512 KB.
+	largePayload := strings.Repeat("A", 512*1024)
+	step := wizard.Step{
+		CLI:     "codex",
+		Kind:    wizard.KindPrompt,
+		Content: "analiza:\n<<<\n{{INPUT}}\n>>>",
+	}
+	cmd, err := defaultSpawnCmd(step, largePayload)
+	if err != nil {
+		t.Fatalf("defaultSpawnCmd con payload grande error: %v", err)
+	}
+	// Args deben ser acotados: [codex, exec, --json] — sin el payload.
+	if len(cmd.Args) != 3 {
+		t.Fatalf("expected 3 args, got %d — el payload no debe viajar por argv", len(cmd.Args))
+	}
+	for _, a := range cmd.Args {
+		if len(a) > 1000 {
+			t.Errorf("arg demasiado largo (%d bytes) — el payload viajo por argv", len(a))
+		}
+	}
+	// Stdin debe contener el payload completo.
+	sr, ok := cmd.Stdin.(*strings.Reader)
+	if !ok {
+		t.Fatalf("cmd.Stdin no es *strings.Reader para codex")
+	}
+	if sr.Len() < 512*1024 {
+		t.Errorf("stdin demasiado corto (%d bytes) — el payload no esta completo en stdin", sr.Len())
 	}
 }
 
