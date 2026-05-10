@@ -6,12 +6,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// wrapText envuelve cada linea logica de s a un ancho maximo de w columnas
+// WrapText envuelve cada linea logica de s a un ancho maximo de w columnas
 // (chars). Prefiere romper en espacios; si una palabra es mas larga que w
 // hace hard break por char. Newlines existentes se preservan — cada linea
 // logica se wrappea independiente. w <= 0 devuelve s sin tocar (uso para
 // "todavia no se que ancho tiene la terminal").
-func wrapText(s string, w int) string {
+func WrapText(s string, w int) string {
 	if w <= 0 {
 		return s
 	}

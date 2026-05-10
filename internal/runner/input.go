@@ -455,6 +455,19 @@ func (m RunModel) confirmInput() (tea.Model, tea.Cmd) {
 	return enterPreflight(m), nil
 }
 
+// wrapInputBox renderiza body dentro de inputBoxBorder aplicando wrap por
+// ancho de terminal — mismo patron que el wizard (S2 step editor / S1 info).
+// termWidth=0 (tests headless / antes del primer WindowSizeMsg) preserva el
+// render previo: WrapText devuelve el body intacto y el style no fija Width.
+func wrapInputBox(body string, termWidth int) string {
+	style := inputBoxBorder
+	if inner := wizard.ContentInnerWidth(termWidth); inner > 0 {
+		body = wizard.WrapText(body, inner)
+		style = style.Width(inner)
+	}
+	return style.Render(body)
+}
+
 // viewInput renderiza R1 segun el kind.
 func (m RunModel) viewInput() string {
 	var b strings.Builder
@@ -475,7 +488,7 @@ func (m RunModel) viewInput() string {
 	case wizard.InputText:
 		b.WriteString(dimStyle.Render("el step recibira este texto en stdin / como prompt"))
 		b.WriteString("\n")
-		b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
+		b.WriteString(wrapInputBox(m.inputUI.textBuf.view(), m.terminalWidth))
 		b.WriteString("\n")
 	case wizard.InputPR:
 		if m.inputUI.repoMode {
@@ -486,7 +499,7 @@ func (m RunModel) viewInput() string {
 		} else {
 			b.WriteString(dimStyle.Render("formato: owner/repo#NNN — se valida con `gh pr view`"))
 			b.WriteString("\n")
-			b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
+			b.WriteString(wrapInputBox(m.inputUI.textBuf.view(), m.terminalWidth))
 			b.WriteString("\n")
 		}
 	case wizard.InputIssue:
@@ -498,13 +511,13 @@ func (m RunModel) viewInput() string {
 		} else {
 			b.WriteString(dimStyle.Render("formato: owner/repo#NNN — se valida con `gh issue view`"))
 			b.WriteString("\n")
-			b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
+			b.WriteString(wrapInputBox(m.inputUI.textBuf.view(), m.terminalWidth))
 			b.WriteString("\n")
 		}
 	case wizard.InputURL:
 		b.WriteString(dimStyle.Render("http/https — fetch con timeout 10s al confirmar"))
 		b.WriteString("\n")
-		b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
+		b.WriteString(wrapInputBox(m.inputUI.textBuf.view(), m.terminalWidth))
 		b.WriteString("\n")
 	case wizard.InputFile:
 		b.WriteString(dimStyle.Render(fmt.Sprintf("dir: %s", m.inputUI.fileDir)))
@@ -512,7 +525,7 @@ func (m RunModel) viewInput() string {
 		b.WriteString(renderFilePicker(m.inputUI))
 		b.WriteString("\n")
 	default:
-		b.WriteString(inputBoxBorder.Render(m.inputUI.textBuf.view()))
+		b.WriteString(wrapInputBox(m.inputUI.textBuf.view(), m.terminalWidth))
 		b.WriteString("\n")
 	}
 

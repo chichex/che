@@ -207,8 +207,8 @@ func renderLabeledField(label string, t textInput, focused bool, termWidth int) 
 		labelText = labelText + dimStyle.Render("  ← foco")
 	}
 	body := t.view(focused)
-	if inner := contentInnerWidth(termWidth); inner > 0 {
-		body = wrapText(body, inner)
+	if inner := ContentInnerWidth(termWidth); inner > 0 {
+		body = WrapText(body, inner)
 		style = style.Width(inner)
 	}
 	return labelText + "\n" + style.Render(body)

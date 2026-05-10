@@ -1359,18 +1359,18 @@ func renderContent(m model) string {
 		label += dimStyle.Render("  ← foco · shift+enter / alt+enter para newline")
 	}
 	body := m.stepEdit.contentInput.view(focused)
-	if inner := contentInnerWidth(m.width); inner > 0 {
-		body = wrapText(body, inner)
+	if inner := ContentInnerWidth(m.width); inner > 0 {
+		body = WrapText(body, inner)
 		style = style.Width(inner)
 	}
 	return label + "\n" + style.Render(body)
 }
 
-// contentInnerWidth devuelve el ancho disponible (en columnas) dentro de
+// ContentInnerWidth devuelve el ancho disponible (en columnas) dentro de
 // la caja de input — ya descontados border (2) + padding (2) + un margen
 // de seguridad. Devuelve 0 cuando todavia no recibimos un WindowSizeMsg
 // (signal "no wrappear, dejar al terminal").
-func contentInnerWidth(termWidth int) int {
+func ContentInnerWidth(termWidth int) int {
 	if termWidth <= 0 {
 		return 0
 	}
@@ -1544,8 +1544,8 @@ func renderValContent(m model) string {
 		label += dimStyle.Render("  ← foco · shift+enter / alt+enter para newline")
 	}
 	body := m.stepEdit.valContentInput.view(focused)
-	if inner := contentInnerWidth(m.width); inner > 0 {
-		body = wrapText(body, inner)
+	if inner := ContentInnerWidth(m.width); inner > 0 {
+		body = WrapText(body, inner)
 		style = style.Width(inner)
 	}
 	return label + "\n" + style.Render(body)
