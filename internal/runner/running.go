@@ -880,6 +880,25 @@ func (m RunModel) effectiveLogViewportLines() int {
 	return avail
 }
 
+// logPaneWidth devuelve el ancho util (en columnas) para wrappear cada linea
+// del log pane segun el terminalWidth del modelo. El pane no tiene border ni
+// padding propio, asi que solo descontamos un margen chico (2 cols) para
+// evitar que el terminal haga su propio wrap en el ultimo char visible —
+// mismo patron que el wizard usa con ContentInnerWidth pero adaptado al
+// pane sin caja. Devuelve 0 cuando todavia no recibimos un WindowSizeMsg
+// (tests headless / antes del primer render) — signal "no wrappear, dejar
+// la linea tal cual" — para preservar el render previo en ese caso.
+func logPaneWidth(termWidth int) int {
+	if termWidth <= 0 {
+		return 0
+	}
+	inner := termWidth - 2
+	if inner < 20 {
+		return 0
+	}
+	return inner
+}
+
 // renderLogPane dibuja el viewport del log pane: header del step en LogFocus
 // + las ultimas N lineas del ring buffer del mismo step (segun StickyBottom
 // / LogScrollOffset). Lineas de stderr en rojo dimmed, intercaladas con
@@ -933,12 +952,14 @@ func renderLogPane(m RunModel) string {
 	// dinamico (H10: resize via WindowSizeMsg). LogScrollOffset corre la
 	// ventana hacia atras cuando el usuario scrollea arriba.
 	visible := windowLines(snap, m.effectiveLogViewportLines(), m.LogScrollOffset)
+	wrapW := logPaneWidth(m.terminalWidth)
 	for _, line := range visible {
+		text := wizard.WrapText(line.Text, wrapW)
 		switch line.Kind {
 		case LogLineStderr:
-			b.WriteString(stderrStyle.Render(line.Text))
+			b.WriteString(stderrStyle.Render(text))
 		default:
-			b.WriteString(line.Text)
+			b.WriteString(text)
 		}
 		b.WriteString("\n")
 	}
