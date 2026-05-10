@@ -16,7 +16,6 @@
 package runner
 
 import (
-	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -180,12 +179,3 @@ func viewPauseModal(m RunModel) string {
 	return b.String()
 }
 
-// pauseModalSummaryLine devuelve un string corto que el log pane / footer
-// puede renderear cuando el modal esta abierto. Sirve solo para debug; el
-// render principal lo da viewPauseModal.
-func pauseModalSummaryLine(m RunModel) string {
-	if m.PauseModal == nil {
-		return ""
-	}
-	return fmt.Sprintf("RP · step %d · feedback len=%d", m.PauseModal.StepIdx+1, len(m.PauseModal.LastFeedback))
-}

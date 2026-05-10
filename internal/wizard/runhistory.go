@@ -177,20 +177,6 @@ func ChipForStatus(s RunStatus) string {
 	}
 }
 
-// runDetailReadFile es el helper de la pantalla "Run history" detalle:
-// lee un archivo del run-dir (ej. step-NN.stderr.log). Devuelve "" si
-// no existe — el detalle render-ea "(sin contenido)" en ese caso.
-func runDetailReadFile(runDir, name string) string {
-	if runDir == "" {
-		return ""
-	}
-	data, err := os.ReadFile(filepath.Join(runDir, name))
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
-
 // formatRunDuration devuelve "1m 23s" / "5s" / "" para una duracion.
 // Mismo estilo que el resumen del runner — duplicado aca por la regla
 // "no importar runner".
