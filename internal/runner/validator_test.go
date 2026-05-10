@@ -1,8 +1,12 @@
 package runner
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/chichex/che/internal/wizard"
 )
@@ -274,6 +278,116 @@ func TestParseVerdict_StreamJSONNoVerdict(t *testing.T) {
 	}
 	if v.Feedback != "no verdict block" {
 		t.Errorf("expected feedback 'no verdict block', got %q", v.Feedback)
+	}
+}
+
+// TestRunValidator_StreamsLinesAndEmitsDone cubre el fix del bug "el log
+// pane queda vacio durante el step de validate": runValidator antes corria
+// el subprocess con cmd.Run() y stdout a un buffer, asi que ningun
+// stepLineMsg llegaba al lineCh — el TUI solo veia el validatorDoneMsg
+// final. Ahora el validator usa el mismo pipeline streaming que runStep
+// (pipes + teeStream). El test verifica que:
+//
+//   - se emiten N stepLineMsg con Idx==StepIdx (1-based) y Line.Text
+//     matcheando cada linea del stdout del subprocess fake;
+//   - el validatorDoneMsg final llega con Verdict ok y RawStdout
+//     conteniendo TODO el stdout (para parseVerdict);
+//   - el archivo stdout.log del validator se persiste con el contenido
+//     completo.
+func TestRunValidator_StreamsLinesAndEmitsDone(t *testing.T) {
+	// Fake stdout multilinea — un agente "raw text" que termina con
+	// "verdict: ok" para que parseVerdict devuelva ok. El blank line antes
+	// del verdict block es necesario para que parseVerdict lo trate como
+	// candidate YAML separado (mismo patron que el resto de los tests de
+	// parseVerdict para validators raw text).
+	fakeOut := "linea 1 del validator\nlinea 2 con tool use\n\nverdict: ok\n"
+
+	prev := validatorSpawnCmdFn
+	t.Cleanup(func() { validatorSpawnCmdFn = prev })
+	validatorSpawnCmdFn = func(step wizard.Step, payload string) (*exec.Cmd, error) {
+		// printf '%b' expande los \n del payload — emite las 3 lineas
+		// del fakeOut + newlines reales. Reusamos /bin/sh -c para evitar
+		// depender de un fake binario en PATH.
+		return exec.Command("/bin/sh", "-c", "printf '%b' \""+fakeOut+"\""), nil
+	}
+
+	runDir := t.TempDir()
+	step := wizardStepWithValidator("gemini", 1, "fail")
+	state := &runState{requestCancel: make(chan struct{}, 1)}
+
+	cmd := runValidator(step, "input payload", runDir, 1, 1, state)
+	if cmd == nil {
+		t.Fatal("runValidator returned nil cmd")
+	}
+
+	// Drenar lineCh: stepLineMsg... + validatorDoneMsg final. Timeout
+	// generoso (2s) para no flakear en CI lento — el fake termina inmediato.
+	var lines []stepLineMsg
+	var done *validatorDoneMsg
+	deadline := time.After(2 * time.Second)
+loop:
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("timeout esperando validatorDoneMsg; lineas drenadas: %d", len(lines))
+		default:
+		}
+		msg := cmd()
+		switch m := msg.(type) {
+		case stepLineMsg:
+			lines = append(lines, m)
+			// El handler real re-issuea waitForLine para drenar la siguiente
+			// linea — replicamos eso en el test.
+			cmd = waitForLine(state.lineCh)
+		case validatorDoneMsg:
+			done = &m
+			break loop
+		default:
+			t.Fatalf("msg inesperado: %T %+v", msg, msg)
+		}
+	}
+
+	if done == nil {
+		t.Fatal("no validatorDoneMsg drenado")
+	}
+	if done.Verdict.Status != VerdictOk {
+		t.Errorf("verdict status: want %q, got %q (feedback=%q)", VerdictOk, done.Verdict.Status, done.Verdict.Feedback)
+	}
+	if !strings.Contains(done.RawStdout, "verdict: ok") {
+		t.Errorf("RawStdout: missing verdict marker, got %q", done.RawStdout)
+	}
+
+	// Esperamos 1 stepLineMsg por linea del stdout (3 lineas en fakeOut).
+	if len(lines) == 0 {
+		t.Fatal("ningun stepLineMsg recibido — el log pane quedaria vacio (bug original)")
+	}
+	for _, l := range lines {
+		if l.Idx != 1 {
+			t.Errorf("stepLineMsg.Idx: want 1 (step idx), got %d", l.Idx)
+		}
+	}
+	// Joinear los textos y verificar que las lineas del fake aparecen.
+	var allText strings.Builder
+	for _, l := range lines {
+		allText.WriteString(l.Line.Text)
+		allText.WriteString("\n")
+	}
+	if !strings.Contains(allText.String(), "linea 1 del validator") {
+		t.Errorf("stepLineMsg lines missing first stdout line; got:\n%s", allText.String())
+	}
+	if !strings.Contains(allText.String(), "verdict: ok") {
+		t.Errorf("stepLineMsg lines missing verdict marker; got:\n%s", allText.String())
+	}
+
+	// stdout.log del validator debe contener TODO el stdout (la persistencia
+	// a disco no debe haberse roto al cambiar a streaming).
+	logPath := filepath.Join(runDir, "step-01.validator.01.stdout.log")
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("leyendo stdout.log: %v", err)
+	}
+	if !strings.Contains(string(raw), "linea 1 del validator") || !strings.Contains(string(raw), "verdict: ok") {
+		t.Errorf("stdout.log incompleto, got:\n%s", string(raw))
 	}
 }
 
