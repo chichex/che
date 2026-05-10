@@ -61,9 +61,23 @@ func Serve(ctx context.Context, opts Options) error {
 	// Singleton bus for SSE per-run streaming.
 	bus := NewBus(runsDir)
 
+	// Start global watchers (always active, not ref-counted).
+	// They stop when ctx is cancelled (via stopCh signalled in shutdown goroutine).
+	pw := newPipelinesWatcher(pipelinesDir, bus)
+	rw := newRunsWatcher(runsDir, bus)
+	go pw.run()
+	go rw.run()
+	// Stop global watchers when context is cancelled.
+	go func() {
+		<-ctx.Done()
+		pw.stop()
+		rw.stop()
+	}()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
-	mux.HandleFunc("/api/pipelines", handleListPipelines(pipelinesDir))
+	mux.HandleFunc("/api/events", handleGlobalEvents(bus))
+	mux.HandleFunc("/api/pipelines", handleListPipelines(pipelinesDir, runsDir))
 	mux.HandleFunc("/api/pipelines/", dispatchPipelinesPrefix(pipelinesDir, runsDir, bus))
 
 	srv := &http.Server{

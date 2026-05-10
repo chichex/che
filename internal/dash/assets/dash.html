@@ -123,6 +123,18 @@
   /* notes drawer */
   details > summary { list-style: none; cursor: pointer; }
   details > summary::-webkit-details-marker { display: none; }
+
+  /* Global SSE fade-in for new rail/run items */
+  @keyframes dash-fade-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .dash-fade-in { animation: dash-fade-in 500ms ease-out; }
+
+  /* Global connection badge states */
+  .badge-live    { color: var(--done);    border-color: color-mix(in oklch, var(--done) 25%, var(--line)); }
+  .badge-reconn  { color: var(--warn);    border-color: color-mix(in oklch, var(--warn) 25%, var(--line)); }
+  .badge-disconn { color: var(--failed);  border-color: color-mix(in oklch, var(--failed) 25%, var(--line)); }
 </style>
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
@@ -400,7 +412,7 @@ const Badge = ({ kind, children }) => (
 // Top bar
 // ─────────────────────────────────────────────────────────────────────
 
-const TopBar = ({ pipelines, runs }) => {
+const TopBar = ({ pipelines, runs, globalConnState, onRetryGlobal }) => {
   const liveRuns = useMemo(() => {
     let n = 0;
     for (const slug in runs) for (const r of runs[slug]) if (r.status === "running") n++;
@@ -422,9 +434,25 @@ const TopBar = ({ pipelines, runs }) => {
         <span className="mono text-[11px] ink-3">
           {pipelines.length} pipelines · {liveRuns} live
         </span>
-        <span className="flex items-center gap-1.5 mono text-[11px] ink-3">
-          <span className="dot dot-running" /> SSE connected
-        </span>
+        {globalConnState === "live" && (
+          <span className="badge badge-live">
+            <span className="dot dot-done" /> live
+          </span>
+        )}
+        {globalConnState === "reconnecting" && (
+          <span className="badge badge-reconn">
+            <span className="dot dot-paused" /> reconnecting…
+          </span>
+        )}
+        {globalConnState === "disconnected" && (
+          <span className="flex items-center gap-2">
+            <span className="badge badge-disconn">
+              <span className="dot dot-failed" /> disconnected
+            </span>
+            <button className="btn btn-ghost mono text-[10.5px] ink-3" onClick={onRetryGlobal}>retry</button>
+          </span>
+        )}
+        {/* "hidden" state: no badge shown */}
       </div>
     </header>
   );
@@ -434,35 +462,45 @@ const TopBar = ({ pipelines, runs }) => {
 // Sidebar
 // ─────────────────────────────────────────────────────────────────────
 
-const Sidebar = ({ pipelines, runs, selectedSlug, onSelect }) => {
+const Sidebar = ({ pipelines, runs, selectedSlug, onSelect, fadedSlugs }) => {
   const ready = pipelines.filter(p => p.status === "ready");
   const drafts = pipelines.filter(p => p.status === "draft");
 
-  const lastRun = (slug) => (runs[slug] || [])[0];
+  // last_run: prefer live runs table, fallback to pipeline.last_run from API
+  const lastRun = (slug) => {
+    const fromRuns = (runs[slug] || [])[0];
+    if (fromRuns) return fromRuns;
+    if (p && p.last_run) return p.last_run; // closure — handled per Row
+    return null;
+  };
 
   const Row = ({ p }) => {
-    const last = lastRun(p.slug);
+    const fromRuns = (runs[p.slug] || [])[0];
+    const last = fromRuns || p.last_run || null;
     const live = last && last.status === "running";
     const isSelected = selectedSlug === p.slug;
+    const isFaded = fadedSlugs && fadedSlugs.has(p.slug);
     return (
       <button
         onClick={() => onSelect(p.slug)}
         data-screen-label={"rail · " + p.slug}
         className={"w-full text-left px-3 py-2 rounded-md border border-transparent " +
-          (isSelected ? "bg-selected" : "bg-hover")}
+          (isSelected ? "bg-selected" : "bg-hover") +
+          (isFaded ? " dash-fade-in" : "")}
       >
         <div className="flex items-center justify-between gap-2">
           <span className="mono text-[13px] ink truncate">{p.name}</span>
           {p.status === "draft"
             ? <Badge kind="draft">draft</Badge>
             : live ? <Badge kind="running"><span className="dot dot-running" /> running</Badge>
+            : last ? <span className={"badge badge-" + (last.status === "done" ? "done" : last.status === "failed" ? "failed" : "")}><span className={"dot dot-" + last.status} /></span>
             : null}
         </div>
         <div className="mt-0.5 text-[11.5px] ink-3 truncate">
           {p.status === "draft"
             ? <span className="mono">paused · {p.draftStage}</span>
             : last
-              ? <>last run <span className="mono">{last.id}</span> · {statusLabel[last.status]} · {fmtAgo(last.started_at)}</>
+              ? <>last run <span className="mono">{(last.id || last.run_id || "").slice(0,6)}</span> · {statusLabel[last.status] || last.status} · {fmtAgo(last.started_at)}</>
               : <>no runs yet</>}
         </div>
       </button>
@@ -498,10 +536,20 @@ const Sidebar = ({ pipelines, runs, selectedSlug, onSelect }) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
+// Pipeline deleted empty state
+// ─────────────────────────────────────────────────────────────────────
+
+const PipelineDeletedState = () => (
+  <div className="p-8 ink-3 text-[13px]">
+    este pipeline fue eliminado — seleccioná otro del rail
+  </div>
+);
+
+// ─────────────────────────────────────────────────────────────────────
 // Pipeline detail (runs history + Run button)
 // ─────────────────────────────────────────────────────────────────────
 
-const PipelineDetail = ({ pipeline, runs, onOpenRun, onRequestRun, onResumeDraft }) => {
+const PipelineDetail = ({ pipeline, runs, onOpenRun, onRequestRun, onResumeDraft, fadedRunIds }) => {
   const list = runs[pipeline.slug] || [];
   const [pipelineStepIdx, setPipelineStepIdx] = useState(-1);
   useEffect(() => { setPipelineStepIdx(-1); }, [pipeline.slug]);
@@ -615,11 +663,12 @@ const PipelineDetail = ({ pipeline, runs, onOpenRun, onRequestRun, onResumeDraft
                 const dur = r.finished_at && r.started_at
                   ? new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()
                   : null;
+                const isFadedRun = fadedRunIds && fadedRunIds.has("run:" + r.id);
                 return (
                   <tr
                     key={r.id}
                     onClick={() => onOpenRun(r.id)}
-                    className="border-t hairline-2 cursor-pointer hover:bg-[var(--hover)]"
+                    className={"border-t hairline-2 cursor-pointer hover:bg-[var(--hover)]" + (isFadedRun ? " dash-fade-in" : "")}
                   >
                     <td className="px-4 py-3"><StatusDot status={r.status} /></td>
                     <td className="px-4 py-3 mono ink">{r.id.slice(0, 6)}</td>
@@ -1328,10 +1377,23 @@ const App = () => {
 
   const [streamLines, setStreamLines] = useState([]);
 
+  // Global SSE state
+  const [globalConnState, setGlobalConnState] = useState("hidden"); // hidden|live|reconnecting|disconnected
+  const globalEsRef = useRef(null);
+  const globalDisconnTimerRef = useRef(null);
+  const globalHadErrorRef = useRef(false);
+  const finishedRunsDedup = useRef(new Set()); // set of "runId:status"
+  const fadedSlugsRef = useRef(new Set()); // slugs with fade-in animation pending
+  const [fadedSlugs, setFadedSlugs] = useState(new Set());
+
   function secsToClock(secsBefore) {
     const d = new Date(NOW - secsBefore * 1000);
     return d.toTimeString().slice(0, 8);
   }
+
+  // Keep ref to selectedSlug for use inside SSE callbacks.
+  const selectedSlugRef = useRef(selectedSlug);
+  useEffect(() => { selectedSlugRef.current = selectedSlug; }, [selectedSlug]);
 
   // ── fetch pipeline list on mount ──────────────────────────────────
   useEffect(() => {
@@ -1373,6 +1435,173 @@ const App = () => {
       .catch(err => { if (err.name !== 'AbortError') console.error('[dash] fetch runs:', err); });
     return () => ctrl.abort();
   }, [selectedSlug]);
+
+  // ── global EventSource ────────────────────────────────────────────
+  const openGlobalES = useCallback(() => {
+    if (globalEsRef.current) {
+      globalEsRef.current.close();
+    }
+    const es = new EventSource('/api/events');
+    globalEsRef.current = es;
+    globalHadErrorRef.current = false;
+
+    es.onopen = () => {
+      setGlobalConnState("live");
+      if (globalDisconnTimerRef.current) {
+        clearTimeout(globalDisconnTimerRef.current);
+        globalDisconnTimerRef.current = null;
+      }
+      // If we had an error before (reconnect), refetch pipeline list and runs.
+      if (globalHadErrorRef.current) {
+        globalHadErrorRef.current = false;
+        fetch('/api/pipelines')
+          .then(r => r.json())
+          .then(data => setPipelines(data))
+          .catch(err => console.error('[dash] refetch pipelines:', err));
+        const slug = selectedSlugRef.current;
+        if (slug) {
+          fetch('/api/pipelines/' + slug + '/runs')
+            .then(r => r.json())
+            .then(data => setRuns(prev => ({ ...prev, [slug]: data })))
+            .catch(err => console.error('[dash] refetch runs:', err));
+        }
+      }
+    };
+
+    es.onerror = () => {
+      globalHadErrorRef.current = true;
+      if (es.readyState === EventSource.CONNECTING) {
+        setGlobalConnState("reconnecting");
+      } else {
+        setGlobalConnState("disconnected");
+      }
+      if (!globalDisconnTimerRef.current) {
+        globalDisconnTimerRef.current = setTimeout(() => {
+          setGlobalConnState("disconnected");
+          globalDisconnTimerRef.current = null;
+        }, 10000);
+      }
+    };
+
+    es.addEventListener("pipeline:changed", (e) => {
+      const data = JSON.parse(e.data);
+      const { slug, status, deleted } = data;
+      if (!slug) return;
+
+      if (deleted) {
+        // Remove from pipelines list.
+        setPipelines(prev => prev.filter(p => p.slug !== slug));
+        // If selected pipeline was deleted, clear selection.
+        if (selectedSlugRef.current === slug) {
+          setSelectedSlug("__deleted__");
+        }
+        return;
+      }
+
+      setPipelines(prev => {
+        const existing = prev.find(p => p.slug === slug);
+        if (!existing) {
+          // New pipeline — insert and trigger fade-in.
+          const newPipeline = { slug, name: slug, status: status || "ready" };
+          fadedSlugsRef.current = new Set([...fadedSlugsRef.current, slug]);
+          setFadedSlugs(new Set(fadedSlugsRef.current));
+          // Remove fade class after animation completes.
+          setTimeout(() => {
+            fadedSlugsRef.current.delete(slug);
+            setFadedSlugs(new Set(fadedSlugsRef.current));
+          }, 600);
+          return [...prev, newPipeline];
+        }
+        // Status flip — update existing.
+        return prev.map(p => p.slug === slug ? { ...p, status: status || p.status } : p);
+      });
+    });
+
+    es.addEventListener("run:started", (e) => {
+      const data = JSON.parse(e.data);
+      const { slug, run_id, started_at } = data;
+      if (!slug || !run_id) return;
+
+      // Update pipeline last_run optimistically.
+      setPipelines(prev => prev.map(p =>
+        p.slug === slug
+          ? { ...p, last_run: { id: run_id, status: "running", started_at } }
+          : p
+      ));
+
+      // If this slug is selected, insert new run at top with fade-in.
+      if (selectedSlugRef.current === slug) {
+        const newRun = { id: run_id, status: "running", started_at };
+        setRuns(prev => {
+          const existing = (prev[slug] || []).find(r => r.id === run_id);
+          if (existing) return prev; // already present
+          return { ...prev, [slug]: [newRun, ...(prev[slug] || [])] };
+        });
+        // Trigger fade-in for the run row.
+        fadedSlugsRef.current = new Set([...fadedSlugsRef.current, "run:" + run_id]);
+        setFadedSlugs(new Set(fadedSlugsRef.current));
+        setTimeout(() => {
+          fadedSlugsRef.current.delete("run:" + run_id);
+          setFadedSlugs(new Set(fadedSlugsRef.current));
+        }, 600);
+      }
+    });
+
+    es.addEventListener("run:finished", (e) => {
+      const data = JSON.parse(e.data);
+      const { slug, run_id, status, started_at, finished_at } = data;
+      if (!slug || !run_id || !status) return;
+
+      // Dedup: if we already processed this (run_id, terminal_status) pair, skip.
+      const dedupKey = run_id + ":" + status;
+      if (finishedRunsDedup.current.has(dedupKey)) return;
+      finishedRunsDedup.current.add(dedupKey);
+
+      // Update pipeline last_run.
+      setPipelines(prev => prev.map(p => {
+        if (p.slug !== slug) return p;
+        const lr = p.last_run;
+        // Only update if this run is the most recent.
+        if (!lr || lr.id === run_id || !lr.started_at || (started_at && started_at >= lr.started_at)) {
+          return { ...p, last_run: { id: run_id, status, started_at: started_at || (lr && lr.started_at) || "" } };
+        }
+        return p;
+      }));
+
+      // Update run in table if selected slug.
+      if (selectedSlugRef.current === slug) {
+        setRuns(prev => ({
+          ...prev,
+          [slug]: (prev[slug] || []).map(r =>
+            r.id === run_id ? { ...r, status, finished_at: finished_at || r.finished_at } : r
+          ),
+        }));
+        // If viewing this run detail, update it too.
+        setRunDetail(prev => {
+          if (!prev || prev.id !== run_id) return prev;
+          return { ...prev, status, finished_at: finished_at || prev.finished_at };
+        });
+      }
+    });
+
+    return es;
+  }, []);
+
+  // Mount: open global EventSource. Cleanup on unmount.
+  useEffect(() => {
+    const es = openGlobalES();
+    return () => {
+      es.close();
+      if (globalDisconnTimerRef.current) {
+        clearTimeout(globalDisconnTimerRef.current);
+      }
+    };
+  }, [openGlobalES]);
+
+  const retryGlobal = useCallback(() => {
+    setGlobalConnState("reconnecting");
+    openGlobalES();
+  }, [openGlobalES]);
 
   // ── fetch run detail when openRunId changes ───────────────────────
   useEffect(() => {
@@ -1638,16 +1867,19 @@ const App = () => {
 
   return (
     <div className="h-screen flex flex-col">
-      <TopBar pipelines={pipelines} runs={runs} />
+      <TopBar pipelines={pipelines} runs={runs} globalConnState={globalConnState} onRetryGlobal={retryGlobal} />
       <div className="flex flex-1 min-h-0">
         <Sidebar
           pipelines={pipelines}
           runs={runs}
-          selectedSlug={selectedSlug}
+          selectedSlug={selectedSlug === "__deleted__" ? null : selectedSlug}
           onSelect={onSelectPipeline}
+          fadedSlugs={fadedSlugs}
         />
         <main className="flex-1 min-w-0 overflow-y-auto scroll-thin">
-          {!selectedPipeline ? (
+          {selectedSlug === "__deleted__" ? (
+            <PipelineDeletedState />
+          ) : !selectedPipeline ? (
             <div className="p-8 ink-3 text-[13px]">
               {pipelines.length === 0
                 ? "no pipelines yet — corré che y entrá a Create pipeline"
@@ -1674,6 +1906,7 @@ const App = () => {
               onOpenRun={(id) => { setOpenRunId(id); setSelectedStepIdx(0); setRunDetail(null); }}
               onRequestRun={requestRun}
               onResumeDraft={() => alert("Prototype: would run `che new --resume " + selectedPipeline.slug + "` in the user's terminal.")}
+              fadedRunIds={fadedSlugs}
             />
           )}
         </main>

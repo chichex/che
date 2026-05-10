@@ -3,6 +3,10 @@
 // Each (slug, runId) pair can have multiple subscribers. The bus is ref-counted:
 // the first subscriber for a (slug, runId) starts a disk watcher; the last one
 // to unsubscribe stops it.
+//
+// Global subscribers (SubscribeGlobal) receive all events published via
+// PublishGlobal (pipeline:changed, run:started, run:finished). They are
+// independent of per-run subscribers and are not ref-counted.
 package dash
 
 import (
@@ -13,11 +17,16 @@ import (
 type EventType string
 
 const (
-	EventRunStatus    EventType = "run:status"
-	EventStepStart    EventType = "step:start"
-	EventStepEnd      EventType = "step:end"
-	EventStepStdout   EventType = "step:stdout"
+	EventRunStatus     EventType = "run:status"
+	EventStepStart     EventType = "step:start"
+	EventStepEnd       EventType = "step:end"
+	EventStepStdout    EventType = "step:stdout"
 	EventValidatorLoop EventType = "validator:loop"
+
+	// Global event types (emitted by pipelines_watcher and runs_watcher).
+	EventPipelineChanged EventType = "pipeline:changed"
+	EventRunStarted      EventType = "run:started"
+	EventRunFinished     EventType = "run:finished"
 )
 
 // Event is a single SSE event with a typed payload (JSON-marshallable map).
@@ -38,12 +47,19 @@ type subscriber struct {
 	removed bool // set to true when removeSub has processed this subscriber
 }
 
+// globalSubscriber is a subscriber for global events (not tied to a run).
+type globalSubscriber struct {
+	ch      chan Event
+	removed bool
+}
+
 // Bus is a per-run pub/sub bus. Safe for concurrent use.
 type Bus struct {
-	mu      sync.Mutex
-	subs    map[subKey][]*subscriber
-	watchers map[subKey]*watcher
-	runsDir  string
+	mu         sync.Mutex
+	subs       map[subKey][]*subscriber
+	watchers   map[subKey]*watcher
+	runsDir    string
+	globalSubs []*globalSubscriber
 }
 
 // NewBus creates a new Bus serving runs from runsDir.
@@ -53,6 +69,61 @@ func NewBus(runsDir string) *Bus {
 		watchers: make(map[subKey]*watcher),
 		runsDir:  runsDir,
 	}
+}
+
+// SubscribeGlobal registers a new subscriber for global events
+// (pipeline:changed, run:started, run:finished).
+// Returns a receive-only channel and a cancel function.
+// The cancel function MUST be called when done.
+// Buffer size is 256; if the subscriber is too slow, it is dropped and closed.
+func (b *Bus) SubscribeGlobal() (<-chan Event, func()) {
+	ch := make(chan Event, 256)
+	gs := &globalSubscriber{ch: ch}
+
+	b.mu.Lock()
+	b.globalSubs = append(b.globalSubs, gs)
+	b.mu.Unlock()
+
+	cancel := func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		b.removeGlobalSub(gs)
+	}
+	return ch, cancel
+}
+
+// removeGlobalSub removes gs from globalSubs (must hold b.mu). Idempotent.
+func (b *Bus) removeGlobalSub(gs *globalSubscriber) {
+	if gs.removed {
+		return
+	}
+	gs.removed = true
+	newList := b.globalSubs[:0]
+	for _, s := range b.globalSubs {
+		if s != gs {
+			newList = append(newList, s)
+		}
+	}
+	b.globalSubs = newList
+	close(gs.ch)
+}
+
+// PublishGlobal sends a global event to all global subscribers.
+// Slow subscribers (full buffer) are dropped.
+func (b *Bus) PublishGlobal(ev Event) {
+	b.mu.Lock()
+	var slow []*globalSubscriber
+	for _, gs := range b.globalSubs {
+		select {
+		case gs.ch <- ev:
+		default:
+			slow = append(slow, gs)
+		}
+	}
+	for _, gs := range slow {
+		b.removeGlobalSub(gs)
+	}
+	b.mu.Unlock()
 }
 
 // Subscribe registers a new subscriber for (slug, runID).

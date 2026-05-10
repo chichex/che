@@ -7,16 +7,42 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/chichex/che/internal/wizard"
+	"gopkg.in/yaml.v3"
 )
+
+// lastRunSummary holds the minimal info for the most recent run of a pipeline.
+type lastRunSummary struct {
+	ID        string `json:"id"`
+	Status    string `json:"status"`
+	StartedAt string `json:"started_at"`
+}
+
+// lastRunCache is a simple in-memory cache with TTL 1s for lookupLastRun.
+var lastRunCache struct {
+	mu      sync.Mutex
+	entries map[string]lastRunCacheEntry
+}
+
+type lastRunCacheEntry struct {
+	result  *lastRunSummary
+	fetchedAt time.Time
+}
+
+func init() {
+	lastRunCache.entries = make(map[string]lastRunCacheEntry)
+}
 
 // pipelineJSON is the wire shape for GET /api/pipelines (list item).
 type pipelineJSON struct {
-	Slug        string `json:"slug"`
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	Status      string `json:"status"`
+	Slug        string          `json:"slug"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Status      string          `json:"status"`
+	LastRun     *lastRunSummary `json:"last_run,omitempty"`
 }
 
 // pipelineDetailJSON is the wire shape for GET /api/pipelines/:slug.
@@ -116,10 +142,90 @@ func loadPipelinesFromDir(dir string) []struct {
 	return result
 }
 
+// lookupLastRun reads the most-recent run manifest for slug from runsDir.
+// Results are cached with a 1s TTL.
+// Returns nil if no runs exist.
+func lookupLastRun(runsDir, slug string) *lastRunSummary {
+	if runsDir == "" {
+		return nil
+	}
+
+	cacheKey := runsDir + "/" + slug
+
+	lastRunCache.mu.Lock()
+	if entry, ok := lastRunCache.entries[cacheKey]; ok && time.Since(entry.fetchedAt) < time.Second {
+		result := entry.result
+		lastRunCache.mu.Unlock()
+		return result
+	}
+	lastRunCache.mu.Unlock()
+
+	result := fetchLastRun(runsDir, slug)
+
+	lastRunCache.mu.Lock()
+	lastRunCache.entries[cacheKey] = lastRunCacheEntry{result: result, fetchedAt: time.Now()}
+	lastRunCache.mu.Unlock()
+
+	return result
+}
+
+// fetchLastRun performs the actual disk read to find the most recent run.
+func fetchLastRun(runsDir, slug string) *lastRunSummary {
+	slugDir := filepath.Join(runsDir, slug)
+	entries, err := os.ReadDir(slugDir)
+	if err != nil {
+		return nil
+	}
+
+	var (
+		bestID        string
+		bestStatus    string
+		bestStartedAt time.Time
+	)
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		runID := e.Name()
+		manifestPath := filepath.Join(slugDir, runID, "manifest.yaml")
+		data, err := os.ReadFile(manifestPath)
+		if err != nil {
+			continue
+		}
+		// Minimal parse: only need status and started_at.
+		var m struct {
+			Status    string    `yaml:"status"`
+			StartedAt time.Time `yaml:"started_at"`
+		}
+		if err := yaml.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		if m.StartedAt.IsZero() {
+			continue
+		}
+		if bestID == "" || m.StartedAt.After(bestStartedAt) {
+			bestID = runID
+			bestStatus = m.Status
+			bestStartedAt = m.StartedAt
+		}
+	}
+
+	if bestID == "" {
+		return nil
+	}
+	return &lastRunSummary{
+		ID:        bestID,
+		Status:    bestStatus,
+		StartedAt: bestStartedAt.Format(time.RFC3339),
+	}
+}
+
 // handleListPipelines returns an http.HandlerFunc for GET /api/pipelines.
 // It reads all *.yaml pipelines from dir, skipping corrupt files.
 // Returns JSON array (empty array if dir is empty or missing).
-func handleListPipelines(dir string) http.HandlerFunc {
+// runsDir is used to populate last_run for each pipeline.
+func handleListPipelines(dir, runsDir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		pairs := loadPipelinesFromDir(dir)
 		list := make([]pipelineJSON, 0, len(pairs))
@@ -129,6 +235,7 @@ func handleListPipelines(dir string) http.HandlerFunc {
 				Name:        pair.p.Name,
 				Description: pair.p.Description,
 				Status:      pipelineStatus(pair.p),
+				LastRun:     lookupLastRun(runsDir, pair.slug),
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")

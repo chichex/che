@@ -74,6 +74,64 @@ func TestBus_SlowDrop(t *testing.T) {
 	}
 }
 
+// TestBus_SubscribeGlobal verifies that global subscribers receive PublishGlobal
+// events and do NOT receive per-run Publish events (and vice versa).
+func TestBus_SubscribeGlobal(t *testing.T) {
+	b := NewBus("/tmp")
+
+	// Global subscriber.
+	gCh, gCancel := b.SubscribeGlobal()
+	defer gCancel()
+
+	// Per-run subscriber.
+	rCh, rCancel := b.Subscribe("sl", "r99")
+	defer rCancel()
+
+	// Publish a global event.
+	globalEv := Event{Type: EventPipelineChanged, Payload: map[string]any{"slug": "test", "status": "ready"}}
+	b.PublishGlobal(globalEv)
+
+	// Global subscriber should receive it.
+	select {
+	case got := <-gCh:
+		if got.Type != EventPipelineChanged {
+			t.Fatalf("global sub: want %s, got %s", EventPipelineChanged, got.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout: global subscriber did not receive global event")
+	}
+
+	// Per-run subscriber should NOT receive global event.
+	select {
+	case ev := <-rCh:
+		t.Fatalf("per-run sub should not receive global event, got %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+		// Expected: nothing.
+	}
+
+	// Publish a per-run event.
+	runEv := Event{Type: EventRunStatus, Payload: map[string]any{"status": "running"}}
+	b.Publish("sl", "r99", runEv)
+
+	// Per-run subscriber should receive it.
+	select {
+	case got := <-rCh:
+		if got.Type != EventRunStatus {
+			t.Fatalf("per-run sub: want %s, got %s", EventRunStatus, got.Type)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout: per-run subscriber did not receive per-run event")
+	}
+
+	// Global subscriber should NOT receive per-run event.
+	select {
+	case ev := <-gCh:
+		t.Fatalf("global sub should not receive per-run event, got %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+		// Expected: nothing.
+	}
+}
+
 // TestBus_UnsubscribeStopsWatcher verifies that canceling the sole subscriber
 // removes the watcher entry from the bus.
 func TestBus_UnsubscribeStopsWatcher(t *testing.T) {

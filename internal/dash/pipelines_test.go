@@ -44,7 +44,7 @@ func getJSON(t *testing.T, handler http.HandlerFunc, path string) *httptest.Resp
 
 func TestListEmpty(t *testing.T) {
 	dir := t.TempDir()
-	rr := getJSON(t, handleListPipelines(dir), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", rr.Code)
 	}
@@ -64,7 +64,7 @@ func TestListOneReady(t *testing.T) {
 		Description: "test ready",
 		Steps:       []wizard.Step{{Name: "step1", CLI: "claude", Kind: "prompt"}},
 	})
-	rr := getJSON(t, handleListPipelines(dir), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
 	var list []pipelineJSON
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -87,7 +87,7 @@ func TestListOneDraft(t *testing.T) {
 		Name:   "Draft Pipe",
 		Status: draftStatus,
 	})
-	rr := getJSON(t, handleListPipelines(dir), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
 	var list []pipelineJSON
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -107,7 +107,7 @@ func TestListMixed(t *testing.T) {
 		Name:   "Draft",
 		Status: &wizard.Status{Stage: wizard.StageStep},
 	})
-	rr := getJSON(t, handleListPipelines(dir), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
 	var list []pipelineJSON
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -132,7 +132,7 @@ func TestListCorruptExcluded(t *testing.T) {
 	writeCorrupt(t, dir, "bad-pipe")
 	writeYAML(t, dir, "good-pipe", wizard.Pipeline{Name: "Good"})
 
-	rr := getJSON(t, handleListPipelines(dir), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
 	var list []pipelineJSON
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
