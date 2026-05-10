@@ -341,7 +341,7 @@ func TestDispatcherRouting(t *testing.T) {
 	// Plant stdout for step 0
 	plantStdoutLog(t, runsDir, "my-pipe", "run1", 0, "stdout content")
 
-	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir)
+	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir, NewBus(runsDir))
 
 	cases := []struct {
 		path           string

@@ -58,10 +58,13 @@ func Serve(ctx context.Context, opts Options) error {
 		runsDir = filepath.Join(home, ".che", "runs")
 	}
 
+	// Singleton bus for SSE per-run streaming.
+	bus := NewBus(runsDir)
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
 	mux.HandleFunc("/api/pipelines", handleListPipelines(pipelinesDir))
-	mux.HandleFunc("/api/pipelines/", dispatchPipelinesPrefix(pipelinesDir, runsDir))
+	mux.HandleFunc("/api/pipelines/", dispatchPipelinesPrefix(pipelinesDir, runsDir, bus))
 
 	srv := &http.Server{
 		Handler:           mux,

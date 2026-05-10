@@ -325,16 +325,18 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 // to sub-handlers based on path segments.
 //
 // Supported routes:
-//   /api/pipelines/<slug>                              → pipeline detail (spec 1)
-//   /api/pipelines/<slug>/runs                         → list runs
-//   /api/pipelines/<slug>/runs/<runId>                 → get run
-//   /api/pipelines/<slug>/runs/<runId>/steps/<idx>/stdout → get step stdout
+//   /api/pipelines/<slug>                                  → pipeline detail (spec 1)
+//   /api/pipelines/<slug>/runs                             → list runs
+//   /api/pipelines/<slug>/runs/<runId>                     → get run
+//   /api/pipelines/<slug>/runs/<runId>/events              → SSE per-run stream (spec 3)
+//   /api/pipelines/<slug>/runs/<runId>/steps/<idx>/stdout  → get step stdout
 //
 // Any other pattern returns 404.
-func dispatchPipelinesPrefix(pipelinesDir, runsDir string) http.HandlerFunc {
+func dispatchPipelinesPrefix(pipelinesDir, runsDir string, bus *Bus) http.HandlerFunc {
 	listRunsH := handleListRuns(runsDir)
 	getRunH := handleGetRun(runsDir)
 	getStdoutH := handleGetStepStdout(runsDir)
+	getEventsH := handleEvents(runsDir, bus)
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Strip the /api/pipelines/ prefix and split into segments.
@@ -375,6 +377,16 @@ func dispatchPipelinesPrefix(pipelinesDir, runsDir string) http.HandlerFunc {
 			}
 			r2 := requestWithHeaders(r, map[string]string{hdrSlug: slug, hdrRunID: runID})
 			getRunH(w, r2)
+
+		case 4:
+			// /api/pipelines/<slug>/runs/<runId>/events
+			slug, sub1, runID, sub2 := segs[0], segs[1], segs[2], segs[3]
+			if sub1 != "runs" || sub2 != "events" {
+				writeJSONError(w, http.StatusNotFound, "not found")
+				return
+			}
+			r2 := requestWithHeaders(r, map[string]string{hdrSlug: slug, hdrRunID: runID})
+			getEventsH(w, r2)
 
 		case 6:
 			// /api/pipelines/<slug>/runs/<runId>/steps/<idx>/stdout

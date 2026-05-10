@@ -642,10 +642,19 @@ const PipelineDetail = ({ pipeline, runs, onOpenRun, onRequestRun, onResumeDraft
 // Run detail (live + frozen share the same view)
 // ─────────────────────────────────────────────────────────────────────
 
-const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onResume, onSelectStep, selectedStepIdx }) => {
+const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onResume, onSelectStep, selectedStepIdx, onRunUpdate }) => {
   const [paneView, setPaneView] = useState("output");
   const [stdoutText, setStdoutText] = useState(null); // null=not fetched, ""=empty, str=content
   const [stdoutLoading, setStdoutLoading] = useState(false);
+
+  // SSE state: per-step live stdout lines (idx → string[]) and dedup sets.
+  const [stdoutLines, setStdoutLines] = useState({}); // { [stepIdx]: string[] }
+  const nextLineOrdinal = useRef({});                  // { [stepIdx]: int }
+  const seenKeys = useRef(new Set());                  // dedup: "step:<i>:start", etc.
+  const [sseStatus, setSseStatus] = useState("idle"); // idle | live | reconnecting | disconnected
+  const disconnectTimerRef = useRef(null);
+  const outputScrollRef = useRef(null);
+  const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
 
   // run may be null while the detail fetch is in flight — guard defensively
   const steps = run?.steps || [];
@@ -663,12 +672,118 @@ const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onRes
     setStdoutLoading(false);
   }, [selectedStepIdx, runId]);
 
-  // lazy fetch stdout when tab is "output" and not yet loaded
+  // ── SSE lifecycle ─────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!slug || !runId || !run) return;
+    const liveStatuses = ["running", "paused"];
+    if (!liveStatuses.includes(run.status)) return;
+
+    const url = '/api/pipelines/' + slug + '/runs/' + runId + '/events';
+    const es = new EventSource(url);
+
+    es.onopen = () => {
+      setSseStatus("live");
+      if (disconnectTimerRef.current) {
+        clearTimeout(disconnectTimerRef.current);
+        disconnectTimerRef.current = null;
+      }
+    };
+
+    es.onerror = () => {
+      if (es.readyState === EventSource.CONNECTING) {
+        setSseStatus("reconnecting");
+      } else {
+        setSseStatus("disconnected");
+      }
+      // Start 10s timer to declare permanently disconnected.
+      if (!disconnectTimerRef.current) {
+        disconnectTimerRef.current = setTimeout(() => {
+          setSseStatus("disconnected");
+          disconnectTimerRef.current = null;
+        }, 10000);
+      }
+    };
+
+    es.addEventListener("run:status", (e) => {
+      const data = JSON.parse(e.data);
+      if (onRunUpdate) onRunUpdate({ type: "run:status", ...data });
+      if (data.status && data.status !== "running" && data.status !== "paused") {
+        // Terminal — close and refetch.
+        es.close();
+        setSseStatus("idle");
+        if (onRunUpdate) onRunUpdate({ type: "refetch" });
+      }
+    });
+
+    es.addEventListener("step:start", (e) => {
+      const data = JSON.parse(e.data);
+      const key = "step:" + data.idx + ":start";
+      if (seenKeys.current.has(key)) return;
+      seenKeys.current.add(key);
+      if (onRunUpdate) onRunUpdate({ type: "step:start", ...data });
+    });
+
+    es.addEventListener("step:end", (e) => {
+      const data = JSON.parse(e.data);
+      const key = "step:" + data.idx + ":end";
+      if (seenKeys.current.has(key)) return;
+      seenKeys.current.add(key);
+      if (onRunUpdate) onRunUpdate({ type: "step:end", ...data });
+    });
+
+    es.addEventListener("step:stdout", (e) => {
+      const data = JSON.parse(e.data);
+      const idx = data.idx;
+      const expected = nextLineOrdinal.current[idx] || 0;
+      if (data.ordinal < expected) return; // duplicate
+      nextLineOrdinal.current[idx] = data.ordinal + 1;
+      setStdoutLines(prev => ({
+        ...prev,
+        [idx]: [...(prev[idx] || []), data.line],
+      }));
+    });
+
+    es.addEventListener("validator:loop", (e) => {
+      const data = JSON.parse(e.data);
+      const key = "validator:" + data.idx + ":" + data.loop;
+      if (seenKeys.current.has(key)) return;
+      seenKeys.current.add(key);
+      if (onRunUpdate) onRunUpdate({ type: "validator:loop", ...data });
+    });
+
+    return () => {
+      es.close();
+      if (disconnectTimerRef.current) {
+        clearTimeout(disconnectTimerRef.current);
+        disconnectTimerRef.current = null;
+      }
+    };
+  }, [slug, runId, run?.status]);
+
+  // ── auto-scroll ───────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!autoScrollEnabled) return;
+    const el = outputScrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [stdoutLines, autoScrollEnabled]);
+
+  const handleOutputScroll = (e) => {
+    const el = e.target;
+    const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setAutoScrollEnabled(distFromBottom <= 50);
+  };
+
+  // lazy fetch stdout when tab is "output" and not yet loaded (frozen runs)
   useEffect(() => {
     if (paneView !== "output") return;
     if (stdoutText !== null) return; // already fetched or loading
     if (!slug || !runId || selectedStep == null) return;
     if (selectedStep.status === "pending") return;
+    // If we have live SSE lines for this step, don't fetch from disk.
+    if (stdoutLines[selectedStepIdx] && stdoutLines[selectedStepIdx].length > 0) return;
+    // Only fetch if run is not live (frozen).
+    if (run?.status === "running" || run?.status === "paused") return;
 
     setStdoutLoading(true);
     const ctrl = new AbortController();
@@ -689,7 +804,7 @@ const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onRes
         }
       });
     return () => ctrl.abort();
-  }, [paneView, selectedStepIdx, runId, slug, stdoutText]);
+  }, [paneView, selectedStepIdx, runId, slug, stdoutText, run?.status]);
 
   if (!run) {
     return (
@@ -848,6 +963,16 @@ const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onRes
               )}
             </div>
             <div className="flex items-center gap-2 mono text-[10.5px] ink-3">
+              {/* SSE connection badge */}
+              {sseStatus === "live" && (
+                <span className="badge badge-running"><span className="dot dot-running" /> live</span>
+              )}
+              {sseStatus === "reconnecting" && (
+                <span className="badge badge-paused"><span className="dot dot-paused" /> reconnecting…</span>
+              )}
+              {sseStatus === "disconnected" && (
+                <span className="badge badge-failed"><span className="dot dot-failed" /> disconnected</span>
+              )}
               {paneView === "definition"
                 ? <span>step {(selectedStepIdx+1).toString().padStart(2,"00")} / {steps.length.toString().padStart(2,"00")}</span>
                 : paneView === "validator"
@@ -856,26 +981,50 @@ const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onRes
             </div>
           </div>
 
-          {paneView === "output" ? (
-            <div className="stream flex-1 overflow-y-auto scroll-thin px-4 py-3">
-              {selectedStep?.status === "pending" ? (
-                <div className="ink-3 text-[12.5px]">step pendiente — aún no corrió</div>
-              ) : stdoutLoading ? (
-                <div className="ink-3 text-[12.5px]">cargando…</div>
-              ) : stdoutText === null ? null : stdoutText === '' ? (
-                <div className="ink-3 text-[12.5px]">sin stdout registrado</div>
-              ) : (
-                <>
-                  {selectedStep?.error && (
-                    <div className="mb-3 px-3 py-2 rounded text-[12px] mono" style={{background:"rgba(var(--failed-rgb,220,38,38),0.08)",color:"var(--failed)"}}>
-                      {selectedStep.error}
-                    </div>
-                  )}
-                  <pre className="mono text-[12px] ink whitespace-pre-wrap">{stdoutText}</pre>
-                </>
-              )}
-            </div>
-          ) : paneView === "definition" ? (
+          {paneView === "output" ? (() => {
+            // Determine output source: SSE lines (live) or fetched text (frozen).
+            const liveLines = stdoutLines[selectedStepIdx];
+            const hasLiveLines = liveLines && liveLines.length > 0;
+            const isLiveRun = run?.status === "running" || run?.status === "paused";
+            return (
+              <div
+                ref={outputScrollRef}
+                onScroll={handleOutputScroll}
+                className="stream flex-1 overflow-y-auto scroll-thin px-4 py-3"
+              >
+                {selectedStep?.status === "pending" ? (
+                  <div className="ink-3 text-[12.5px]">step pendiente — aún no corrió</div>
+                ) : hasLiveLines ? (
+                  <>
+                    {selectedStep?.error && (
+                      <div className="mb-3 px-3 py-2 rounded text-[12px] mono" style={{background:"rgba(220,38,38,0.08)",color:"var(--failed)"}}>
+                        {selectedStep.error}
+                      </div>
+                    )}
+                    <pre className="mono text-[12px] ink whitespace-pre-wrap">{liveLines.join("\n")}</pre>
+                    {isLiveRun && selectedStep?.status === "running" && (
+                      <span className="caret" />
+                    )}
+                  </>
+                ) : isLiveRun && selectedStep?.status === "running" ? (
+                  <div className="ink-3 text-[12.5px]">esperando stdout… <span className="caret" /></div>
+                ) : stdoutLoading ? (
+                  <div className="ink-3 text-[12.5px]">cargando…</div>
+                ) : stdoutText === null ? null : stdoutText === '' ? (
+                  <div className="ink-3 text-[12.5px]">sin stdout registrado</div>
+                ) : (
+                  <>
+                    {selectedStep?.error && (
+                      <div className="mb-3 px-3 py-2 rounded text-[12px] mono" style={{background:"rgba(220,38,38,0.08)",color:"var(--failed)"}}>
+                        {selectedStep.error}
+                      </div>
+                    )}
+                    <pre className="mono text-[12px] ink whitespace-pre-wrap">{stdoutText}</pre>
+                  </>
+                )}
+              </div>
+            );
+          })() : paneView === "definition" ? (
             <div className="flex-1 overflow-y-auto scroll-thin px-6 py-5">
               {selectedStep ? (
                 <div>
@@ -1400,6 +1549,87 @@ const App = () => {
     setTimeout(() => setToast(null), 1800);
   };
 
+  // ── SSE run update handler ────────────────────────────────────────────
+  // Called by RunDetail when SSE events arrive. Updates runDetail and runs
+  // state so steps column and badges refresh in real time.
+  const handleRunUpdate = useCallback((msg) => {
+    if (!selectedSlug || !openRunId) return;
+
+    if (msg.type === "refetch") {
+      // Re-fetch run detail after terminal status.
+      fetch('/api/pipelines/' + selectedSlug + '/runs/' + openRunId)
+        .then(r => r.json())
+        .then(data => {
+          setRunDetail(data);
+          setRuns(prev => ({
+            ...prev,
+            [selectedSlug]: (prev[selectedSlug] || []).map(r =>
+              r.id === openRunId ? { ...r, status: data.status, finished_at: data.finished_at } : r
+            ),
+          }));
+        })
+        .catch(err => console.error('[dash] refetch run detail:', err));
+      return;
+    }
+
+    if (msg.type === "run:status") {
+      setRunDetail(prev => prev ? { ...prev, status: msg.status } : prev);
+      setRuns(prev => ({
+        ...prev,
+        [selectedSlug]: (prev[selectedSlug] || []).map(r =>
+          r.id === openRunId ? { ...r, status: msg.status } : r
+        ),
+      }));
+      return;
+    }
+
+    if (msg.type === "step:start") {
+      setRunDetail(prev => {
+        if (!prev) return prev;
+        const steps = prev.steps.map(s =>
+          s.idx === msg.idx ? { ...s, status: "running", started_at: msg.started_at } : s
+        );
+        return { ...prev, steps };
+      });
+      return;
+    }
+
+    if (msg.type === "step:end") {
+      setRunDetail(prev => {
+        if (!prev) return prev;
+        const steps = prev.steps.map(s =>
+          s.idx === msg.idx
+            ? { ...s, status: msg.status, exit_code: msg.exit_code, finished_at: msg.finished_at, error: msg.error || s.error }
+            : s
+        );
+        return { ...prev, steps };
+      });
+      return;
+    }
+
+    if (msg.type === "validator:loop") {
+      setRunDetail(prev => {
+        if (!prev) return prev;
+        const steps = prev.steps.map(s => {
+          if (s.idx !== msg.idx) return s;
+          const v = s.validator || { loops_run: 0, max_loops: msg.max_loops };
+          return {
+            ...s,
+            validator: {
+              ...v,
+              loops_run: msg.loop,
+              max_loops: msg.max_loops,
+              final_verdict: msg.verdict || v.final_verdict,
+              last_feedback: msg.feedback || v.last_feedback,
+            },
+          };
+        });
+        return { ...prev, steps };
+      });
+      return;
+    }
+  }, [selectedSlug, openRunId]);
+
   const onSelectPipeline = (slug) => {
     setSelectedSlug(slug);
     setOpenRunId(null);
@@ -1435,6 +1665,7 @@ const App = () => {
               onBack={() => { setOpenRunId(null); setRunDetail(null); }}
               onCancel={cancelRun}
               onResume={resumeRun}
+              onRunUpdate={handleRunUpdate}
             />
           ) : (
             <PipelineDetail
