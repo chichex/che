@@ -118,6 +118,7 @@ Cada run persiste un manifest atómico (`.tmp` + rename) bajo `~/.che/runs/<run-
 |---------|----------|
 | `che doctor` | Chequea que los 4 CLIs estén instalados, gh auth, etc. |
 | `che upgrade` | Actualiza che a la última versión publicada (`--check` solo informa). |
+| `che dash` | Levanta el dashboard local en `127.0.0.1:7878` (fallback a puerto efímero si está ocupado) y abre el browser. Flags: `--port` y `--no-open`. v1 con datos mockeados — wire al runner real es próximo. |
 
 ## Desarrollo
 
