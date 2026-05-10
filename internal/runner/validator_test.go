@@ -133,6 +133,150 @@ verdict: ok
 	}
 }
 
+// TestParseVerdict_ApproveAliasOK cubre el alias 3-vias del che-funnel:
+// `verdict: approve` se canonicaliza a VerdictOk para que el loop avance
+// igual que con `verdict: ok`.
+func TestParseVerdict_ApproveAliasOK(t *testing.T) {
+	stdout := `verdict: approve
+`
+	v := parseVerdict(stdout)
+	if v.Status != VerdictOk {
+		t.Errorf("expected approve to map to ok, got %q", v.Status)
+	}
+	if v.Feedback != "" {
+		t.Errorf("expected empty feedback for ok, got %q", v.Feedback)
+	}
+}
+
+// TestParseVerdict_ChangesRequestedMapsToFail cubre el otro extremo del
+// alias 3-vias: changes_requested cae a fail y, sin feedback explicito,
+// se preserva el token original como Feedback para el modal RP.
+func TestParseVerdict_ChangesRequestedMapsToFail(t *testing.T) {
+	stdout := `verdict: changes_requested
+`
+	v := parseVerdict(stdout)
+	if v.Status != VerdictFail {
+		t.Errorf("expected changes_requested to map to fail, got %q", v.Status)
+	}
+	if v.Feedback != "verdict: changes_requested" {
+		t.Errorf("expected feedback to preserve original token, got %q", v.Feedback)
+	}
+}
+
+// TestParseVerdict_NeedsHumanMapsToFail cubre needs_human del alias
+// 3-vias: tambien fail con el token preservado en feedback. running.go
+// no diferencia needs_human de changes_requested (ambos disparan retry o
+// pause segun on_max_loops); el token ayuda al humano en el modal.
+func TestParseVerdict_NeedsHumanMapsToFail(t *testing.T) {
+	stdout := `verdict: needs_human
+`
+	v := parseVerdict(stdout)
+	if v.Status != VerdictFail {
+		t.Errorf("expected needs_human to map to fail, got %q", v.Status)
+	}
+	if v.Feedback != "verdict: needs_human" {
+		t.Errorf("expected feedback to preserve original token, got %q", v.Feedback)
+	}
+}
+
+// TestParseVerdict_ChangesRequestedKeepsExplicitFeedback cubre que cuando
+// el validator si emitio un feedback explicito, parseVerdict lo respeta
+// y NO sobrescribe con el token original.
+func TestParseVerdict_ChangesRequestedKeepsExplicitFeedback(t *testing.T) {
+	stdout := `verdict: changes_requested
+feedback: |
+  los criterios no son testeables
+`
+	v := parseVerdict(stdout)
+	if v.Status != VerdictFail {
+		t.Errorf("expected fail, got %q", v.Status)
+	}
+	if !strings.Contains(v.Feedback, "los criterios no son testeables") {
+		t.Errorf("expected explicit feedback preserved, got %q", v.Feedback)
+	}
+}
+
+// TestParseVerdict_CodexStreamJSON cubre el shape real de codex --json:
+// el verdict del agente viene enterrado dentro de un agent_message. Sin la
+// extraccion stream-json, parseVerdict devuelve "no verdict block" y el
+// loop nunca avanza (bug observado en el run del 2026-05-10 sobre #99).
+func TestParseVerdict_CodexStreamJSON(t *testing.T) {
+	stdout := `{"type":"thread.started","thread_id":"abc"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"voy a validar el plan"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"gh issue view 99","aggregated_output":"verdict: ok\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_14","type":"agent_message","text":"verdict: approve"}}
+{"type":"turn.completed","usage":{"input_tokens":1000}}
+`
+	v := parseVerdict(stdout)
+	if v.Status != VerdictOk {
+		t.Errorf("expected approve from codex stream-json to map to ok, got %q (feedback=%q)", v.Status, v.Feedback)
+	}
+}
+
+// TestParseVerdict_CodexStreamJSON_FailWins cubre el caso donde codex
+// emite un agent_message intermedio con verdict: approve pero el final
+// dice changes_requested — gana el ultimo (last-block-wins se preserva
+// despues de extraer texto).
+func TestParseVerdict_CodexStreamJSON_FailWins(t *testing.T) {
+	stdout := `{"type":"item.completed","item":{"type":"agent_message","text":"draft inicial: verdict: approve"}}
+{"type":"item.completed","item":{"type":"agent_message","text":"verdict: changes_requested\nfeedback: |\n  los criterios no son testeables"}}
+`
+	v := parseVerdict(stdout)
+	if v.Status != VerdictFail {
+		t.Errorf("expected last codex agent_message to win, got %q", v.Status)
+	}
+	if !strings.Contains(v.Feedback, "criterios no son testeables") {
+		t.Errorf("expected feedback from last block, got %q", v.Feedback)
+	}
+}
+
+// TestParseVerdict_ClaudeStreamJSON cubre el shape de claude --output-format
+// stream-json --verbose: el verdict viene en assistant.message.content[].text.
+// command_executions y tool_use no deben confundir al parser.
+func TestParseVerdict_ClaudeStreamJSON(t *testing.T) {
+	stdout := `{"type":"system","subtype":"init"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"reviso el plan"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{}}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"verdict: approve"}]}}
+{"type":"result","subtype":"success"}
+`
+	v := parseVerdict(stdout)
+	if v.Status != VerdictOk {
+		t.Errorf("expected approve from claude stream-json to map to ok, got %q", v.Status)
+	}
+}
+
+// TestParseVerdict_RawStdoutFallback cubre el camino sin stream-json
+// (validator gemini/opencode raw text): si nada parece JSON, parseVerdict
+// debe seguir trabajando sobre el stdout crudo como antes.
+func TestParseVerdict_RawStdoutFallback(t *testing.T) {
+	stdout := `Algun razonamiento del modelo en texto plano.
+
+verdict: ok
+`
+	v := parseVerdict(stdout)
+	if v.Status != VerdictOk {
+		t.Errorf("expected ok from raw text validator, got %q", v.Status)
+	}
+}
+
+// TestParseVerdict_StreamJSONNoVerdict cubre el caso donde el validator
+// emitio JSON correcto pero ningun agent_message contiene verdict — el
+// parser cae a "no verdict block" como antes.
+func TestParseVerdict_StreamJSONNoVerdict(t *testing.T) {
+	stdout := `{"type":"item.completed","item":{"type":"agent_message","text":"olvide emitir el verdict"}}
+{"type":"turn.completed"}
+`
+	v := parseVerdict(stdout)
+	if v.Status != VerdictFail {
+		t.Errorf("expected fail when verdict missing, got %q", v.Status)
+	}
+	if v.Feedback != "no verdict block" {
+		t.Errorf("expected feedback 'no verdict block', got %q", v.Feedback)
+	}
+}
+
 // TestNewValidatorRun_Defaults cubre los defaults del ValidatorRun cuando
 // el yaml omite max_loops / on_max_loops (defensivo — el wizard fuerza
 // valores razonables pero un yaml a mano podria omitirlos).

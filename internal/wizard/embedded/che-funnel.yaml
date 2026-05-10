@@ -360,7 +360,7 @@ steps:
         TODOS los issues (el peor gana: needs_human > changes_requested >
         approve), para que max_loops/on_max_loops decidan continuar:
 
-            VALIDATOR_VERDICT: <approve|changes_requested|needs_human>
+            verdict: <approve|changes_requested|needs_human>
 
         Bloque OUTPUT del explore:
         <<<
@@ -565,7 +565,7 @@ steps:
 
         Devolvé al runner el verdict consolidado (peor gana):
 
-            VALIDATOR_VERDICT: <approve|changes_requested|needs_human>
+            verdict: <approve|changes_requested|needs_human>
 
         Bloque OUTPUT del execute:
         <<<
