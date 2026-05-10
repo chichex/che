@@ -28,16 +28,23 @@ make install
 
 ### Versión beta (pre-release)
 
-Para probar features en desarrollo antes del release estable:
+Las versiones beta se publican con tags `vX.Y.Z-rc.N`. No se garantiza estabilidad de API ni backward compatibility.
 
 ```sh
+# Primera instalación
 brew install --cask chichex/tap/che-beta
-che-beta
+
+# Upgrade a una versión nueva
+brew update                       # refresca el tap local
+brew upgrade --cask che-beta      # detecta versión nueva y upgradea
+
+# Verificar
+che-beta --version
 ```
 
-El cask beta instala el comando `che-beta`, así puede convivir con el estable (`che`).
+`brew install` es no-op si el cask ya está instalado: NO upgradea. Si `brew upgrade` no detecta cambio (el cask deshabilita livecheck — lo regenera goreleaser en cada release), forzá con `brew reinstall --cask che-beta`.
 
-Las versiones beta se publican con tags `vX.Y.Z-rc.N`. No se garantiza estabilidad de API ni backward compatibility.
+El cask beta instala el comando como `che-beta` (no `che`), así puede convivir con el estable. Para correr el RC invocá `che-beta` directamente — `che` sigue apuntando al binario estable.
 
 ## Uso
 
