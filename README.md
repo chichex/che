@@ -57,7 +57,7 @@ La TUI tiene 5 entradas:
 
 | # | Entrada | Qué hace |
 |---|---------|----------|
-| 1 | **My pipelines** | Lista los pipelines en `~/.che/pipelines/`, mezclando ready y drafts, con chip del último run por row. Acciones: <kbd>enter</kbd> reanuda un draft o **ejecuta** un ready (entra al runner R0→R1→R2→R3→R4/RF), <kbd>e</kbd> reedita un ready, <kbd>d</kbd> borra (con confirm), <kbd>y</kbd> abre el YAML en `$EDITOR`, <kbd>r</kbd> abre la sub-screen "Run history" del row. |
+| 1 | **My pipelines** | Lista los pipelines en `~/.che/pipelines/`, mezclando ready y drafts, con chip del último run por row. Incluye el pipeline default `che-funnel` (embebido en el binario, chip `[default]`) que aparece siempre — replica el embudo idea→plan→ejecución→close del che clásico (v0.0.82). Acciones: <kbd>enter</kbd> reanuda un draft o **ejecuta** un ready (entra al runner R0→R1→R2→R3→R4/RF), <kbd>e</kbd> reedita un ready, <kbd>d</kbd> borra (con confirm), <kbd>y</kbd> abre el YAML en `$EDITOR`, <kbd>r</kbd> abre la sub-screen "Run history" del row. |
 | 2 | **Create pipeline** | Wizard que termina en un YAML ready en `~/.che/pipelines/<slug>.yaml`. Persistencia incremental (el archivo es "draft" mientras el wizard no haya cerrado el bloque `status`; se vuelve "ready" al finalizar). Incluye prompt review IA opcional sobre cada step. |
 | 3 | **Crear pipeline con IA** | Genera un pipeline a partir de una descripción libre, lo deja en formato draft listo para revisar en el wizard. |
 | 4 | **See skills** | Detecta los skills instalados en los 4 CLIs (claude / codex / gemini / opencode) y permite abrir cada `SKILL.md` en VS Code. Solo lectura. |
