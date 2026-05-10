@@ -80,7 +80,6 @@ var (
 	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5555")).Bold(true)
 	okStyleWizard = lipgloss.NewStyle().Foreground(lipgloss.Color("#50FA7B")).Bold(true)
 	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#6272A4"))
-	pendingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFB86C"))
 	selectedItem = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF79C6")).Bold(true)
 	// selectedOff es la pill "seleccionada pero la fila no tiene foco". Sin
 	// este tono dedicado, mutedItem (#F8F8F2) se confunde con el texto

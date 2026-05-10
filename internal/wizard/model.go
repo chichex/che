@@ -378,21 +378,6 @@ type model struct {
 	width int
 }
 
-// installedCLIs returns the names of the detected CLIs that are installed.
-// Used by S2 to disable pills (B4) — no installed cli == cannot save.
-func (m *model) installedCLIs() []string {
-	if !m.skillsCacheSet {
-		return nil
-	}
-	out := make([]string, 0, len(m.skillsCache))
-	for _, c := range m.skillsCache {
-		if c.Installed {
-			out = append(out, c.Name)
-		}
-	}
-	return out
-}
-
 // skillsForCLI looks up the detected skills for a given cli name. Returns
 // nil if the cli isn't installed or wasn't detected.
 func (m *model) skillsForCLI(name string) []skills.Skill {
