@@ -54,8 +54,9 @@ func TestTUI_MenuRoutesItem2ToWizard(t *testing.T) {
 }
 
 // TestTUI_MenuItem1OpensMyPipelines valida H9: digit 1 abre la pantalla
-// "My pipelines"; con HOME limpio renderiza el placeholder vacio. q sale
-// con exit 0.
+// "My pipelines". Con HOME limpio el lister muestra al menos el builtin
+// che-funnel con chip [default]; el footer con la ayuda es la senal mas
+// estable para detectar que entramos al lister. q sale con exit 0.
 func TestTUI_MenuItem1OpensMyPipelines(t *testing.T) {
 	t.Parallel()
 	env := harness.New(t)
@@ -70,7 +71,7 @@ func TestTUI_MenuItem1OpensMyPipelines(t *testing.T) {
 	if err := p.Send("1"); err != nil {
 		t.Fatalf("send 1: %v", err)
 	}
-	if !p.WaitForOutputSince(t, mark, "no pipelines yet", 3*time.Second) {
+	if !p.WaitForOutputSince(t, mark, "navegar", 3*time.Second) {
 		t.Fatalf("My pipelines screen never rendered\n%s", p.Since(mark))
 	}
 	if err := p.Send("q"); err != nil {

@@ -1,0 +1,691 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# che-funnel — pipeline default que replica el che clásico (v0.0.82) sobre
+# el modelo nuevo de pipelines. Toda la state machine de GitHub (labels
+# che:*, issues, PRs, worktrees, comments, scoring) la dirigen los prompts
+# vía tool use de los CLIs (gh/git). El runner del nuevo che no necesita
+# lógica adicional: este archivo es self-contained.
+#
+# Diferencias intencionales con v0.0.82:
+#   1. iterate desaparece como step manual. Cada validator tiene max_loops=3,
+#      así que si el verdict es changes_requested el step se re-corre con
+#      feedback hasta converger o agotar el cap.
+#   2. close postea un template de scoring (1-10 en completitud / fidelidad /
+#      alineación) como comment del PR. El humano lo llena fuera del pipeline.
+#      No hay gate humano en medio del run.
+#   3. El validator de cada step usa codex en lugar de claude para reducir
+#      groupthink (cross-CLI review). Si el usuario solo tiene claude
+#      instalado, puede editar el YAML o borrar el bloque validator.
+#
+# Permisos requeridos por los CLIs invocados:
+#   - gh (issue create / edit / comment / view; pr create / view / diff /
+#     checks / merge / ready)
+#   - git (worktree, add, commit, push, fetch, merge)
+# Asegurate que estén en la allowlist del CLI elegido (claude/codex/gemini/
+# opencode). claude por default los pide en confirm; en pipelines no
+# interactivos hay que correr con permisos pre-aprobados.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: che-funnel
+description: |
+  Embudo clásico de che (idea → plan → ejecución → close) con state machine
+  en GitHub. Pensado para usuarios que venían del che v0.0.82 y quieren la
+  misma UX sin escribir su propio YAML.
+
+steps:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # STEP 1 — idea
+  # ───────────────────────────────────────────────────────────────────────────
+  # Input: texto libre del usuario (la "idea cruda").
+  # Acción: clasificar size/type, decidir si splittear en N issues, crear
+  #         issue(s) con `gh issue create` y aplicar labels iniciales.
+  # Output: bloque YAML al final del prompt con los issues creados, que el
+  #         step siguiente parsea para saber sobre qué issue trabajar.
+  - name: idea
+    cli: claude
+    kind: prompt
+    input: text
+    content: |
+      Sos un clasificador de ideas para un backlog de ingeniería en GitHub.
+      Te paso una idea en texto libre. Tu tarea:
+
+      1. Decidí si contiene una idea o varias ideas independientes (split).
+      2. Para cada idea, asigná type y size.
+      3. Armá title, body estructurado y criterios de éxito iniciales.
+      4. Creá UN issue de GitHub por cada idea usando `gh issue create`.
+      5. Aplicá los labels iniciales: che:idea, ct:plan, type:<X>, size:<y>.
+
+      Tipos válidos: feature, fix, mejora, ux.
+      Tamaños válidos: XS (minutos), S (horas), M (1-2 días), L (1 semana),
+      XL (varias semanas). Los labels size:* van en lowercase.
+
+      Antes de crear cualquier issue:
+      - Asegurate que existan los labels en el repo. Para cada label que
+        vayas a usar (che:idea, ct:plan, type:feature/fix/mejora/ux,
+        size:xs/s/m/l/xl), hacé `gh label create <name> --force` con un
+        color razonable. `--force` upsertea sin error si ya existe.
+
+      Body de cada issue (markdown, en este orden exacto):
+
+          ## Idea
+          <idea parafraseada accionable>
+
+          ## Contexto detectado
+          - Archivos/módulos relevantes: <lista o vacío>
+          - Área afectada: <auth/billing/UI/etc o vacío>
+          - Dependencias: <lista o vacío>
+
+          ## Criterios de éxito iniciales
+          - [ ] <criterio 1>
+          - [ ] <criterio 2>
+
+          ## Notas / warnings
+          <warnings, decisiones pendientes, coordinación — opcional>
+
+          ## Clasificación
+          - Type: <type>
+          - Size: <SIZE> — <justificación corta>
+
+      Reglas:
+      - Si la idea cubre varias cosas independientes, creá N issues.
+      - Si es una sola cosa, un único issue.
+      - NUNCA "no crear nada": si no podés clasificar, creá un issue con
+        type=feature size=M y anotá en "Notas" que la idea estaba ambigua.
+      - Cada issue debe tener al menos 1 criterio de éxito.
+      - No inventes archivos o módulos que no aparecen en la idea.
+
+      Para crear cada issue:
+
+          gh issue create \
+            --title "<título imperativo, máx 60 chars>" \
+            --body-file <tmp.md> \
+            --label che:idea \
+            --label ct:plan \
+            --label type:<type> \
+            --label size:<size lowercase>
+
+      `gh issue create` devuelve la URL del issue. Capturá el número (último
+      segmento del path) para reportarlo.
+
+      Al final del prompt, devolvé un bloque exactamente con este formato
+      para que el siguiente step lo parsee:
+
+          OUTPUT:
+          issues:
+            - number: <issue#>
+              url: <url>
+              title: <título>
+              type: <type>
+              size: <SIZE>
+            - number: ...
+
+      Idea cruda del usuario:
+      <<<
+      {{INPUT}}
+      >>>
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # STEP 2 — explore (con validator de plan + iterate via max_loops)
+  # ───────────────────────────────────────────────────────────────────────────
+  # Input: OUTPUT del step idea (lista de issues con número/título/type/size).
+  # Acción: para cada issue, generar plan consolidado, postear comment de
+  #         análisis, reescribir body con "## Plan consolidado", aplicar
+  #         che:planning → che:plan.
+  # Validator (codex): revisa el plan, postea comment de validación, aplica
+  #                    plan-validated:approve|changes-requested|needs-human.
+  #                    Si changes-requested, max_loops=3 re-corre este step
+  #                    para que aplique los fixes (efectivo iterate).
+  - name: explore
+    cli: claude
+    kind: prompt
+    input: previous_output
+    content: |
+      Sos un ingeniero senior haciendo exploración técnica de issues antes
+      de comprometerte a un plan de ejecución.
+
+      INPUT — el bloque OUTPUT del step anterior contiene una lista
+      `issues:` con los issues a explorar. Procesalos en orden.
+
+      Antes de empezar a trabajar en un issue, chequeá su estado:
+
+          gh issue view <N> --json labels,body,comments
+
+      Si tiene label `plan-validated:changes-requested`, significa que ya
+      generaste un plan antes y un validator pidió cambios. En ese caso:
+        1. Leé los comments recientes del issue. El validator dejó un
+           comment con header `<!-- claude-cli: flow=validate ... -->` y
+           un bloque "Findings" con qué corregir.
+        2. Re-generá el plan consolidado APLICANDO esos findings.
+        3. Quitá el label `plan-validated:changes-requested` del issue
+           con `gh issue edit <N> --remove-label plan-validated:changes-requested`.
+
+      Si NO tiene ese label, asumí que es la primera vuelta sobre el issue.
+
+      Para cada issue:
+
+      1. `gh issue edit <N> --add-label che:planning --remove-label che:idea`
+         (transición al estado "planning"; mutex visual mientras trabajás).
+
+      2. Leé el body del issue completo.
+
+      3. Generá el análisis y el plan. Trabajalo mentalmente con esta forma:
+
+         PARTE A — análisis:
+           - summary: paráfrasis accionable del issue (1-2 oraciones).
+           - questions: SOLO ambigüedades de producto irreducibles
+             (kind=product). Las técnicas las decidís vos como assumption.
+           - assumptions: decisiones de ingeniería que tomaste (API shape,
+             refactor order, naming) con justificación corta.
+           - risks: al menos 1, con likelihood/impact (low/medium/high) y
+             mitigation.
+           - paths: al menos 2 caminos distintos con pros/cons/effort
+             (XS-XL). Marcá EXACTAMENTE UNO como recomendado.
+           - next_step: frase accionable de qué tiene que pasar antes de
+             ejecutar.
+
+         PARTE B — plan consolidado (basado en el path recommended):
+           - summary, goal, acceptance_criteria (>=1 observable),
+             approach, steps (>=1 concreto), risks_to_mitigate,
+             out_of_scope.
+           El plan tiene que ser autocontenido: alguien que lea SOLO ese
+           plan tiene que poder arrancar a implementar.
+
+      4. Posteá el análisis (PARTE A) como comment del issue:
+
+             gh issue comment <N> --body-file <tmp.md>
+
+         El comment arranca con esta línea HTML (header tracking):
+
+             <!-- claude-cli: flow=explore iter=1 agent=claude role=executor -->
+
+         Y después en markdown:
+
+             ## [executor:claude · iter:1]
+
+             **Resumen:** <summary>
+
+             ### Decisiones técnicas tomadas
+             - **<assumption.what>** — <assumption.why>
+             ...
+
+             ### Preguntas abiertas
+             - **<q>** — <why>     ← prefijar con "🚧 " si blocker=true
+             (o "_Sin ambigüedades de producto irreducibles._" si vacío)
+
+             ### Riesgos
+             - **<risk>** (likelihood=<x>, impact=<y>) — <mitigation>
+
+             ### Caminos posibles
+             **<title>** (effort=<X>) ⭐ _recomendado_   ← solo el ganador
+             <sketch>
+             - Pros: ...
+             - Cons: ...
+
+             ### Próximo paso
+             <next_step>
+
+      5. Reescribí el BODY del issue con el plan consolidado (PARTE B).
+         Conservá el body original como bloque colapsable y agregá el
+         plan al principio:
+
+             gh issue edit <N> --body-file <tmp-body.md>
+
+         El nuevo body arranca con:
+
+             ## Plan consolidado
+
+             **Resumen:** <summary>
+
+             **Goal:** <goal>
+
+             **Approach:** <approach>
+
+             **Criterios de aceptación:**
+             - [ ] <criterio 1>
+             - [ ] ...
+
+             **Pasos:**
+             1. <paso 1>
+             2. ...
+
+             **Riesgos a mitigar:**
+             - <risk> (likelihood=<x>, impact=<y>) — <mitigation>
+
+             **Fuera de alcance:**
+             - <out_of_scope>
+
+             ---
+
+             <details><summary>Idea original</summary>
+
+             <body original del issue>
+
+             </details>
+
+      6. Transición de label:
+             gh issue edit <N> --add-label che:plan --remove-label che:planning
+
+      Reglas duras:
+      - questions[] solo con kind=product. Técnicas/documentadas son
+        decisiones tuyas.
+      - paths[] >=2 con UNO recomendado.
+      - El plan consolidado NO contiene preguntas ni "a definir": resolvé
+        ambigüedad técnica como assumption.
+      - No inventes archivos.
+
+      Al final del step, devolvé el bloque OUTPUT con la misma lista de
+      issues (preservá number/url/title) para que el siguiente step la use:
+
+          OUTPUT:
+          issues:
+            - number: <N>
+              url: <url>
+              title: <título>
+              plan_committed: true
+            - number: ...
+
+      Issues a procesar:
+      <<<
+      {{INPUT}}
+      >>>
+    validator:
+      cli: codex
+      kind: prompt
+      content: |
+        Sos un validador técnico senior. Otro agente produjo un PLAN DE
+        IMPLEMENTACIÓN para uno o más issues. Tu tarea es revisar el plan
+        ANTES de que se empiece a codear y marcar lo que está flojo — NO
+        reescribir el plan.
+
+        INPUT — el bloque OUTPUT del step explore contiene la lista de
+        issues con `plan_committed: true`. Para CADA issue:
+
+        1. `gh issue view <N> --json body,labels` y extraé la sección
+           "## Plan consolidado" del body.
+
+        2. Chequeá específicamente:
+           a. ¿goal y summary son consistentes con el título del issue?
+           b. ¿Los criterios son observables y testeables? (Evitá "funciona
+              bien".)
+           c. ¿Los pasos son concretos y accionables, end-to-end?
+           d. ¿El effort implícito es razonable?
+           e. ¿Faltan riesgos obvios que el plan no menciona?
+           f. ¿Hay asunciones del plan que no son correctas (dep que no
+              existe, API distinta)?
+           g. ¿El approach descartó alternativas razonables sin justificar?
+           h. ¿Hay ambigüedad de producto irreducible que el plan resolvió
+              arbitrariamente y debería escalarse al humano?
+
+        3. Decidí verdict global del issue:
+           - approve: plan listo para ejecutar.
+           - changes_requested: gaps técnicos a corregir antes de ejecutar.
+           - needs_human: ambigüedad de producto irreducible.
+
+        4. Posteá un comment en el issue con header tracking:
+
+               <!-- claude-cli: flow=validate iter=1 agent=codex role=validator -->
+               ## [validator:codex · iter:1] — verdict: <verdict>
+
+               **Resumen:** <tu opinión global, 1-2 oraciones>
+
+               ### Findings
+               - **[<severity>] <area> @ <where>**: <issue>
+                 _Sugerencia:_ <suggestion>
+                 (kind=<technical|product|documented>, needs_human=<bool>)
+               ...
+
+           where puede referenciar steps[3], approach, acceptance_criteria,
+           etc. — no hay paths de archivo todavía.
+
+           gh issue comment <N> --body-file <tmp.md>
+
+        5. Aplicá el label correspondiente, removiendo cualquier
+           plan-validated:* previo (mutex):
+
+               gh issue edit <N> \
+                 --remove-label plan-validated:approve \
+                 --remove-label plan-validated:changes-requested \
+                 --remove-label plan-validated:needs-human \
+                 --add-label plan-validated:<verdict-en-kebab>
+
+           Si los labels no existen, primero `gh label create
+           plan-validated:<verdict> --force`.
+
+        Reglas:
+        - Si todo OK, verdict=approve y findings=[].
+        - needs_human requiere kind=product Y decisión del dueño.
+        - No inventes faltantes.
+
+        Devolvé al runner UNA SOLA línea con el verdict consolidado de
+        TODOS los issues (el peor gana: needs_human > changes_requested >
+        approve), para que max_loops/on_max_loops decidan continuar:
+
+            VALIDATOR_VERDICT: <approve|changes_requested|needs_human>
+
+        Bloque OUTPUT del explore:
+        <<<
+        {{INPUT}}
+        >>>
+    max_loops: 3
+    on_max_loops: pause
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # STEP 3 — execute (con validator de PR + iterate via max_loops)
+  # ───────────────────────────────────────────────────────────────────────────
+  # Input: OUTPUT del step explore (issues con plan validado).
+  # Acción: por cada issue, parsear el plan del body, crear worktree,
+  #         implementar, commit + push, abrir PR draft contra main, aplicar
+  #         che:executing → che:executed.
+  # Validator (codex): revisar el diff del PR, postear comment, aplicar
+  #                    validated:*. Si changes_requested → max_loops=3
+  #                    re-corre execute con feedback (iterate).
+  - name: execute
+    cli: claude
+    kind: prompt
+    input: previous_output
+    content: |
+      Sos un ingeniero senior ejecutando planes ya consolidados. Tenés
+      acceso al filesystem, a git y a gh.
+
+      INPUT — el bloque OUTPUT del step explore contiene la lista de
+      issues con plan validado. Procesalos en orden.
+
+      Para cada issue:
+
+      1. Pre-check de estado del issue:
+             gh issue view <N> --json labels,body,comments
+
+         Si el label es `validated:changes-requested` (label del PR previo
+         propagado al issue), o si el PR asociado tiene ese label, este
+         es un re-run para aplicar feedback. En ese caso:
+           - Encontrá el PR asociado: `gh pr list --search "<N> in:body" --json number,headRefName --state open`
+             o seguí el branch convention `exec/<N>-<slug>`.
+           - Hacé checkout del worktree existente en `.worktrees/issue-<N>`.
+           - Leé el comment de validate más reciente del PR (header
+             flow=validate role=validator) para los findings.
+           - Aplicá los fixes en los archivos.
+           - Commit + push (NO abrir PR nuevo, ya existe).
+           - Quitá `validated:changes-requested` del PR:
+                 gh pr edit <PR#> --remove-label validated:changes-requested
+           - Saltá al paso 9.
+
+         Si no, primera vuelta — seguí desde el paso 2.
+
+      2. Parsear el plan del body del issue (sección "## Plan consolidado").
+         Extraé summary, goal, acceptance_criteria, approach, steps,
+         out_of_scope.
+
+      3. Transición:
+             gh issue edit <N> --add-label che:executing --remove-label che:plan
+
+      4. Crear worktree y branch:
+             slug=$(echo "<título-del-issue>" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9' '-' | sed 's/--*/-/g;s/^-//;s/-$//' | cut -c1-40)
+             branch="exec/<N>-${slug}"
+             git worktree add -b "${branch}" ".worktrees/issue-<N>" main
+
+      5. Implementar el plan dentro del worktree (cwd=`.worktrees/issue-<N>`).
+         Usá Read/Write/Edit. Trabajá SOLO en el scope del plan; no toques
+         out_of_scope.
+
+         Si un paso no se puede completar (falta info, dep bloqueada),
+         dejá un archivo `EXEC_NOTES.md` en el worktree con lo que quedó
+         pendiente — esa info va al body del PR.
+
+      6. Verificá localmente cuando sea barato (ej. `go test ./...` si es
+         Go, `npm test` si Node) antes de commitear. Si los tests fallan
+         por algo del scope, arreglalo. Si fallan por algo no relacionado,
+         anotalo en EXEC_NOTES.md y seguí.
+
+      7. Commit + push:
+             cd .worktrees/issue-<N>
+             git add -A
+             git commit -m "feat: <descripción accionable, primera línea del título del issue>
+
+             Closes #<N>"
+             git push -u origin "${branch}"
+
+      8. Crear PR draft:
+             gh pr create \
+               --draft \
+               --base main \
+               --head "${branch}" \
+               --title "<título del issue>" \
+               --body-file <pr-body.md>
+
+         Body del PR:
+
+             ## Resumen
+             <summary del plan>
+
+             ## Cambios
+             <2-4 bullets de qué tocaste>
+
+             ## Criterios cubiertos
+             - [x] <criterio 1>
+             - [x] <criterio 2>
+
+             ## Notas de ejecución
+             <contenido de EXEC_NOTES.md si existe, o "—">
+
+             Closes #<N>
+
+      9. Transición:
+             gh issue edit <N> --add-label che:executed --remove-label che:executing
+
+      10. Posteá comment en el issue linkeando al PR:
+              gh issue comment <N> --body "PR draft abierto: <PR-URL>"
+
+      Reglas duras:
+      - No commitees secretos ni archivos de config sensibles.
+      - No hagas force-push que pise commits ajenos.
+      - No abras PRs nuevos en re-runs: actualizá el existente.
+      - Si el fix es imposible sin decisión humana, NO commitees nada,
+        explicá por qué en EXEC_NOTES.md, dejá el issue en che:executing.
+        El humano decide.
+
+      Al final, devolvé al runner el bloque OUTPUT con la lista de PRs:
+
+          OUTPUT:
+          prs:
+            - issue: <N>
+              pr: <PR#>
+              url: <PR-URL>
+              branch: exec/<N>-<slug>
+              has_exec_notes: <bool>
+            - ...
+
+      Issues a ejecutar:
+      <<<
+      {{INPUT}}
+      >>>
+    validator:
+      cli: codex
+      kind: prompt
+      content: |
+        Sos un validador técnico senior. Otro agente implementó cambios en
+        uno o más PRs. Tu tarea es leer el DIFF y marcar lo que falta o
+        está mal — NO reimplementar nada.
+
+        INPUT — el bloque OUTPUT del step execute contiene una lista `prs:`
+        con el número de cada PR. Para CADA PR:
+
+        1. Leé el diff:
+               gh pr diff <PR#>
+           y el body:
+               gh pr view <PR#> --json title,body,files
+
+        2. Chequeá específicamente:
+           a. ¿El diff hace lo que el título del PR dice?
+           b. ¿Hay regresiones obvias (tests rotos, edge cases sin cubrir,
+              lógica incorrecta)?
+           c. ¿Hay code smells o problemas de diseño que merezcan
+              escalarse?
+           d. ¿Los tests cubren los cambios o hay gaps importantes?
+           e. ¿Hay problemas de seguridad (input validation, auth, inj)?
+           f. ¿Los criterios de aceptación del plan original están todos
+              cubiertos por el diff?
+
+        3. Decidí verdict:
+           - approve: diff correcto y suficiente.
+           - changes_requested: hay cosas técnicas a corregir.
+           - needs_human: ambigüedad de producto irreducible.
+
+        4. Posteá comment en el PR con header tracking:
+
+               <!-- claude-cli: flow=validate iter=1 agent=codex role=validator -->
+               ## [validator:codex · iter:1] — verdict: <verdict>
+
+               **Resumen:** <opinión global>
+
+               ### Findings
+               - **[<severity>] <area> @ <where>**: <issue>
+                 _Sugerencia:_ <suggestion>
+                 (kind=<technical|product|documented>, needs_human=<bool>)
+
+           where = path/file.go:line o función.
+
+               gh pr comment <PR#> --body-file <tmp.md>
+
+        5. Label mutex en el PR:
+
+               gh pr edit <PR#> \
+                 --remove-label validated:approve \
+                 --remove-label validated:changes-requested \
+                 --remove-label validated:needs-human \
+                 --add-label validated:<verdict-en-kebab>
+
+           Crear labels con `gh label create validated:<v> --force` si no
+           existen.
+
+        Reglas:
+        - Si el diff cubre algo aunque sea brevemente, NO marcarlo como
+          gap.
+        - needs_human requiere kind=product Y decisión del dueño.
+        - approve = findings vacío.
+
+        Devolvé al runner el verdict consolidado (peor gana):
+
+            VALIDATOR_VERDICT: <approve|changes_requested|needs_human>
+
+        Bloque OUTPUT del execute:
+        <<<
+        {{INPUT}}
+        >>>
+    max_loops: 3
+    on_max_loops: pause
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # STEP 4 — close
+  # ───────────────────────────────────────────────────────────────────────────
+  # Input: OUTPUT del step execute (PRs validados).
+  # Acción: marcar PR ready, esperar CI, fix loop si conflict/CI rojo (≤3),
+  #         mergear, borrar branch, cerrar issues asociados, postear
+  #         comment template de scoring 1-10 (NO gating; el humano lo
+  #         llena después), aplicar che:closing → che:closed.
+  - name: close
+    cli: claude
+    kind: prompt
+    input: previous_output
+    content: |
+      Sos un ingeniero senior cerrando PRs. Tu objetivo es dejarlos
+      mergeados y limpios; el scoring humano lo hace el usuario después
+      via comment template.
+
+      INPUT — el bloque OUTPUT del step execute contiene una lista `prs:`
+      con número, branch e issue asociado. Procesá cada PR:
+
+      1. Leé estado del PR:
+             gh pr view <PR#> --json state,mergeable,isDraft,statusCheckRollup,closingIssuesReferences
+
+         Si state=MERGED, saltá este PR (ya cerró).
+         Si state=CLOSED y no MERGED, NO toques: el humano lo cerró aparte.
+         Si isDraft=true, marcalo ready:
+             gh pr ready <PR#>
+
+      2. Aplicá transición al issue asociado:
+             issue=$(gh pr view <PR#> --json closingIssuesReferences -q '.closingIssuesReferences[0].number')
+             gh issue edit "$issue" --add-label che:closing --remove-label che:executed
+
+      3. Fix loop (≤3 intentos): si mergeable=CONFLICTING o el rollup tiene
+         checks failing, invocá el fix:
+
+             cd .worktrees/issue-<issue>      # reusá worktree existente
+             git fetch origin main
+             git merge origin/main            # resolvé conflictos si los hay
+             # corré tests locales si es barato
+             # si CI fallaba, leé `gh run view --log-failed <run-id>` y
+             # arreglá el código real (no parches que tapen síntomas)
+             git add -A
+             git commit -m "fix: <descripción del arreglo>"
+             git push
+
+         Después del push, esperá CI:
+             gh pr checks <PR#> --watch
+
+         Si después de 3 intentos sigue rojo o conflictivo, NO mergees.
+         Posteá comment explicando qué bloquea y dejá el PR en
+         che:closing — el humano decide.
+
+      4. Mergear con merge commit (NO squash, preservamos historia):
+             gh pr merge <PR#> --merge --delete-branch
+
+         `--delete-branch` borra branch remota y local. Después borrá el
+         worktree:
+             git worktree remove --force .worktrees/issue-<issue> 2>/dev/null || true
+
+      5. Cerrar issue(s) asociado(s) — el `Closes #N` del body del PR ya
+         los cierra al mergear, pero aplicamos la transición de label:
+
+             gh issue edit "$issue" --add-label che:closed --remove-label che:closing
+
+         Quitá labels bloqueantes residuales:
+
+             gh issue edit "$issue" \
+               --remove-label plan-validated:changes-requested \
+               --remove-label plan-validated:needs-human || true
+             gh pr edit <PR#> \
+               --remove-label validated:changes-requested \
+               --remove-label validated:needs-human || true
+
+      6. Postear comment de scoring template en el PR (sin gate):
+
+             gh pr comment <PR#> --body-file <scoring-template.md>
+
+         Template:
+
+             <!-- claude-cli: flow=close iter=1 agent=claude role=scoring-template -->
+             ## Scoring del cierre
+
+             Para que el humano puntúe del 1 al 10 cuando tenga 5 minutos.
+
+             - **Completitud** (cuánto del plan se cumplió): __/10
+             - **Fidelidad** (qué tan bien se siguió el approach): __/10
+             - **Alineación** (qué tan en línea quedó con la idea original): __/10
+
+             **Notas libres:**
+             > <reemplazar con notas, friction points, lecciones>
+
+             _El embudo no usa este score como gate; vive como historia
+             del PR. Si querés tracking, usá `gh pr list --json comments`
+             y filtrá por este header._
+
+      Reglas duras:
+      - Si CI nunca pasa después de 3 intentos, NO mergees. Dejá el PR
+        en che:closing y el issue también, postea comment explicando.
+      - No cambies la base del PR ni abras PRs nuevos.
+      - No force-push.
+
+      Al final devolvé el resumen:
+
+          OUTPUT:
+          closed:
+            - issue: <N>
+              pr: <PR#>
+              merged: <bool>
+              reason_if_not_merged: <opcional>
+            - ...
+
+      PRs a cerrar:
+      <<<
+      {{INPUT}}
+      >>>

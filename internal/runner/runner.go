@@ -23,10 +23,33 @@ import (
 // El caller (cmd/root.go.runMyPipelines) decide como surfacearlo. En H2+ esto
 // se convertira en un toast inline sobre el lister; H1 deja la decision al
 // caller para no inflar el contrato.
-func Run(path string) (exitApp bool, err error) {
-	p, err := wizard.Load(path)
+// loadPipelineForRun resuelve `target` a un Pipeline parseado. Si target
+// tiene el prefijo "builtin:" carga desde wizard.Builtins() (in-memory);
+// caso contrario lee del FS via wizard.Load. Devuelve el error con contexto
+// del target para que el caller lo surface tal cual.
+func loadPipelineForRun(target string) (wizard.Pipeline, error) {
+	if wizard.IsBuiltinTarget(target) {
+		slug := wizard.BuiltinSlugFromTarget(target)
+		b, err := wizard.BuiltinBySlug(slug)
+		if err != nil {
+			return wizard.Pipeline{}, fmt.Errorf("runner: builtin %q: %w", slug, err)
+		}
+		if b == nil {
+			return wizard.Pipeline{}, fmt.Errorf("runner: builtin %q no encontrado", slug)
+		}
+		return b.Pipeline, nil
+	}
+	p, err := wizard.Load(target)
 	if err != nil {
-		return false, fmt.Errorf("runner: load %s: %w", path, err)
+		return wizard.Pipeline{}, fmt.Errorf("runner: load %s: %w", target, err)
+	}
+	return p, nil
+}
+
+func Run(path string) (exitApp bool, err error) {
+	p, err := loadPipelineForRun(path)
+	if err != nil {
+		return false, err
 	}
 	if verr := wizard.IsValid(p); verr != nil {
 		return false, fmt.Errorf("runner: pipeline invalido: %w", verr)
