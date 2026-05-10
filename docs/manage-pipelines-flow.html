@@ -1586,8 +1586,81 @@
 
   </section>
 
+  <hr class="rule">
+
+  <!-- ========== ADDENDA 2026-05 ========== -->
+  <section>
+    <div class="eyebrow">addenda 2026-05</div>
+    <h2>che-funnel embebido como pipeline default</h2>
+    <p>
+      A partir de PR #98 (commit <code>7dc265c</code>), el binario shipea un
+      pipeline default llamado <code>che-funnel</code> embebido en
+      <code>internal/wizard/embedded/che-funnel.yaml</code> via
+      <code>//go:embed</code> y registrado en
+      <code>wizard.Builtins()</code>. <strong>My pipelines</strong> ya no
+      arranca vacío en una instalación nueva — la primera vez que el usuario
+      abre el lister ve el row <code>che-funnel</code> con chip
+      <code>[default]</code> aunque <code>~/.che/pipelines/</code> no exista
+      o esté vacío.
+    </p>
+    <p>
+      El builtin es read-only por default: al ejecutarlo desde el lister
+      arranca con el YAML embebido sin tocar disco. Si el usuario quiere
+      personalizarlo, el lister soporta copy-on-edit — al activar
+      <kbd>e</kbd> o <kbd>y</kbd> sobre el row builtin, el archivo se
+      materializa en <code>~/.che/pipelines/che-funnel.yaml</code> y a
+      partir de ahí el override de disco gana sobre el builtin (mismo
+      mecanismo que cualquier pipeline regular).
+    </p>
+
+    <h3>che-funnel vs v0.0.82 funnel</h3>
+    <p>
+      El pipeline replica el embudo clásico (idea → explore/plan →
+      execute → close) con 4 steps secuenciales sobre <code>claude</code>,
+      delegando la state machine de GitHub (labels <code>che:*</code>,
+      issues, PRs, comments, worktrees) a los prompts vía tool use de
+      <code>gh</code> y <code>git</code>. Diferencias intencionales con la
+      versión vieja:
+    </p>
+    <ul>
+      <li><strong>iterate desaparece como step manual</strong> — cada step
+        tiene un <code>validator</code> con <code>max_loops=3</code>; si el
+        verdict es <code>changes_requested</code> el step se re-corre con
+        feedback hasta converger o agotar el cap (handled por R3 del runner
+        nuevo, no por un step propio).</li>
+      <li><strong>close postea un template de scoring</strong> (1-10 en
+        completitud / fidelidad / alineación) como comment del PR. El
+        humano lo llena fuera del pipeline — no hay gate humano mid-run.</li>
+      <li><strong>Validator cross-CLI</strong> — cada validator usa
+        <code>codex</code> en lugar de <code>claude</code> para reducir
+        groupthink. Si el usuario solo tiene <code>claude</code> instalado,
+        puede editar el YAML (copy-on-edit) o borrar el bloque
+        <code>validator</code> de cada step.</li>
+    </ul>
+
+    <h3>Impacto en el lister</h3>
+    <p>
+      Las acciones existentes funcionan igual sobre el row builtin con dos
+      diferencias:
+    </p>
+    <ul>
+      <li><kbd>d</kbd> sobre el builtin <strong>no abre el modal de
+        confirm</strong>: muestra un toast
+        <code>"default embebido — no se puede borrar"</code> y sigue. Para
+        "ocultar" el default, el usuario tiene que crear un shadow en
+        <code>~/.che/pipelines/che-funnel.yaml</code> (via copy-on-edit) y
+        decidir qué hacer con él.</li>
+      <li><kbd>e</kbd> y <kbd>y</kbd> sobre el builtin
+        <strong>materializan</strong> el YAML en
+        <code>~/.che/pipelines/che-funnel.yaml</code> antes de abrir el
+        editor (copy-on-edit). A partir de ahí el override del FS gana
+        sobre el builtin — el merge en <code>loadListItems</code> dedupea
+        por slug.</li>
+    </ul>
+  </section>
+
   <footer>
-    che / parametrizable revamp · manage pipelines flow · 2026-05-07
+    che / parametrizable revamp · manage pipelines flow · 2026-05-07 · addenda 2026-05-10
   </footer>
 
 </main>

@@ -2131,8 +2131,94 @@ enter / esc volver al menu · r retry · l abrir log · q / ctrl+c salir</div>
 
   </section>
 
+  <hr class="rule">
+
+  <!-- ========== ADDENDA 2026-05 ========== -->
+  <section>
+    <div class="eyebrow">addenda 2026-05</div>
+    <h2>Fixes y polish post-2026-05-09</h2>
+    <p>
+      Lote chico de fixes sobre R1 y R3 que aparecieron al usar el runner
+      en corridas reales del <code>che-funnel</code> embebido. Ninguno
+      cambia el state diagram; son fixes de presentación y de robustez del
+      streaming.
+    </p>
+
+    <h3>1 · R1 — wrap del prompt stdin al ancho de terminal</h3>
+    <p>
+      Commit <code>5696e5d</code>. El textarea de R1 (kind=<code>text</code>)
+      no envolvía: textos largos quedaban en una sola línea que se cortaba
+      contra el borde derecho del alt-screen y el caret salía del viewport.
+      Fix: aplicar wrap soft al width visible del runner.
+    </p>
+
+    <h3>2 · R3 — wrap del log pane streaming al ancho de terminal</h3>
+    <p>
+      Commit <code>443860a</code>. El log pane viviente (sticky-bottom +
+      ring buffer) recibía líneas crudas del subprocess; cuando el CLI
+      shippeaba payloads largos sin <code>\n</code> intermedio, la línea
+      tapaba el borde derecho y el footer. Fix: wrap por terminal width
+      antes de imprimir.
+    </p>
+
+    <h3>3 · R3 — unstick del validator sobre stream-json</h3>
+    <p>
+      Commit <code>92a6f52</code>. El validator del <code>che-funnel</code>
+      (codex con <code>stream-json --verbose</code>) podía quedar trabado
+      esperando un EOF que nunca llegaba si el último evento del stream no
+      cerraba un bloque <code>verdict:</code> reconocible — el parser caía
+      a "no verdict block" pero el reader del subprocess seguía abierto.
+      Fix: liberar el reader explícitamente al detectar fin de stream sin
+      verdict, dejando que <code>parseVerdict</code> emita el fallback
+      <code>fail</code> con el feedback raw.
+    </p>
+
+    <h3>4 · R3 — stream del output del validator al log pane</h3>
+    <p>
+      Commit <code>03de057</code>. Antes el output del validator solo
+      aparecía en <code>events.jsonl</code> y en el feedback re-payload,
+      no en la UI viviente — el usuario veía "validating…" hasta el
+      verdict. Fix: el validator usa el mismo log pane que el step,
+      con prefijo distintivo, así el usuario ve qué está haciendo el
+      cross-CLI review en tiempo real.
+    </p>
+
+    <h3>5 · Bug chain del runner del che-funnel (PR #107)</h3>
+    <p>
+      Commit <code>04fe67b</code>. Cinco fixes encadenados que aparecieron
+      al correr el <code>che-funnel</code> embebido y son ortogonales al
+      state diagram:
+    </p>
+    <ul>
+      <li><strong>Fix 1 (raíz)</strong>: interpolar <code>{{INPUT}}</code>
+        en <code>step.Content</code> y <code>step.Validator.Content</code>
+        antes de armar args. Helper <code>interpolateInput</code> invocado
+        desde <code>defaultSpawnCmd</code> y <code>runValidator</code>. El
+        payload sigue viajando por stdin (compat).</li>
+      <li><strong>Fix 2</strong>: <code>splitVerdictBlocks</code> reconoce
+        fences markdown (<code>```yaml</code> / <code>```yml</code> /
+        <code>```</code> sin info-string) como candidatos adicionales.
+        Antes, verdicts envueltos en un fence dentro de prosa caían al
+        fallback "no verdict block".</li>
+      <li><strong>Fix 3</strong>: nuevo flag
+        <code>Verdict.RawFeedbackOnly</code> +
+        <code>ValidatorRun.LastFeedbackRawOnly</code>. Si el feedback es
+        sólo el fallback raw <code>"verdict: &lt;token&gt;"</code>,
+        <code>rerunStepWithFeedback</code> suprime el feedback al payload
+        (no re-prompt con ruido). Defensa adicional vía
+        <code>isRawVerdictFallback</code> en
+        <code>mergeFeedbackIntoPayload</code>.</li>
+      <li><strong>Fix 4</strong>: rotación de <code>events.jsonl</code>
+        por corrida. <code>StepRun.EventsRun</code> (1-based) se incrementa
+        en <code>startStep</code> y <code>rerunStepWithFeedback</code>. El
+        archivo se escribe como
+        <code>step-NN.events.RUN-K.jsonl</code> — los reruns por validator
+        ya no pisan el log original.</li>
+    </ul>
+  </section>
+
   <footer>
-    che / parametrizable revamp · pipeline execution flow · estado post-H10 · 2026-05-09
+    che / parametrizable revamp · pipeline execution flow · estado post-H10 · 2026-05-09 · addenda 2026-05-10
   </footer>
 
 </main>
