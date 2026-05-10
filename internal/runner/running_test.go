@@ -85,3 +85,104 @@ func TestLogPaneWidth_ZeroPreservesLegacyBehavior(t *testing.T) {
 		}
 	}
 }
+
+// TestMergeFeedbackIntoPayload_EmptyPassthrough verifica que un feedback
+// vacio no toca el payload.
+func TestMergeFeedbackIntoPayload_EmptyPassthrough(t *testing.T) {
+	got := mergeFeedbackIntoPayload("PAYLOAD", "")
+	if got != "PAYLOAD" {
+		t.Errorf("expected passthrough on empty feedback, got %q", got)
+	}
+}
+
+// TestMergeFeedbackIntoPayload_RawVerdictNotPrepended cubre Fix 3 (#107):
+// si el feedback recibido es solo el fallback raw `"verdict: <token>"`, el
+// bloque "FEEDBACK del validator" NO se prependea — el modelo no puede
+// hacer nada con esa instruccion pelada. Defensa adicional al flag
+// RawFeedbackOnly (que normalmente bloquea esto antes en el caller).
+func TestMergeFeedbackIntoPayload_RawVerdictNotPrepended(t *testing.T) {
+	cases := []string{
+		"verdict: changes_requested",
+		"verdict: fail",
+		"verdict: needs_human",
+		"  verdict: changes_requested  ",
+	}
+	for _, fb := range cases {
+		got := mergeFeedbackIntoPayload("PAYLOAD", fb)
+		if got != "PAYLOAD" {
+			t.Errorf("expected raw verdict feedback %q to be suppressed; got=%q", fb, got)
+		}
+	}
+}
+
+// TestMergeFeedbackIntoPayload_RealFeedbackPrepended verifica que feedback
+// real (no el fallback raw) si se prependea al payload.
+func TestMergeFeedbackIntoPayload_RealFeedbackPrepended(t *testing.T) {
+	got := mergeFeedbackIntoPayload("PAYLOAD", "corregi el edge case X")
+	if !strings.Contains(got, "FEEDBACK del validator") {
+		t.Errorf("expected feedback block prepended, got %q", got)
+	}
+	if !strings.Contains(got, "corregi el edge case X") {
+		t.Errorf("expected feedback content in output, got %q", got)
+	}
+	if !strings.HasSuffix(got, "PAYLOAD") {
+		t.Errorf("expected payload preserved at the end, got %q", got)
+	}
+}
+
+// TestIsRawVerdictFallback_Patterns cubre cada caso del detector heuristico
+// usado como red de seguridad en mergeFeedbackIntoPayload.
+func TestIsRawVerdictFallback_Patterns(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"verdict: changes_requested", true},
+		{"verdict: fail", true},
+		{"verdict: ok", true},
+		{"verdict: needs_human", true},
+		{"  verdict: changes_requested  ", true},
+		// feedback real con espacios — no es fallback.
+		{"verdict: changes_requested\ncorregi X", false},
+		{"verdict: changes - explicacion", false},
+		{"verdict:", false},
+		{"", false},
+		{"otro string", false},
+		// Tras TrimSpace, "verdict: fail\n" colapsa al patron raw — el
+		// detector lo trata como fallback. El test fija el contrato.
+		{"verdict: fail\n", true},
+		// Verdict + feedback en lineas separadas no es fallback.
+		{"verdict: fail\ncorregi X", false},
+	}
+	for _, c := range cases {
+		got := isRawVerdictFallback(c.in)
+		if got != c.want {
+			t.Errorf("isRawVerdictFallback(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+// TestStepEventsPath_Rotation cubre Fix 4 (#107): cada corrida del step
+// (eventsRun K, 1-based) escribe a su propio archivo
+// `step-NN.events.RUN-K.jsonl`. Si eventsRun <= 0, caemos al nombre legacy
+// `step-NN.events.jsonl` para compat con tests viejos.
+func TestStepEventsPath_Rotation(t *testing.T) {
+	cases := []struct {
+		runDir    string
+		idx       int
+		eventsRun int
+		wantSubs  string
+	}{
+		{"/tmp/run-X", 1, 1, "step-01.events.RUN-01.jsonl"},
+		{"/tmp/run-X", 3, 2, "step-03.events.RUN-02.jsonl"},
+		{"/tmp/run-X", 1, 0, "step-01.events.jsonl"},
+		{"/tmp/run-X", 1, -1, "step-01.events.jsonl"},
+	}
+	for _, c := range cases {
+		got := stepEventsPath(c.runDir, c.idx, c.eventsRun)
+		if !strings.HasSuffix(got, c.wantSubs) {
+			t.Errorf("stepEventsPath(%q, %d, %d) = %q, want suffix %q",
+				c.runDir, c.idx, c.eventsRun, got, c.wantSubs)
+		}
+	}
+}

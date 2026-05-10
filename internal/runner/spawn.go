@@ -22,6 +22,18 @@ import (
 // step. El doc lo deja configurable via env CHE_KILL_GRACE (default 5s).
 const killGraceDefault = 5 * time.Second
 
+// stepEventsPath devuelve el archivo events.jsonl activo del step idx
+// (1-based) en la corrida K = eventsRun (1-based). Si K <= 0, devuelve el
+// nombre legacy sin sufijo de corrida — preserva compat con tests viejos
+// que invocan runStep sin contador. Fix #107: cada rerun escribe a su
+// propio archivo para no perder la traza de las vueltas previas.
+func stepEventsPath(runDir string, idx, eventsRun int) string {
+	if eventsRun <= 0 {
+		return filepath.Join(runDir, fmt.Sprintf("step-%02d.events.jsonl", idx))
+	}
+	return filepath.Join(runDir, fmt.Sprintf("step-%02d.events.RUN-%02d.jsonl", idx, eventsRun))
+}
+
 // scannerBufferMax es el cap del buffer de bufio.Scanner. El default (64
 // KiB) trunca lineas largas SILENCIOSAMENTE — la memoria del proyecto
 // "bufio.Scanner 64 KiB silent drop" lo deja explicito. H5 lo sube a 1 MiB
@@ -75,15 +87,33 @@ var spawnCmdFn = defaultSpawnCmd
 //
 // El payload del input (R1) se envia por stdin (criterio del doc:
 // "todas pasan el input/payload por stdin para evitar problemas de escaping
-// de shell").
+// de shell"). Antes de armar args, interpolamos `{{INPUT}}` en step.Content
+// con el payload resuelto — el payload sigue viajando por stdin tambien para
+// preservar la compat (Fix #107).
 func defaultSpawnCmd(step wizard.Step, payload string) (*exec.Cmd, error) {
-	args, err := buildSpawnArgs(step)
+	stepForArgs := step
+	stepForArgs.Content = interpolateInput(step.Content, payload)
+	args, err := buildSpawnArgs(stepForArgs)
 	if err != nil {
 		return nil, err
 	}
 	cmd := exec.Command(step.CLI, args...)
 	cmd.Stdin = strings.NewReader(payload)
 	return cmd, nil
+}
+
+// interpolateInput reemplaza el placeholder `{{INPUT}}` en content por el
+// payload resuelto. El payload sigue enviandose por stdin ademas de quedar
+// sustituido en el content — los CLIs que asumen el placeholder en el prompt
+// (ej. che-funnel.yaml) lo necesitan inline; el stdin queda como fallback.
+//
+// Si content no contiene `{{INPUT}}`, devuelve content sin cambios. Sin
+// escape adicional: el payload se inserta literal.
+func interpolateInput(content, payload string) string {
+	if !strings.Contains(content, "{{INPUT}}") {
+		return content
+	}
+	return strings.ReplaceAll(content, "{{INPUT}}", payload)
 }
 
 // buildSpawnArgs es la parte testeable de defaultSpawnCmd: dado un step,
@@ -168,7 +198,13 @@ type stepDoneMsg struct {
 //
 // H5 reemplaza el cmd.Run() bloqueante de H4 por este pipeline de
 // streaming. Stdin sigue siendo el ResolvedPayload del input (R1).
-func runStep(step wizard.Step, payload string, runDir string, idx int, state *runState) tea.Cmd {
+// runStep arranca el subprocess y rota `events.jsonl` a un archivo por
+// corrida (`step-NN.events.RUN-K.jsonl`) — K = eventsRun, 1-based.
+// `events.jsonl` se mantiene como alias del archivo activo (copia al cerrar
+// el step) para compat con consumidores externos. Si eventsRun <= 0, caemos
+// al nombre legacy `step-NN.events.jsonl` para no romper tests viejos que
+// pasan idx sin contador.
+func runStep(step wizard.Step, payload string, runDir string, idx int, eventsRun int, state *runState) tea.Cmd {
 	startedAt := time.Now()
 	// Inicializar lineCh ANTES del start: si Start() falla, el caller
 	// igual va a leer del canal (waitForLine) y necesita encontrarlo
@@ -196,7 +232,7 @@ func runStep(step wizard.Step, payload string, runDir string, idx int, state *ru
 	// vacio — el doc lo deja explicito ("stdout crudo, sin events.jsonl").
 	stdoutPath := filepath.Join(runDir, fmt.Sprintf("step-%02d.stdout.log", idx))
 	stderrPath := filepath.Join(runDir, fmt.Sprintf("step-%02d.stderr.log", idx))
-	eventsPath := filepath.Join(runDir, fmt.Sprintf("step-%02d.events.jsonl", idx))
+	eventsPath := stepEventsPath(runDir, idx, eventsRun)
 
 	stdoutFile, err := os.OpenFile(stdoutPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {

@@ -1392,8 +1392,10 @@ func TestRunner_R3H5StreamJSONLines(t *testing.T) {
 
 	// Disco: events.jsonl tiene que existir + tener exactamente 5 lineas
 	// no vacias (1 por evento del stream).
+	// Fix #107: el archivo se rota por corrida (RUN-K); la primera corrida
+	// es RUN-01.
 	runDir := firstRunDir(t, env.HomeDir, "r3h5-stream")
-	eventsRaw := readRunFile(t, filepath.Join(runDir, "step-01.events.jsonl"))
+	eventsRaw := readRunFile(t, filepath.Join(runDir, "step-01.events.RUN-01.jsonl"))
 	count := 0
 	for _, line := range strings.Split(strings.TrimRight(eventsRaw, "\n"), "\n") {
 		if strings.TrimSpace(line) != "" {
@@ -1510,7 +1512,8 @@ func TestRunner_R3H5StreamJSONLargeLine(t *testing.T) {
 	// 64 KiB. Tambien chequeamos que los XXX...X esten presentes
 	// completos (sentinel del fin del repeat).
 	runDir := firstRunDir(t, env.HomeDir, "r3h5-large")
-	eventsRaw := readRunFile(t, filepath.Join(runDir, "step-01.events.jsonl"))
+	// Fix #107: primera corrida del step → RUN-01.
+	eventsRaw := readRunFile(t, filepath.Join(runDir, "step-01.events.RUN-01.jsonl"))
 	// events.jsonl tiene 1 linea + un newline final → trimear y medir.
 	eventsLine := strings.TrimRight(eventsRaw, "\n")
 	if len(eventsLine) < len(bigEvent) {
@@ -1630,8 +1633,13 @@ func TestRunner_R3H5StderrInterleaved(t *testing.T) {
 	}
 
 	// gemini text mode no genera events.jsonl (criterio del doc).
+	// Fix #107: chequeamos AMBOS paths (legacy `events.jsonl` y nuevo
+	// `events.RUN-01.jsonl`) — ninguno debe existir.
 	if _, err := os.Stat(filepath.Join(runDir, "step-01.events.jsonl")); !os.IsNotExist(err) {
 		t.Errorf("events.jsonl should NOT exist for gemini (text mode), stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(runDir, "step-01.events.RUN-01.jsonl")); !os.IsNotExist(err) {
+		t.Errorf("events.RUN-01.jsonl should NOT exist for gemini (text mode), stat err=%v", err)
 	}
 }
 
@@ -2928,7 +2936,9 @@ func TestRunner_RCH9SigtermIgnoredEscalatesToKill(t *testing.T) {
 	}
 	// events.jsonl tambien debe estar cerrado (claude → stream-json → file
 	// abierto). No asumimos contenido (el sentinel es plain stdout, no JSON).
-	if _, err := os.OpenFile(filepath.Join(runDir, "step-01.events.jsonl"), os.O_RDONLY, 0); err != nil {
+	// Fix #107: el path activo es step-01.events.RUN-01.jsonl en la
+	// primera corrida.
+	if _, err := os.OpenFile(filepath.Join(runDir, "step-01.events.RUN-01.jsonl"), os.O_RDONLY, 0); err != nil {
 		t.Errorf("re-open events.jsonl post-run: %v (handle no se cerro?)", err)
 	}
 }

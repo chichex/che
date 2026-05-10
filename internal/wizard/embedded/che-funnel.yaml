@@ -502,16 +502,32 @@ steps:
       cli: codex
       kind: prompt
       content: |
-        Sos un validador técnico senior. Otro agente implementó cambios en
-        uno o más PRs. Tu tarea es leer el DIFF y marcar lo que falta o
-        está mal — NO reimplementar nada.
+        Sos un validador técnico senior. Otro agente acaba de correr el step
+        `execute` del pipeline che-funnel. Tu tarea es leer la SALIDA REAL
+        producida por ese agente (la encontrás abajo entre <<< y >>>) y
+        decidir si los PRs que abrió están bien — NO reimplementar nada.
 
-        INPUT — el bloque OUTPUT del step execute contiene una lista `prs:`
-        con el número de cada PR. Para CADA PR:
+        Cómo leer la entrada:
 
-        1. Leé el diff:
+        - El bloque entre <<< y >>> es la salida que claude/codex emitió al
+          terminar el step. En el flujo feliz contiene una lista de PRs
+          (uno por issue procesado), típicamente como `prs:` o como una
+          enumeración en prosa con números de PR y URLs. Aceptá CUALQUIER
+          formato que te permita extraer los PR# — el step no garantiza
+          formato YAML estricto y vos no estás validando el templating
+          upstream, estás validando el TRABAJO HECHO.
+
+        - Si NO encontrás ningún PR# en la salida (el step no produjo
+          nada útil, falló sin abrir PRs, o se canceló), verdict
+          `changes_requested` con feedback accionable hacia el step
+          `execute`: qué le faltó al agente para abrir el PR del issue
+          correspondiente. NO escales esto como "el templating está roto"
+          ni como ambigüedad de producto.
+
+        Para CADA PR# que extraigas:
+
+        1. Leé el diff y el body:
                gh pr diff <PR#>
-           y el body:
                gh pr view <PR#> --json title,body,files
 
         2. Chequeá específicamente:
@@ -525,10 +541,11 @@ steps:
            f. ¿Los criterios de aceptación del plan original están todos
               cubiertos por el diff?
 
-        3. Decidí verdict:
+        3. Decidí verdict del PR:
            - approve: diff correcto y suficiente.
            - changes_requested: hay cosas técnicas a corregir.
-           - needs_human: ambigüedad de producto irreducible.
+           - needs_human: ambigüedad de PRODUCTO irreducible (no
+             ambigüedad técnica — esa es changes_requested).
 
         4. Posteá comment en el PR con header tracking:
 
@@ -562,12 +579,15 @@ steps:
           gap.
         - needs_human requiere kind=product Y decisión del dueño.
         - approve = findings vacío.
+        - Feedback al runner accionable HACIA EL STEP execute, no hacia
+          la infraestructura del runner ni hacia el templating.
 
         Devolvé al runner el verdict consolidado (peor gana):
 
             verdict: <approve|changes_requested|needs_human>
 
-        Bloque OUTPUT del execute:
+        Salida real del step execute (puede traer prs:, prosa con PR#, o
+        cualquier formato que el agente haya emitido):
         <<<
         {{INPUT}}
         >>>

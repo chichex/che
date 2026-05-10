@@ -9,10 +9,15 @@ import (
 	"path/filepath"
 )
 
-// readPermissionDenials lee step-NN.events.jsonl post-mortem y devuelve los
-// nombres de tools que claude pidio y le fueron denegadas durante el step.
-// Solo aplica a CLIs que emiten stream-json (claude); para los demas el
-// archivo no existe y devolvemos nil sin error.
+// readPermissionDenials lee step-NN.events.RUN-K.jsonl post-mortem y
+// devuelve los nombres de tools que claude pidio y le fueron denegadas
+// durante el step. Solo aplica a CLIs que emiten stream-json (claude); para
+// los demas el archivo no existe y devolvemos nil sin error.
+//
+// Fix #107: ahora resuelve el archivo de la corrida ACTIVA (K = eventsRun).
+// Antes leia el archivo unico (`step-NN.events.jsonl`) que se truncaba en
+// cada rerun perdiendo la traza de los intentos previos. Si eventsRun <= 0
+// (paths legacy / tests viejos) caemos al nombre sin sufijo de corrida.
 //
 // El motivo de leer post-mortem (en vez de trackear durante el stream) es
 // que el dato vive en el ULTIMO event (`type: result`) — claude lo emite
@@ -27,11 +32,16 @@ import (
 //
 // Errores de IO se ignoran a proposito: el chip warn es una mejora UX, no
 // debe romper R4 si el archivo esta corrupto.
-func readPermissionDenials(runDir string, idx int) []string {
+func readPermissionDenials(runDir string, idx, eventsRun int) []string {
 	if runDir == "" {
 		return nil
 	}
-	path := filepath.Join(runDir, fmt.Sprintf("step-%02d.events.jsonl", idx))
+	var path string
+	if eventsRun <= 0 {
+		path = filepath.Join(runDir, fmt.Sprintf("step-%02d.events.jsonl", idx))
+	} else {
+		path = filepath.Join(runDir, fmt.Sprintf("step-%02d.events.RUN-%02d.jsonl", idx, eventsRun))
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
