@@ -90,6 +90,20 @@ var spawnCmdFn = defaultSpawnCmd
 // de shell"). Antes de armar args, interpolamos `{{INPUT}}` en step.Content
 // con el payload resuelto — el payload sigue viajando por stdin tambien para
 // preservar la compat (Fix #107).
+//
+// Fix #114 (E2BIG): para CLI=codex el prompt interpolado viaja por stdin en
+// lugar de argv, eliminando el "argument list too long" cuando {{INPUT}} se
+// sustituye por payloads >= 256 KB. buildSpawnArgs devuelve ["exec", "--json"]
+// (sin content). El stdin se arma segun si el content original embedia
+// {{INPUT}}:
+//   - Si SI embedia {{INPUT}}: stdin = content interpolado (payload ya inline).
+//   - Si NO embedia {{INPUT}}: stdin = content + "\n" + payload (payload
+//     concatenado para que codex lo reciba como bloque <stdin> adicional,
+//     necesario p.ej. en validators que no embeben {{INPUT}} pero leen la
+//     salida del step previo desde stdin).
+//
+// Para otros CLIs (claude/gemini/opencode) no hay cambios: content por argv +
+// payload por stdin.
 func defaultSpawnCmd(step wizard.Step, payload string) (*exec.Cmd, error) {
 	stepForArgs := step
 	stepForArgs.Content = interpolateInput(step.Content, payload)
@@ -98,7 +112,21 @@ func defaultSpawnCmd(step wizard.Step, payload string) (*exec.Cmd, error) {
 		return nil, err
 	}
 	cmd := exec.Command(step.CLI, args...)
-	cmd.Stdin = strings.NewReader(payload)
+	if step.CLI == "codex" {
+		// Fix #114: prompt via stdin para evitar E2BIG.
+		// Si el content original embedia {{INPUT}}, el payload ya quedo
+		// sustituido inline — mandamos solo el content interpolado.
+		// Si no embedia {{INPUT}}, concatenamos payload al final para que
+		// codex lo reciba (validators que leen la salida del step previo
+		// desde stdin sin placeholder explicit).
+		stdinContent := stepForArgs.Content
+		if !strings.Contains(step.Content, "{{INPUT}}") {
+			stdinContent = stepForArgs.Content + "\n" + payload
+		}
+		cmd.Stdin = strings.NewReader(stdinContent)
+	} else {
+		cmd.Stdin = strings.NewReader(payload)
+	}
 	return cmd, nil
 }
 
@@ -137,10 +165,12 @@ func buildSpawnArgs(step wizard.Step) ([]string, error) {
 			"--verbose",
 		}, nil
 	case "codex":
-		// codex --json: parser stub (raw). Mantener `exec --json` para
-		// alinear con el doc; cuando codex.go tenga shape estable, el
-		// runtime no cambia.
-		return []string{"exec", "--json", step.Content}, nil
+		// Fix #114: omitir el content como tercer argv — el prompt viaja
+		// por stdin (ver defaultSpawnCmd). Esto elimina E2BIG cuando el
+		// content interpolado supera ARG_MAX (~256 KB en macOS).
+		// codex exec lee el prompt desde stdin cuando se omite el arg
+		// posicional (validado contra `codex exec --help`).
+		return []string{"exec", "--json"}, nil
 	case "gemini":
 		// kind=skill se invoca como /<skill> en gemini (alias TOML).
 		if step.Kind == wizard.KindSkill {
