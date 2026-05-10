@@ -73,6 +73,16 @@ type Verdict struct {
 	// rerun en mergeFeedbackIntoPayload (Fix #107 — el string pelado
 	// "verdict: changes_requested" como instruccion al modelo es ruido).
 	RawFeedbackOnly bool `yaml:"-"`
+	// InfraFail = true cuando el validator salio con exit != 0 (crash,
+	// timeout, context overflow, spawn error). En ese caso Feedback
+	// contiene el mensaje accionable construido por buildInfraFailFeedback
+	// (prefijo anti role-confusion + detalle del CLI/exit/output).
+	// Paralelo a RawFeedbackOnly: tampoco se persiste en verdict.yaml
+	// (ambos campos usan yaml:"-" para no alterar el shape del VerdictRecord).
+	// El flag esta disponible para consumidores futuros (ej. policy
+	// on_validator_infra_fail: rerun|pause|abort) sin requerir cambios en
+	// el schema del manifest — ver plan #115 Out of scope.
+	InfraFail bool `yaml:"-"`
 }
 
 // VerdictStatus values.
@@ -342,6 +352,104 @@ func tryExtractAgentText(line string) string {
 	return ""
 }
 
+// extractStreamJSONErrorMessage escanea el stdout del validator buscando un
+// evento JSON con `{"type":"error","message":"..."}` o
+// `{"type":"turn.failed","message":"..."}`. Devuelve el primer message
+// encontrado, o "" si nada matchea.
+//
+// Solo se invoca cuando cli == "codex" porque es el unico CLI que emite
+// stream-json con ese shape de error al sufrir un crash/context overflow.
+// Para otros CLIs el caller cae al fallback de "ultimas N lineas".
+//
+// El patron es el mismo que tryExtractAgentText (linea por linea sobre el
+// stdout, json.Unmarshal sobre un struct minimo). Vive en validator.go junto
+// a tryExtractAgentText por coherencia — no agrandamos el contrato del
+// paquete parser con algo todavia provisional.
+func extractStreamJSONErrorMessage(stdout string) string {
+	for _, raw := range strings.Split(stdout, "\n") {
+		trim := strings.TrimSpace(raw)
+		if trim == "" || !strings.HasPrefix(trim, "{") {
+			continue
+		}
+		var ev struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(trim), &ev); err != nil {
+			continue
+		}
+		evType := strings.ToLower(ev.Type)
+		if (evType == "error" || evType == "turn.failed") && ev.Message != "" {
+			return ev.Message
+		}
+	}
+	return ""
+}
+
+// lastNonEmptyLines devuelve hasta n lineas no vacias del final del string s,
+// concatenadas con "\n". Si hay menos de n lineas no vacias, devuelve las
+// que haya. Usado por buildInfraFailFeedback para sintetizar el tail del
+// stderr/stdout sin cargar el contexto con kilobytes de output.
+func lastNonEmptyLines(s string, n int) string {
+	var lines []string
+	for _, l := range strings.Split(s, "\n") {
+		if strings.TrimSpace(l) != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) <= n {
+		return strings.Join(lines, "\n")
+	}
+	return strings.Join(lines[len(lines)-n:], "\n")
+}
+
+// buildInfraFailFeedback construye el feedback accionable para el rerun cuando
+// el validator sale con exit != 0. Orden de fallback:
+//
+//  1. Si cli == "codex" y el stdout contiene un evento stream-json de error,
+//     se extrae su message: feedback = "validator (cli=codex) infra-failed exit=N: <message>".
+//  2. Si no hay evento de error parseable (cualquier CLI), se toman las
+//     ultimas 10 lineas no vacias de stderr; si stderr esta vacio, de stdout.
+//     Feedback = "validator (cli=<X>) infra-failed exit=<N>: <ultimas lineas>".
+//  3. Si ambos stdout y stderr estan vacios, fallback a "validator exit N"
+//     (mantiene compat con el comportamiento anterior — infraFail = false en
+//     este caso para no marcar como infra-fail un estado sin informacion).
+//
+// El feedback se envuelve con un prefijo anti role-confusion que aclara que
+// el fallo es de infraestructura, no del trabajo del step. El string final
+// se trunca a 4 KB (misma constante que truncateForRecord) para no inflar el
+// contexto del rerun.
+//
+// Devuelve (feedback string, infraFail bool). infraFail = true en los casos
+// 1 y 2; false solo en el fallback compat del caso 3.
+func buildInfraFailFeedback(cli string, exitCode int, stdout, stderr string) (string, bool) {
+	const infraPrefix = "El validator no pudo evaluar tu output por una falla de infra " +
+		"(no por un problema del trabajo). Reintenta el step manteniendo el output. Detalle: "
+
+	// Caso 1: error event stream-json de codex.
+	if strings.ToLower(cli) == "codex" {
+		if msg := extractStreamJSONErrorMessage(stdout); msg != "" {
+			detail := fmt.Sprintf("validator (cli=codex) infra-failed exit=%d: %s", exitCode, msg)
+			full := infraPrefix + detail
+			return truncateForRecord(full), true
+		}
+	}
+
+	// Caso 2: tail de stderr (preferido) o stdout.
+	tail := lastNonEmptyLines(stderr, 10)
+	if tail == "" {
+		tail = lastNonEmptyLines(stdout, 10)
+	}
+	if tail != "" {
+		detail := fmt.Sprintf("validator (cli=%s) infra-failed exit=%d: %s", cli, exitCode, tail)
+		full := infraPrefix + detail
+		return truncateForRecord(full), true
+	}
+
+	// Caso 3: fallback compat — sin informacion, mantenemos el string anterior.
+	return fmt.Sprintf("validator exit %d", exitCode), false
+}
+
 // canonicalVerdict normaliza el token YAML emitido por el validator a las
 // dos ramas que entiende el loop. Acepta los tokens 3-vias usados por
 // pipelines tipo che-funnel (approve/changes_requested/needs_human) y los
@@ -418,6 +526,10 @@ type validatorDoneMsg struct {
 	// verdict.yaml truncado, pero el msg lo lleva entero por si el
 	// handler lo necesita para algo).
 	RawStdout string
+	// RawStderr es el stderr completo del subprocess. Paralelo a
+	// RawStdout — lo usa buildInfraFailFeedback cuando exit != 0 para
+	// sintetizar feedback accionable (ultimas N lineas de stderr > stdout).
+	RawStderr string
 	StartedAt time.Time
 	EndedAt   time.Time
 }
@@ -457,8 +569,11 @@ func defaultValidatorSpawnCmd(step wizard.Step, payload string) (*exec.Cmd, erro
 //
 // Fail modes (todos terminan en validatorDoneMsg con un Verdict resuelto):
 //   - cmd.Start error → SpawnErr poblado, Verdict fail con feedback "spawn error: ..."
-//   - exit ≠ 0        → Verdict fail con feedback="validator exit %d" (ignoramos
-//     stdout en ese caso — el shape es indeterminado)
+//   - exit ≠ 0        → buildInfraFailFeedback construye feedback accionable con
+//     stdout/stderr: extrae error.message del stream-json codex si lo hay,
+//     sino las ultimas 10 lineas no vacias de stderr/stdout, con un prefijo
+//     anti role-confusion. Fallback ultimo a "validator exit N" si ambos
+//     stdout y stderr estan vacios (compat con el comportamiento anterior).
 //   - exit 0 + parser → parseVerdict sobre el stdout (tolerante)
 //
 // El stdout/stderr SIEMPRE se persiste (stdout.log + stderr.log) — el
@@ -658,6 +773,7 @@ func runValidator(step wizard.Step, payload string, runDir string, stepIdx, loop
 
 		bufMu.Lock()
 		stdoutCopy := stdoutBuf.String()
+		stderrCopy := stderrBuf.String()
 		bufMu.Unlock()
 
 		exitCode := 0
@@ -677,7 +793,13 @@ func runValidator(step wizard.Step, payload string, runDir string, stepIdx, loop
 		case spawnErr != "":
 			verdict = Verdict{Status: VerdictFail, Feedback: fmt.Sprintf("spawn error: %s", spawnErr)}
 		case exitCode != 0:
-			verdict = Verdict{Status: VerdictFail, Feedback: fmt.Sprintf("validator exit %d", exitCode)}
+			// exit != 0: construir feedback accionable con stdout/stderr del
+			// validator. buildInfraFailFeedback aplica el siguiente orden de
+			// fallback: (1) error.message de stream-json codex, (2) ultimas 10
+			// lineas no vacias de stderr/stdout, (3) "validator exit N" como
+			// compat ultimo si ambos estan vacios.
+			fb, infraFail := buildInfraFailFeedback(step.Validator.CLI, exitCode, stdoutCopy, stderrCopy)
+			verdict = Verdict{Status: VerdictFail, Feedback: fb, InfraFail: infraFail}
 		default:
 			verdict = parseVerdict(stdoutCopy)
 		}
@@ -692,6 +814,7 @@ func runValidator(step wizard.Step, payload string, runDir string, stepIdx, loop
 			Verdict:   verdict,
 			SpawnErr:  spawnErr,
 			RawStdout: stdoutCopy,
+			RawStderr: stderrCopy,
 			StartedAt: startedAt,
 			EndedAt:   endedAt,
 		}
