@@ -23,6 +23,7 @@
 package runner
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -84,10 +85,22 @@ const (
 // Si nada matchea: devolvemos Verdict{Status: VerdictFail, Feedback: "no
 // verdict block"} (loop equivalente a un fail tolerante).
 //
-// Verdict.Status se normaliza a lower-case y se trimea. Cualquier valor
-// que no sea exactamente "ok" se trata como "fail" (defensivo: un modelo
-// confundido que emite verdict: failed o verdict: KO no engaña al loop).
+// Verdict.Status se normaliza a lower-case + trim y luego se mapea a las
+// dos ramas que entiende el loop (ok|fail). Tokens reconocidos:
+//   - "ok", "approve"                                  → VerdictOk
+//   - "fail", "changes_requested", "needs_human", o
+//     cualquier otro no-vacio (defensivo)              → VerdictFail
+//
+// Cuando un token 3-vias (changes_requested/needs_human) cae a fail sin
+// feedback explicito, parseVerdict guarda el token original en Feedback
+// para que el modal RP / merge-feedback muestre que tipo de fail fue.
 func parseVerdict(stdout string) Verdict {
+	// Si el validator es claude o codex, su stdout es NDJSON stream-json:
+	// el verdict del agente viene anidado en el `text` de un evento, no
+	// como YAML top-level. extractValidatorMessages devuelve solo el
+	// texto del agente concatenado; si nada matchea, devuelve el stdout
+	// tal cual (validators raw como gemini/opencode siguen funcionando).
+	stdout = extractValidatorMessages(stdout)
 	stdout = strings.TrimSpace(stdout)
 	if stdout == "" {
 		return Verdict{Status: VerdictFail, Feedback: "no verdict block"}
@@ -141,22 +154,131 @@ func splitVerdictBlocks(stdout string) []string {
 // (verdict, true) si parseo OK y Status no esta vacio. Cualquier otro caso
 // devuelve (_, false) — el caller sigue con el siguiente candidato.
 //
-// Status se normaliza a lower-case + trim; cualquier valor distinto de "ok"
-// se mapea a "fail" para que el loop tenga solo dos ramas.
+// Status se normaliza a lower-case + trim y luego se canonicaliza via
+// canonicalVerdict (ok/approve → ok; resto → fail).
 func tryParseVerdictBlock(body string) (Verdict, bool) {
 	var v Verdict
 	if err := yaml.Unmarshal([]byte(body), &v); err != nil {
 		return Verdict{}, false
 	}
-	v.Status = strings.ToLower(strings.TrimSpace(v.Status))
-	if v.Status == "" {
+	raw := strings.ToLower(strings.TrimSpace(v.Status))
+	if raw == "" {
 		return Verdict{}, false
 	}
-	if v.Status != VerdictOk {
-		v.Status = VerdictFail
-	}
+	v.Status = canonicalVerdict(raw)
 	v.Feedback = strings.TrimSpace(v.Feedback)
+	// Si un token 3-vias (changes_requested/needs_human, o cualquier valor
+	// raro) cae a fail y el validator no emitio feedback explicito,
+	// guardamos el token original para que el merge-feedback / modal RP
+	// muestre por que fallo y no quede vacio. raw=="fail" se omite porque
+	// "verdict: fail" como feedback no agrega informacion.
+	if v.Status == VerdictFail && v.Feedback == "" && raw != VerdictFail {
+		v.Feedback = "verdict: " + raw
+	}
 	return v, true
+}
+
+// extractValidatorMessages destila el stdout de un validator stream-json
+// (claude o codex) al texto del agente concatenado, descartando metadatos
+// (turn.started, command_execution, usage…) y outputs de tools. Sin esto,
+// `verdict: approve` queda enterrado dentro de `item.text` y yaml.Unmarshal
+// lo lee como un objeto con key "type"/"item", no como un bloque verdict.
+//
+// Shapes reconocidos (cualquier linea que matchee aporta texto al output):
+//
+//	codex  : {"type":"item.completed","item":{"type":"agent_message","text":...}}
+//	claude : {"type":"assistant","message":{"content":[{"type":"text","text":...}, ...]}}
+//
+// Si NINGUNA linea matchea (validator raw — gemini/opencode/text), devuelve
+// el stdout intacto: el parser cae al path tradicional de YAML directo.
+func extractValidatorMessages(stdout string) string {
+	var sb strings.Builder
+	found := false
+	for _, raw := range strings.Split(stdout, "\n") {
+		trim := strings.TrimSpace(raw)
+		if trim == "" || !strings.HasPrefix(trim, "{") {
+			continue
+		}
+		text := tryExtractAgentText(trim)
+		if text == "" {
+			continue
+		}
+		if found {
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString(text)
+		found = true
+	}
+	if !found {
+		return stdout
+	}
+	return sb.String()
+}
+
+// tryExtractAgentText devuelve el texto del agente de una sola linea JSON
+// del stdout del validator. Soporta los dos shapes (claude / codex) y
+// devuelve "" si la linea no es JSON o no calza con ningun shape conocido.
+//
+// Para claude `assistant.message.content[]`, concatena los bloques con
+// type=text separados por newline. Para codex `item.agent_message.text`,
+// devuelve el text plano. Otros tipos (tool_use, command_execution,
+// reasoning, turn.completed, etc) se ignoran — son metadata, no veredicto.
+func tryExtractAgentText(line string) string {
+	var ev struct {
+		Type    string          `json:"type"`
+		Message json.RawMessage `json:"message"`
+		Item    struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal([]byte(line), &ev); err != nil {
+		return ""
+	}
+	if ev.Item.Type == "agent_message" && ev.Item.Text != "" {
+		return ev.Item.Text
+	}
+	if ev.Type == "assistant" && len(ev.Message) > 0 {
+		var msg struct {
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if err := json.Unmarshal(ev.Message, &msg); err == nil {
+			var sb strings.Builder
+			first := true
+			for _, c := range msg.Content {
+				if c.Type != "text" || c.Text == "" {
+					continue
+				}
+				if !first {
+					sb.WriteString("\n")
+				}
+				sb.WriteString(c.Text)
+				first = false
+			}
+			if sb.Len() > 0 {
+				return sb.String()
+			}
+		}
+	}
+	return ""
+}
+
+// canonicalVerdict normaliza el token YAML emitido por el validator a las
+// dos ramas que entiende el loop. Acepta los tokens 3-vias usados por
+// pipelines tipo che-funnel (approve/changes_requested/needs_human) y los
+// tokens binarios del contrato base (ok/fail). Cualquier otro valor cae a
+// fail (defensivo: un modelo confundido que emite "approved" o "KO" no
+// debe avanzar el loop).
+func canonicalVerdict(token string) string {
+	switch token {
+	case VerdictOk, "approve":
+		return VerdictOk
+	default:
+		return VerdictFail
+	}
 }
 
 // VerdictRecord es el shape persistido en
