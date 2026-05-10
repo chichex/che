@@ -608,7 +608,6 @@ const PipelineDetail = ({ pipeline, runs, onOpenRun, onRequestRun, onResumeDraft
                 <th className="text-left font-medium px-4 py-2.5">input</th>
                 <th className="text-left font-medium px-4 py-2.5 w-[110px]">started</th>
                 <th className="text-left font-medium px-4 py-2.5 w-[100px]">duration</th>
-                <th className="text-left font-medium px-4 py-2.5 w-[160px]">steps</th>
               </tr>
             </thead>
             <tbody>
@@ -616,8 +615,6 @@ const PipelineDetail = ({ pipeline, runs, onOpenRun, onRequestRun, onResumeDraft
                 const dur = r.finished_at && r.started_at
                   ? new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()
                   : null;
-                const totalSteps = r.steps.length;
-                const doneSteps = r.steps.filter(s => s.status === "done").length;
                 return (
                   <tr
                     key={r.id}
@@ -625,12 +622,11 @@ const PipelineDetail = ({ pipeline, runs, onOpenRun, onRequestRun, onResumeDraft
                     className="border-t hairline-2 cursor-pointer hover:bg-[var(--hover)]"
                   >
                     <td className="px-4 py-3"><StatusDot status={r.status} /></td>
-                    <td className="px-4 py-3 mono ink">{r.id}</td>
+                    <td className="px-4 py-3 mono ink">{r.id.slice(0, 6)}</td>
                     <td className="px-4 py-3 mono ink-2">{statusLabel[r.status]}</td>
-                    <td className="px-4 py-3 mono ink-2 truncate">{r.input || <span className="ink-3">—</span>}</td>
-                    <td className="px-4 py-3 ink-2">{fmtAgo(r.started_at)}</td>
+                    <td className="px-4 py-3 mono ink-2 truncate">{r.input_value || <span className="ink-3">—</span>}</td>
+                    <td className="px-4 py-3 ink-2" title={fmtClock(r.started_at)}>{fmtAgo(r.started_at)}</td>
                     <td className="px-4 py-3 mono ink-2">{r.status === "running" ? <span className="ink">live</span> : fmtDuration(dur)}</td>
-                    <td className="px-4 py-3 mono ink-2">{doneSteps}/{totalSteps}</td>
                   </tr>
                 );
               })}
