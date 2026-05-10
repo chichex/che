@@ -103,6 +103,15 @@ type StepRun struct {
 	// Solo aplica a CLIs que emiten stream-json (claude); para los
 	// demas queda nil.
 	PermissionDenials []string
+
+	// EventsRun es el contador (1-based) de la corrida activa del step.
+	// Se incrementa en cada `runStep` (primer start y cada rerun del
+	// validator). El archivo events.jsonl se rota a
+	// step-NN.events.RUN-K.jsonl por valor de K, asi cada rerun preserva
+	// la traza del anterior en disco (Fix #107). Para CLIs que no emiten
+	// stream-json (gemini/opencode/...) el contador igual se incrementa
+	// pero no se materializa archivo.
+	EventsRun int
 }
 
 // ValidatorRun es el estado vivo del loop del validator de un step. Sigue
@@ -117,6 +126,12 @@ type ValidatorRun struct {
 	OnMaxLoops   string
 	FinalVerdict string
 	LastFeedback string
+	// LastFeedbackRawOnly indica que LastFeedback es solo el fallback
+	// `"verdict: " + raw` (sin texto explicito del validator). En ese caso
+	// mergeFeedbackIntoPayload NO lo prependea al payload del rerun: el
+	// string pelado es ruido al modelo. Sigue siendo util para el modal RP
+	// y last_feedback del manifest (Fix #107).
+	LastFeedbackRawOnly bool
 }
 
 // Final verdict values registrados en manifest.steps[i].validator.final_verdict.

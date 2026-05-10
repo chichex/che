@@ -65,6 +65,14 @@ feedback: |     # opcional, requerido si verdict=fail
 type Verdict struct {
 	Status   string `yaml:"verdict"`
 	Feedback string `yaml:"feedback,omitempty"`
+	// RawFeedbackOnly = true cuando el validator no emitio feedback
+	// explicito y caimos al fallback `Feedback = "verdict: " + raw`
+	// (ej. token 3-vias changes_requested/needs_human sin texto). El
+	// fallback es util para mostrar en el modal RP y persistir en
+	// last_feedback del manifest, pero NO se prependea al payload del
+	// rerun en mergeFeedbackIntoPayload (Fix #107 — el string pelado
+	// "verdict: changes_requested" como instruccion al modelo es ruido).
+	RawFeedbackOnly bool `yaml:"-"`
 }
 
 // VerdictStatus values.
@@ -133,6 +141,12 @@ func parseVerdict(stdout string) Verdict {
 // splitVerdictBlocks parte el stdout en bloques separados por lineas en
 // blanco o por separadores yaml `---`. Mantiene el orden original — el
 // caller los itera de atras hacia adelante para preferir el ultimo bloque.
+//
+// Tambien extrae el cuerpo de fences markdown ```yaml ... ``` (info-string
+// `yaml`/`yml` o vacio) y los agrega como candidatos al final. Los modelos
+// que envuelven el verdict en un fence dentro de un texto markdown mas
+// largo (codex en che-funnel) caian a "no verdict block" porque el split
+// por doble newline no entraba al fence (Fix #107).
 func splitVerdictBlocks(stdout string) []string {
 	// Normalizamos line endings + reemplazamos separadores `---` por una
 	// linea en blanco (asi el split por doble newline alcanza para ambos).
@@ -149,7 +163,66 @@ func splitVerdictBlocks(stdout string) []string {
 		b.WriteString("\n")
 	}
 	parts := strings.Split(b.String(), "\n\n")
+
+	// Agregamos como candidatos los cuerpos de fences markdown. Iteramos
+	// linea-por-linea buscando aperturas ```yaml / ```yml / ``` y cerrando
+	// con ```` (la misma indentacion no importa — el modelo puede emitir
+	// el fence con leading spaces). El cuerpo recolectado va al final de
+	// la lista; el caller itera de atras hacia adelante, asi el fence
+	// gana sobre bloques top-level si ambos tienen verdict.
+	fences := extractYAMLFences(normalized)
+	parts = append(parts, fences...)
 	return parts
+}
+
+// extractYAMLFences recolecta el cuerpo de cada fence markdown ```yaml ...
+// ``` (o ```yml ... ``` o ``` ... ```) presente en stdout. Devuelve los
+// cuerpos en el orden de aparicion. Si no hay fences, devuelve nil.
+//
+// Solo info-strings vacios o {yaml, yml} se consideran candidatos: un fence
+// ```json ... ``` o ```bash ... ``` no aporta verdicts validos y agregarlo
+// como candidato genera falsos positivos.
+func extractYAMLFences(stdout string) []string {
+	var out []string
+	lines := strings.Split(stdout, "\n")
+	i := 0
+	for i < len(lines) {
+		trim := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trim, "```") {
+			info := strings.TrimSpace(strings.TrimPrefix(trim, "```"))
+			info = strings.ToLower(info)
+			// Solo aceptamos fences yaml/yml o sin info-string. Los
+			// otros (json, bash, go, ...) los saltamos pero igual
+			// avanzamos hasta el cierre para no procesar su contenido
+			// como top-level.
+			accept := info == "" || info == "yaml" || info == "yml"
+			j := i + 1
+			var body strings.Builder
+			closed := false
+			for j < len(lines) {
+				if strings.HasPrefix(strings.TrimSpace(lines[j]), "```") {
+					closed = true
+					break
+				}
+				body.WriteString(lines[j])
+				body.WriteString("\n")
+				j++
+			}
+			if accept && closed && body.Len() > 0 {
+				out = append(out, body.String())
+			}
+			if closed {
+				i = j + 1
+			} else {
+				// fence sin cierre: lo descartamos y seguimos despues
+				// de la apertura para no quedarnos colgados.
+				i++
+			}
+			continue
+		}
+		i++
+	}
+	return out
 }
 
 // tryParseVerdictBlock intenta deserializar el bloque como Verdict. Devuelve
@@ -176,6 +249,7 @@ func tryParseVerdictBlock(body string) (Verdict, bool) {
 	// "verdict: fail" como feedback no agrega informacion.
 	if v.Status == VerdictFail && v.Feedback == "" && raw != VerdictFail {
 		v.Feedback = "verdict: " + raw
+		v.RawFeedbackOnly = true
 	}
 	return v, true
 }
@@ -399,10 +473,13 @@ func runValidator(step wizard.Step, payload string, runDir string, stepIdx, loop
 
 	// El "step" sintetico para buildSpawnArgs: copiamos el bloque
 	// validator del step original como si fuera un step independiente.
+	// Interpolamos `{{INPUT}}` en el content del validator con el payload
+	// "limpio" del step (sin el preamble) — el preamble solo vive en stdin
+	// para no contaminar el prompt embebido (Fix #107).
 	validatorStep := wizard.Step{
 		CLI:     step.Validator.CLI,
 		Kind:    step.Validator.Kind,
-		Content: step.Validator.Content,
+		Content: interpolateInput(step.Validator.Content, payload),
 	}
 
 	full := validatorPreamble + payload

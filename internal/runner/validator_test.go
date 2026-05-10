@@ -410,3 +410,87 @@ func TestNewValidatorRun_Defaults(t *testing.T) {
 		t.Errorf("expected empty FinalVerdict initially, got %q", v.FinalVerdict)
 	}
 }
+
+// TestParseVerdict_FenceMarkdownYAML cubre Fix 2 (#107): el modelo emitio
+// el verdict envuelto en un fence markdown ```yaml ... ``` adentro de un
+// texto en prosa. Antes del fix, splitVerdictBlocks no entraba al fence y
+// parseVerdict caia a "no verdict block". Ahora el fence se agrega como
+// candidato y el verdict se extrae correctamente.
+func TestParseVerdict_FenceMarkdownYAML(t *testing.T) {
+	stdout := "Resumen: no encontre PRs en la salida del step execute.\n" +
+		"\n" +
+		"```yaml\n" +
+		"verdict: fail\n" +
+		"feedback: |\n" +
+		"  el step execute no produjo PRs; revisar payload upstream.\n" +
+		"```\n" +
+		"\n" +
+		"Listo.\n"
+	v := parseVerdict(stdout)
+	if v.Status != VerdictFail {
+		t.Errorf("expected fail, got %q", v.Status)
+	}
+	if !strings.Contains(v.Feedback, "no produjo PRs") {
+		t.Errorf("feedback no parseo el contenido del fence: %q", v.Feedback)
+	}
+}
+
+// TestParseVerdict_FenceWithoutInfoString verifica que un fence ``` sin
+// info-string (no ```yaml) tambien sea aceptado — codex/claude a veces
+// emiten fences pelados.
+func TestParseVerdict_FenceWithoutInfoString(t *testing.T) {
+	stdout := "intro\n\n```\nverdict: ok\n```\nouttro\n"
+	v := parseVerdict(stdout)
+	if v.Status != VerdictOk {
+		t.Errorf("expected ok with bare fence, got %q (feedback=%q)", v.Status, v.Feedback)
+	}
+}
+
+// TestParseVerdict_FenceJSONIgnored: un fence ```json ... ``` no aporta
+// candidato (info-string no aceptado). Si el resto del stdout no tiene
+// verdict, caemos a "no verdict block".
+func TestParseVerdict_FenceJSONIgnored(t *testing.T) {
+	stdout := "respuesta:\n\n```json\n{\"verdict\":\"ok\"}\n```\n"
+	v := parseVerdict(stdout)
+	if v.Status != VerdictFail {
+		t.Errorf("expected fail (json fence ignorado), got %q", v.Status)
+	}
+	if v.Feedback != "no verdict block" {
+		t.Errorf("expected 'no verdict block', got %q", v.Feedback)
+	}
+}
+
+// TestParseVerdict_RawFeedbackOnlyFlag cubre Fix 3 (#107): cuando el
+// validator emite un token 3-vias (changes_requested) sin feedback
+// explicito, el Verdict resultante debe tener RawFeedbackOnly=true para
+// que mergeFeedbackIntoPayload pueda decidir no prependearlo al payload.
+func TestParseVerdict_RawFeedbackOnlyFlag(t *testing.T) {
+	stdout := "verdict: changes_requested\n"
+	v := parseVerdict(stdout)
+	if v.Status != VerdictFail {
+		t.Errorf("expected fail, got %q", v.Status)
+	}
+	if v.Feedback != "verdict: changes_requested" {
+		t.Errorf("expected raw fallback feedback, got %q", v.Feedback)
+	}
+	if !v.RawFeedbackOnly {
+		t.Errorf("expected RawFeedbackOnly=true, got false")
+	}
+}
+
+// TestParseVerdict_ExplicitFeedbackNotRawOnly: si el validator emitio
+// feedback explicito junto al token, RawFeedbackOnly debe quedar false
+// (el feedback es util para el rerun).
+func TestParseVerdict_ExplicitFeedbackNotRawOnly(t *testing.T) {
+	stdout := "verdict: changes_requested\nfeedback: corregi este edge case\n"
+	v := parseVerdict(stdout)
+	if v.Status != VerdictFail {
+		t.Errorf("expected fail, got %q", v.Status)
+	}
+	if v.Feedback != "corregi este edge case" {
+		t.Errorf("expected explicit feedback, got %q", v.Feedback)
+	}
+	if v.RawFeedbackOnly {
+		t.Errorf("expected RawFeedbackOnly=false when feedback is explicit, got true")
+	}
+}

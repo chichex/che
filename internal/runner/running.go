@@ -197,6 +197,11 @@ func startStep(m RunModel, idx int) (RunModel, tea.Cmd) {
 	m.LogScrollOffset = 0
 	m.Steps[idx].Status = StepStatusRunning
 	m.Steps[idx].StartedAt = time.Now()
+	// Fix #107: arrancamos la primera corrida del step. EventsRun = 1.
+	// Los reruns del validator incrementan este contador en
+	// rerunStepWithFeedback para que events.jsonl se rote a
+	// step-NN.events.RUN-K.jsonl por vuelta.
+	m.Steps[idx].EventsRun = 1
 
 	// H8: snapshot atomico del manifest al ARRANCAR el step (start de cada
 	// step, segun los criterios de aceptacion). Asi si el proceso muere
@@ -209,7 +214,7 @@ func startStep(m RunModel, idx int) (RunModel, tea.Cmd) {
 	// actual). Sobreescribe cualquier remanente del step anterior — ese ya
 	// fue limpiado por handleStepDone.
 	m.runState = &runState{requestCancel: make(chan struct{}, 1)}
-	cmd := runStep(step, payload, m.RunDir, idx+1, m.runState)
+	cmd := runStep(step, payload, m.RunDir, idx+1, m.Steps[idx].EventsRun, m.runState)
 	return m, cmd
 }
 
@@ -406,7 +411,11 @@ func (m RunModel) handleStepDone(msg stepDoneMsg) (tea.Model, tea.Cmd) {
 	// haber hecho nada", como cuando el prompt invita a AskUserQuestion en
 	// modo no-TTY). Solo aplica a CLIs stream-json; para los demas el helper
 	// devuelve nil.
-	if denials := readPermissionDenials(m.RunDir, step.Idx); len(denials) > 0 {
+	// Fix #107: leemos el archivo de eventos de la corrida activa
+	// (`step-NN.events.RUN-K.jsonl`). Si por algun motivo EventsRun esta en
+	// 0 (path legacy / tests viejos), readPermissionDenials cae al nombre
+	// sin sufijo.
+	if denials := readPermissionDenials(m.RunDir, step.Idx, step.EventsRun); len(denials) > 0 {
 		step.PermissionDenials = denials
 	}
 
@@ -588,6 +597,7 @@ func (m RunModel) handleValidatorDone(msg validatorDoneMsg) (tea.Model, tea.Cmd)
 		RawStdout: truncateForRecord(msg.RawStdout),
 	})
 	m.Steps[idx].Validator.LastFeedback = msg.Verdict.Feedback
+	m.Steps[idx].Validator.LastFeedbackRawOnly = msg.Verdict.RawFeedbackOnly
 
 	// H8: snapshot atomico al CERRAR el validator loop (end de cada
 	// validator loop). Hace que el bloque validator.last_feedback +
@@ -663,8 +673,19 @@ func rerunStepWithFeedback(m RunModel, idx int) (RunModel, tea.Cmd) {
 	}
 
 	feedback := ""
+	rawOnly := false
 	if m.Steps[idx].Validator != nil {
 		feedback = m.Steps[idx].Validator.LastFeedback
+		rawOnly = m.Steps[idx].Validator.LastFeedbackRawOnly
+	}
+	// Fix #107: si el feedback efectivo es solo el fallback raw del verdict
+	// (ej. "verdict: changes_requested" sin texto del validator), no lo
+	// prependeamos al payload del rerun — el modelo no puede corregir nada
+	// con esa instruccion pelada. Pasamos "" para que merge devuelva el
+	// payload limpio. El last_feedback del manifest queda intacto para
+	// auditoria.
+	if rawOnly {
+		feedback = ""
 	}
 	payload := mergeFeedbackIntoPayload(basePayload, feedback)
 
@@ -680,18 +701,51 @@ func rerunStepWithFeedback(m RunModel, idx int) (RunModel, tea.Cmd) {
 	m.Steps[idx].FinishedAt = time.Time{}
 	m.Steps[idx].ExitCode = 0
 	m.Steps[idx].SpawnError = ""
+	// Fix #107: rerun del step incrementa EventsRun para que events.jsonl
+	// se escriba a un archivo nuevo (step-NN.events.RUN-K.jsonl) sin pisar
+	// la traza del intento anterior.
+	m.Steps[idx].EventsRun++
 
 	m.runState = &runState{requestCancel: make(chan struct{}, 1)}
-	cmd := runStep(step, payload, m.RunDir, idx+1, m.runState)
+	cmd := runStep(step, payload, m.RunDir, idx+1, m.Steps[idx].EventsRun, m.runState)
 	return m, cmd
 }
 
 // mergeFeedbackIntoPayload prependea un bloque "FEEDBACK del validator" al
 // payload original para que el modelo del step lo consuma como contexto
 // extra al re-correr. Si no hay feedback, devuelve el payload tal cual.
+//
+// El caller (rerunStepWithFeedback) suprime el feedback cuando es solo el
+// fallback raw del verdict (`"verdict: <token>"`) pasando "" — el string
+// pelado como instruccion al modelo es ruido (Fix #107). Como defensa
+// adicional, esta funcion tambien detecta el patron `^verdict: \w+$` y lo
+// trata como vacio para cubrir invocaciones que no se enteraron del flag.
+// isRawVerdictFallback detecta el patron del fallback puesto por
+// tryParseVerdictBlock cuando no hay feedback explicito: una sola linea
+// "verdict: <token>" sin nada mas. No usamos regex para mantener el codigo
+// barato; alcanza con el prefix + sanity check de que es una sola linea
+// con un solo token despues de los dos puntos.
+func isRawVerdictFallback(feedback string) bool {
+	feedback = strings.TrimSpace(feedback)
+	if !strings.HasPrefix(feedback, "verdict:") {
+		return false
+	}
+	if strings.Contains(feedback, "\n") {
+		return false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(feedback, "verdict:"))
+	if rest == "" {
+		return false
+	}
+	// Un solo token (sin espacios) — los tokens conocidos son ok, fail,
+	// approve, changes_requested, needs_human. Un feedback real va a
+	// tener al menos una frase con espacios.
+	return !strings.ContainsAny(rest, " \t")
+}
+
 func mergeFeedbackIntoPayload(payload, feedback string) string {
 	feedback = strings.TrimSpace(feedback)
-	if feedback == "" {
+	if feedback == "" || isRawVerdictFallback(feedback) {
 		return payload
 	}
 	var b strings.Builder
