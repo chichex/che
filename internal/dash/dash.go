@@ -49,17 +49,19 @@ func Serve(ctx context.Context, opts Options) error {
 		return err
 	}
 
-	// Resolve pipelines directory: ~/.che/pipelines. On failure use ""
-	// so handlers return empty list / 404 instead of crashing.
+	// Resolve pipelines and runs directories. On failure use "" so handlers
+	// return empty list / 404 instead of crashing.
 	pipelinesDir := ""
+	runsDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		pipelinesDir = filepath.Join(home, ".che", "pipelines")
+		runsDir = filepath.Join(home, ".che", "runs")
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
 	mux.HandleFunc("/api/pipelines", handleListPipelines(pipelinesDir))
-	mux.HandleFunc("/api/pipelines/", handleGetPipeline(pipelinesDir))
+	mux.HandleFunc("/api/pipelines/", dispatchPipelinesPrefix(pipelinesDir, runsDir))
 
 	srv := &http.Server{
 		Handler:           mux,

@@ -140,48 +140,58 @@ func handleListPipelines(dir string) http.HandlerFunc {
 // It extracts the slug from the URL path, loads the matching YAML, and
 // returns the full pipeline detail including steps. Returns 404 JSON if
 // the slug does not exist, 500 on systemic errors.
+//
+// Deprecated: prefer calling getPipelineDetail directly from the dispatcher.
+// This function is kept for backward compatibility with tests.
 func handleGetPipeline(dir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		slug := strings.TrimPrefix(r.URL.Path, "/api/pipelines/")
+		slug = strings.TrimSuffix(slug, "/")
 		if slug == "" || strings.ContainsAny(slug, "/\\") {
 			http.Error(w, `{"error":"pipeline not found"}`, http.StatusNotFound)
 			return
 		}
+		getPipelineDetail(dir, slug, w, r)
+	}
+}
 
-		if dir == "" {
+// getPipelineDetail is the helper that loads a pipeline by slug from dir and
+// writes the JSON detail response. Used by both handleGetPipeline and the
+// dispatcher in dispatchPipelinesPrefix.
+func getPipelineDetail(dir, slug string, w http.ResponseWriter, r *http.Request) {
+	if dir == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"pipeline not found"}`))
+		return
+	}
+
+	path := filepath.Join(dir, slug+".yaml")
+	p, err := wizard.Load(path)
+	if err != nil {
+		if os.IsNotExist(err) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"pipeline not found"}`))
 			return
 		}
-
-		path := filepath.Join(dir, slug+".yaml")
-		p, err := wizard.Load(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusNotFound)
-				_, _ = w.Write([]byte(`{"error":"pipeline not found"}`))
-				return
-			}
-			log.Printf("[dash] load %s: %v", path, err)
-			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
-			return
-		}
-
-		steps := make([]stepJSON, 0, len(p.Steps))
-		for _, s := range p.Steps {
-			steps = append(steps, toStepJSON(s))
-		}
-
-		detail := pipelineDetailJSON{
-			Slug:        slug,
-			Name:        p.Name,
-			Description: p.Description,
-			Status:      pipelineStatus(p),
-			Steps:       steps,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(detail)
+		log.Printf("[dash] load %s: %v", path, err)
+		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+		return
 	}
+
+	steps := make([]stepJSON, 0, len(p.Steps))
+	for _, s := range p.Steps {
+		steps = append(steps, toStepJSON(s))
+	}
+
+	detail := pipelineDetailJSON{
+		Slug:        slug,
+		Name:        p.Name,
+		Description: p.Description,
+		Status:      pipelineStatus(p),
+		Steps:       steps,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(detail)
 }

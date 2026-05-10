@@ -646,28 +646,73 @@ const PipelineDetail = ({ pipeline, runs, onOpenRun, onRequestRun, onResumeDraft
 // Run detail (live + frozen share the same view)
 // ─────────────────────────────────────────────────────────────────────
 
-const RunDetail = ({ pipeline, run, stream, onBack, onCancel, onResume, onSelectStep, selectedStepIdx }) => {
-  const streamRef = useRef(null);
+const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onResume, onSelectStep, selectedStepIdx }) => {
   const [paneView, setPaneView] = useState("output");
-  const selectedHasValidator = run.steps[selectedStepIdx]?.validator;
+  const [stdoutText, setStdoutText] = useState(null); // null=not fetched, ""=empty, str=content
+  const [stdoutLoading, setStdoutLoading] = useState(false);
+
+  // run may be null while the detail fetch is in flight — guard defensively
+  const steps = run?.steps || [];
+  const selectedStep = steps[selectedStepIdx] || null;
+  const selectedHasValidator = selectedStep?.validator || null;
+
+  // if we switched to a step without validator while on validator tab, fall back
   useEffect(() => {
-    // if we switched to a step without validator while on the validator tab, fall back
     if (paneView === "validator" && !selectedHasValidator) setPaneView("output");
   }, [selectedStepIdx, selectedHasValidator]);
+
+  // reset stdout cache when step or run changes
   useEffect(() => {
-    const el = streamRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [stream]);
+    setStdoutText(null);
+    setStdoutLoading(false);
+  }, [selectedStepIdx, runId]);
+
+  // lazy fetch stdout when tab is "output" and not yet loaded
+  useEffect(() => {
+    if (paneView !== "output") return;
+    if (stdoutText !== null) return; // already fetched or loading
+    if (!slug || !runId || selectedStep == null) return;
+    if (selectedStep.status === "pending") return;
+
+    setStdoutLoading(true);
+    const ctrl = new AbortController();
+    fetch('/api/pipelines/' + slug + '/runs/' + runId + '/steps/' + selectedStepIdx + '/stdout', { signal: ctrl.signal })
+      .then(r => {
+        if (r.status === 404) return '';
+        return r.text();
+      })
+      .then(text => {
+        setStdoutText(text || '');
+        setStdoutLoading(false);
+      })
+      .catch(err => {
+        if (err.name !== 'AbortError') {
+          console.error('[dash] fetch stdout:', err);
+          setStdoutText('');
+          setStdoutLoading(false);
+        }
+      });
+    return () => ctrl.abort();
+  }, [paneView, selectedStepIdx, runId, slug, stdoutText]);
+
+  if (!run) {
+    return (
+      <div className="flex flex-col h-full items-center justify-center">
+        <div className="ink-3 text-[13px] mono">cargando run…</div>
+      </div>
+    );
+  }
 
   const isLive = run.status === "running";
   const dur = run.finished_at && run.started_at
     ? new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()
     : run.started_at ? Date.now() - new Date(run.started_at).getTime() : null;
 
-  const selectedStep = run.steps[selectedStepIdx];
-
-  // filter stream for selected step (in the simulator we just show all; in real impl, server tags by step idx)
-  const filtered = stream;
+  // step duration from manifest: finished_at - started_at in ms
+  const stepDuration = (s) => {
+    if (!s || !s.finished_at || !s.started_at) return null;
+    return new Date(s.finished_at).getTime() - new Date(s.started_at).getTime();
+  };
 
   return (
     <div className="flex flex-col h-full" data-screen-label={"run · " + run.id}>
@@ -701,32 +746,28 @@ const RunDetail = ({ pipeline, run, stream, onBack, onCancel, onResume, onSelect
                 title="v1 read-only — usar TUI para lanzar"
               >Cancel run</button>
             )}
-            {!isLive && run.status === "failed" && (
-              <button className="btn">Re-run</button>
-            )}
           </div>
         </div>
         <div className="flex items-center gap-5 mono text-[12px] ink-3 ml-8">
           <span>started <span className="ink-2">{fmtClock(run.started_at)}</span> · {fmtAgo(run.started_at)}</span>
           <span>{isLive ? "live" : "duration"} <span className="ink-2">{fmtDuration(dur)}</span></span>
-          {run.input && <span>input <span className="ink-2">{run.input}</span></span>}
-          <span className="ml-auto">{run.steps.filter(s=>s.status==="done").length}/{run.steps.length} steps</span>
+          {run.input_value && <span>input <span className="ink-2">{run.input_value}</span></span>}
+          <span className="ml-auto">{steps.filter(s=>s.status==="done").length}/{steps.length} steps</span>
         </div>
       </div>
 
-      {/* steps + stream */}
+      {/* steps + detail pane */}
       <div className="flex flex-1 min-h-0">
         {/* steps timeline */}
         <div className="w-[380px] shrink-0 border-r hairline overflow-y-auto scroll-thin">
           <div className="px-4 pt-4 pb-2 text-[11px] uppercase tracking-wider ink-3 font-semibold">steps</div>
           <div className="pb-4">
-            {run.steps.map((s, i) => {
+            {steps.map((s, i) => {
               const sel = i === selectedStepIdx;
-              const stepDef = pipeline.steps[i];
-              const hasValidator = stepDef && stepDef.validator;
+              const dur_ms = stepDuration(s);
               return (
                 <button
-                  key={s.name}
+                  key={s.name + i}
                   onClick={() => onSelectStep(i)}
                   className={"step-row w-full text-left px-4 py-3 border-b hairline-2 " + (sel ? "selected" : "")}
                 >
@@ -734,9 +775,9 @@ const RunDetail = ({ pipeline, run, stream, onBack, onCancel, onResume, onSelect
                     <span className="mono text-[10.5px] ink-3 w-5">{(i+1).toString().padStart(2,"0")}</span>
                     <StatusDot status={s.status} />
                     <span className="mono text-[13px] ink">{s.name}</span>
-                    <span className="mono text-[10.5px] ink-3 ml-1">{stepDef?.cli}</span>
+                    <span className="mono text-[10.5px] ink-3 ml-1">{s.cli}</span>
                     <span className="ml-auto mono text-[11px] ink-3">
-                      {s.status === "running" ? "running" : fmtDuration(s.duration_ms)}
+                      {s.status === "running" ? "running" : fmtDuration(dur_ms)}
                     </span>
                   </div>
                   {s.error && (
@@ -744,7 +785,7 @@ const RunDetail = ({ pipeline, run, stream, onBack, onCancel, onResume, onSelect
                       {s.error}
                     </div>
                   )}
-                  {hasValidator && s.validator && (
+                  {s.validator && (
                     <div className="mt-2 ml-7 panel rounded-md p-2 border hairline" style={{background:"rgba(0,0,0,0.015)"}}>
                       <div className="flex items-center gap-2 mb-1">
                         <span className="text-[10.5px] uppercase tracking-wider ink-3 font-semibold">validator</span>
@@ -771,17 +812,20 @@ const RunDetail = ({ pipeline, run, stream, onBack, onCancel, onResume, onSelect
           </div>
         </div>
 
-        {/* stream panel */}
+        {/* detail pane */}
         <div className="flex-1 flex flex-col min-w-0">
           <div className="flex items-center justify-between px-4 py-0 border-b hairline">
             <div className="flex items-center gap-0">
+              {/* output tab: disabled if step is pending */}
               <button
-                onClick={() => setPaneView("output")}
-                className={"px-3 py-3 text-[12px] mono border-b-2 transition-colors " + (paneView === "output" ? "ink font-semibold" : "ink-3 hover:ink-2")}
+                onClick={() => selectedStep?.status !== "pending" && setPaneView("output")}
+                disabled={selectedStep?.status === "pending"}
+                className={"px-3 py-3 text-[12px] mono border-b-2 transition-colors " + (paneView === "output" ? "ink font-semibold" : "ink-3 hover:ink-2") + (selectedStep?.status === "pending" ? " opacity-40 cursor-not-allowed" : "")}
                 style={{borderColor: paneView === "output" ? "var(--ink)" : "transparent", marginBottom: "-1px"}}
               >
                 output
               </button>
+              {/* definition tab: always available */}
               <button
                 onClick={() => setPaneView("definition")}
                 className={"px-3 py-3 text-[12px] mono border-b-2 transition-colors " + (paneView === "definition" ? "ink font-semibold" : "ink-3 hover:ink-2")}
@@ -789,10 +833,12 @@ const RunDetail = ({ pipeline, run, stream, onBack, onCancel, onResume, onSelect
               >
                 definition
               </button>
+              {/* validator tab: only if step has validator, disabled if pending */}
               {selectedHasValidator && (
                 <button
-                  onClick={() => setPaneView("validator")}
-                  className={"px-3 py-3 text-[12px] mono border-b-2 transition-colors " + (paneView === "validator" ? "ink font-semibold" : "ink-3 hover:ink-2")}
+                  onClick={() => selectedStep?.status !== "pending" && setPaneView("validator")}
+                  disabled={selectedStep?.status === "pending"}
+                  className={"px-3 py-3 text-[12px] mono border-b-2 transition-colors " + (paneView === "validator" ? "ink font-semibold" : "ink-3 hover:ink-2") + (selectedStep?.status === "pending" ? " opacity-40 cursor-not-allowed" : "")}
                   style={{borderColor: paneView === "validator" ? "var(--ink)" : "transparent", marginBottom: "-1px"}}
                 >
                   validator <span className="ink-3">{selectedHasValidator.loops_run}/{selectedHasValidator.max_loops}</span>
@@ -806,41 +852,75 @@ const RunDetail = ({ pipeline, run, stream, onBack, onCancel, onResume, onSelect
               )}
             </div>
             <div className="flex items-center gap-2 mono text-[10.5px] ink-3">
-              {paneView === "output" ? <span>{stream.length} lines</span>
-                : paneView === "definition" ? <span>step {(selectedStepIdx+1).toString().padStart(2,"0")} / {run.steps.length.toString().padStart(2,"0")}</span>
-                : <span>{selectedHasValidator?.loops_run || 0} loop{(selectedHasValidator?.loops_run || 0) === 1 ? "" : "s"}</span>}
+              {paneView === "definition"
+                ? <span>step {(selectedStepIdx+1).toString().padStart(2,"00")} / {steps.length.toString().padStart(2,"00")}</span>
+                : paneView === "validator"
+                ? <span>{selectedHasValidator?.loops_run || 0} loop{(selectedHasValidator?.loops_run || 0) === 1 ? "" : "s"}</span>
+                : null}
             </div>
           </div>
+
           {paneView === "output" ? (
-            <div ref={streamRef} className="stream flex-1 overflow-y-auto scroll-thin px-4 py-3">
-              {filtered.map((line, idx) => (
-                <div key={idx} className="flex gap-3">
-                  <span className="l-ts shrink-0 select-none">{line.tStr}</span>
-                  <span className={"shrink-0 select-none " + (line.kind === "err" ? "l-err" : line.kind === "sys" ? "l-sys" : "l-ts")}>
-                    {line.kind === "err" ? "ERR" : line.kind === "sys" ? "SYS" : "out"}
-                  </span>
-                  <span className={line.kind === "err" ? "l-err" : line.kind === "sys" ? "l-sys" : "l-out"}>
-                    {line.text}
-                  </span>
-                </div>
-              ))}
-              {isLive && <div className="caret mt-1" />}
+            <div className="stream flex-1 overflow-y-auto scroll-thin px-4 py-3">
+              {selectedStep?.status === "pending" ? (
+                <div className="ink-3 text-[12.5px]">step pendiente — aún no corrió</div>
+              ) : stdoutLoading ? (
+                <div className="ink-3 text-[12.5px]">cargando…</div>
+              ) : stdoutText === null ? null : stdoutText === '' ? (
+                <div className="ink-3 text-[12.5px]">sin stdout registrado</div>
+              ) : (
+                <>
+                  {selectedStep?.error && (
+                    <div className="mb-3 px-3 py-2 rounded text-[12px] mono" style={{background:"rgba(var(--failed-rgb,220,38,38),0.08)",color:"var(--failed)"}}>
+                      {selectedStep.error}
+                    </div>
+                  )}
+                  <pre className="mono text-[12px] ink whitespace-pre-wrap">{stdoutText}</pre>
+                </>
+              )}
             </div>
           ) : paneView === "definition" ? (
             <div className="flex-1 overflow-y-auto scroll-thin px-6 py-5">
-              <StepDefinition
-                step={pipeline.steps[selectedStepIdx]}
-                idx={selectedStepIdx}
-                total={run.steps.length}
-                runStep={run.steps[selectedStepIdx]}
-              />
+              {selectedStep ? (
+                <div>
+                  <div className="flex items-center gap-2 mb-4">
+                    <span className="mono text-[13px] font-semibold ink">{selectedStep.name}</span>
+                    {selectedStep.cli && <span className="badge mono">{selectedStep.cli}</span>}
+                    {selectedStep.kind && <span className="badge mono">{selectedStep.kind}</span>}
+                  </div>
+                  {selectedStep.content ? (
+                    <pre className="mono text-[12px] ink-2 whitespace-pre-wrap bg-[var(--bg)] rounded border hairline px-4 py-3">{selectedStep.content}</pre>
+                  ) : (
+                    <div className="ink-3 text-[12.5px]">definición no persistida — ver YAML del pipeline</div>
+                  )}
+                </div>
+              ) : (
+                <div className="ink-3 text-[12.5px]">seleccioná un step</div>
+              )}
             </div>
           ) : (
-            <ValidatorHistory
-              validator={selectedHasValidator}
-              step={pipeline.steps[selectedStepIdx]}
-              runStep={run.steps[selectedStepIdx]}
-            />
+            /* validator tab */
+            <div className="flex-1 overflow-y-auto scroll-thin px-6 py-5">
+              {selectedHasValidator ? (
+                <div>
+                  <div className="flex items-center gap-3 mb-4">
+                    <span className="mono text-[12px] ink-3">loops_run</span>
+                    <span className="mono text-[13px] ink">{selectedHasValidator.loops_run} / {selectedHasValidator.max_loops}</span>
+                    {selectedHasValidator.final_verdict && (
+                      <span className={"badge " + verdictBadgeClass(selectedHasValidator.final_verdict)}>{selectedHasValidator.final_verdict}</span>
+                    )}
+                  </div>
+                  {selectedHasValidator.last_feedback && (
+                    <div className="mb-3">
+                      <div className="text-[11px] uppercase tracking-wider ink-3 font-semibold mb-1">last feedback</div>
+                      <pre className="mono text-[12px] ink-2 whitespace-pre-wrap bg-[var(--bg)] rounded border hairline px-4 py-3">{selectedHasValidator.last_feedback}</pre>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="ink-3 text-[12.5px]">sin validator en este step</div>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -1095,6 +1175,7 @@ const App = () => {
   const [runs, setRuns] = useState(RUNS_INIT);
   const [selectedSlug, setSelectedSlug] = useState(null);
   const [openRunId, setOpenRunId] = useState(null);
+  const [runDetail, setRunDetail] = useState(null);
   const [selectedStepIdx, setSelectedStepIdx] = useState(0);
   const [modalOpen, setModalOpen] = useState(false);
   const [toast, setToast] = useState(null);
@@ -1134,6 +1215,33 @@ const App = () => {
       })
       .catch(err => console.error('[dash] fetch pipeline detail:', err));
   }, [selectedSlug]);
+
+  // ── fetch runs list when selected slug changes ────────────────────
+  useEffect(() => {
+    if (!selectedSlug) return;
+    const ctrl = new AbortController();
+    fetch('/api/pipelines/' + selectedSlug + '/runs', { signal: ctrl.signal })
+      .then(r => r.json())
+      .then(data => {
+        setRuns(prev => ({ ...prev, [selectedSlug]: data }));
+      })
+      .catch(err => { if (err.name !== 'AbortError') console.error('[dash] fetch runs:', err); });
+    return () => ctrl.abort();
+  }, [selectedSlug]);
+
+  // ── fetch run detail when openRunId changes ───────────────────────
+  useEffect(() => {
+    if (!openRunId || !selectedSlug) {
+      setRunDetail(null);
+      return;
+    }
+    const ctrl = new AbortController();
+    fetch('/api/pipelines/' + selectedSlug + '/runs/' + openRunId, { signal: ctrl.signal })
+      .then(r => r.json())
+      .then(data => setRunDetail(data))
+      .catch(err => { if (err.name !== 'AbortError') console.error('[dash] fetch run detail:', err); });
+    return () => ctrl.abort();
+  }, [openRunId, selectedSlug]);
 
   const selectedPipeline = pipelines.find(p => p.slug === selectedSlug);
   const openRun = openRunId
@@ -1299,6 +1407,7 @@ const App = () => {
   const onSelectPipeline = (slug) => {
     setSelectedSlug(slug);
     setOpenRunId(null);
+    setRunDetail(null);
   };
 
   return (
@@ -1318,14 +1427,16 @@ const App = () => {
                 ? "no pipelines yet — corré che y entrá a Create pipeline"
                 : "seleccioná un pipeline del rail"}
             </div>
-          ) : openRun ? (
+          ) : openRunId ? (
             <RunDetail
               pipeline={selectedPipeline}
-              run={openRun}
+              run={runDetail || openRun}
+              slug={selectedSlug}
+              runId={openRunId}
               stream={streamLines}
               selectedStepIdx={selectedStepIdx}
               onSelectStep={setSelectedStepIdx}
-              onBack={() => setOpenRunId(null)}
+              onBack={() => { setOpenRunId(null); setRunDetail(null); }}
               onCancel={cancelRun}
               onResume={resumeRun}
             />
@@ -1333,7 +1444,7 @@ const App = () => {
             <PipelineDetail
               pipeline={selectedPipeline}
               runs={runs}
-              onOpenRun={(id) => { setOpenRunId(id); setSelectedStepIdx(0); }}
+              onOpenRun={(id) => { setOpenRunId(id); setSelectedStepIdx(0); setRunDetail(null); }}
               onRequestRun={requestRun}
               onResumeDraft={() => alert("Prototype: would run `che new --resume " + selectedPipeline.slug + "` in the user's terminal.")}
             />
