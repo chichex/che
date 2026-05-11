@@ -29,6 +29,12 @@ type HeadlessRun struct {
 	RunID  string
 	RunDir string
 
+	// LiveOutput, si no es nil, recibe las lineas de stdout/stderr de cada
+	// step con el prefijo "[step.name] ". Sirve para el subcomando
+	// `che run` que quiere streamear en tiempo real al terminal. El dash
+	// deja esto en nil — sus callers leen los artefactos de disco via SSE.
+	LiveOutput io.Writer
+
 	p       wizard.Pipeline
 	target  string
 	input   InputState
@@ -131,7 +137,7 @@ func (h *HeadlessRun) Execute() (err error) {
 		h.steps[i].Status = StepStatusRunning
 		_ = writeManifest(h.RunDir, h.runningSnapshot())
 
-		exitCode, stdout, _, spawnErr := runStepHeadless(step, payload, h.RunDir, i+1)
+		exitCode, stdout, _, spawnErr := runStepHeadless(step, payload, h.RunDir, i+1, h.LiveOutput)
 		h.steps[i].FinishedAt = time.Now()
 		h.steps[i].ExitCode = exitCode
 		h.steps[i].SpawnError = spawnErr
@@ -214,11 +220,15 @@ func (h *HeadlessRun) runningSnapshot() Manifest {
 // pueden seguir mockeandola), redirecciona stdout/stderr a archivos +
 // builders en memoria, y devuelve el resultado del Wait sincronicamente.
 //
+// Si live != nil, las lineas de stdout y stderr se escriben tambien a live
+// con el prefijo "[<step.Name>] " por linea (usando un prefixWriter). El
+// comportamiento existente (archivo + buffer) no cambia cuando live es nil.
+//
 // La rama del exec.ExitError vs SpawnError sigue el mismo criterio que
 // stepDoneMsg en spawn.go: ExitCode "real" cuando el subprocess corrio y
 // salio no-cero; SpawnErr cuando el binario no se pudo arrancar o Wait
 // devolvio un error no-Exit.
-func runStepHeadless(step wizard.Step, payload, runDir string, idx int) (exitCode int, stdout, stderr, spawnErr string) {
+func runStepHeadless(step wizard.Step, payload, runDir string, idx int, live io.Writer) (exitCode int, stdout, stderr, spawnErr string) {
 	cmd, err := spawnCmdFn(step, payload)
 	if err != nil {
 		return -1, "", "", err.Error()
@@ -240,8 +250,15 @@ func runStepHeadless(step wizard.Step, payload, runDir string, idx int) (exitCod
 	defer stderrFile.Close()
 
 	var stdoutBuf, stderrBuf strings.Builder
-	cmd.Stdout = io.MultiWriter(stdoutFile, &stdoutBuf)
-	cmd.Stderr = io.MultiWriter(stderrFile, &stderrBuf)
+	if live != nil {
+		prefix := "[" + step.Name + "] "
+		pw := newPrefixWriter(live, prefix)
+		cmd.Stdout = io.MultiWriter(stdoutFile, &stdoutBuf, pw)
+		cmd.Stderr = io.MultiWriter(stderrFile, &stderrBuf, pw)
+	} else {
+		cmd.Stdout = io.MultiWriter(stdoutFile, &stdoutBuf)
+		cmd.Stderr = io.MultiWriter(stderrFile, &stderrBuf)
+	}
 
 	runErr := cmd.Run()
 	_ = stdoutFile.Sync()
@@ -255,6 +272,38 @@ func runStepHeadless(step wizard.Step, payload, runDir string, idx int) (exitCod
 		return -1, stdoutBuf.String(), stderrBuf.String(), runErr.Error()
 	}
 	return 0, stdoutBuf.String(), stderrBuf.String(), ""
+}
+
+// newPrefixWriter crea un lineWriter que antepone prefix a cada linea.
+func newPrefixWriter(dst io.Writer, prefix string) *lineWriter {
+	return &lineWriter{dst: dst, prefix: prefix}
+}
+
+// lineWriter es un io.Writer simple que agrega el prefijo a cada linea.
+// Acumula fragmentos hasta encontrar un '\n' y luego escribe la linea
+// completa con el prefijo. Cualquier fragmento final sin '\n' se flushea
+// en Close() o en la proxima Write.
+type lineWriter struct {
+	dst    io.Writer
+	prefix string
+	buf    strings.Builder
+}
+
+func (lw *lineWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	for len(p) > 0 {
+		idx := strings.IndexByte(string(p), '\n')
+		if idx < 0 {
+			lw.buf.Write(p)
+			break
+		}
+		lw.buf.Write(p[:idx+1])
+		line := lw.buf.String()
+		lw.buf.Reset()
+		fmt.Fprintf(lw.dst, "%s%s", lw.prefix, line)
+		p = p[idx+1:]
+	}
+	return n, nil
 }
 
 // initRunDirAt es la version parametrizada de initRunDir. Cuando runsRoot
