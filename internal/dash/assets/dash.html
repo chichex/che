@@ -544,7 +544,7 @@ const PipelineDeletedState = () => (
 // Pipeline detail (runs history + Run button)
 // ─────────────────────────────────────────────────────────────────────
 
-const PipelineDetail = ({ pipeline, runs, onOpenRun, onResumeDraft, fadedRunIds }) => {
+const PipelineDetail = ({ pipeline, runs, onOpenRun, onRequestRun, onResumeDraft, fadedRunIds }) => {
   const list = runs[pipeline.slug] || [];
   const [pipelineStepIdx, setPipelineStepIdx] = useState(-1);
   useEffect(() => { setPipelineStepIdx(-1); }, [pipeline.slug]);
@@ -582,6 +582,13 @@ const PipelineDetail = ({ pipeline, runs, onOpenRun, onResumeDraft, fadedRunIds 
           </div>
           <p className="ink-2 text-[14px] max-w-[640px]">{pipeline.description}</p>
         </div>
+        <button
+          className="btn btn-primary"
+          onClick={onRequestRun}
+        >
+          Run pipeline
+          <span className="kbd" style={{borderColor:"rgba(255,255,255,0.25)",color:"rgba(255,255,255,0.7)",background:"transparent"}}>R</span>
+        </button>
       </div>
 
       {/* Steps stripe */}
@@ -1111,6 +1118,135 @@ const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onRes
 };
 
 // ─────────────────────────────────────────────────────────────────────
+// Run modal
+// ─────────────────────────────────────────────────────────────────────
+
+// NOTE: MOCK_ISSUES / MOCK_PRS son datos placeholder. El picker pr/issue del
+// modal los muestra con disclaimer ("datos mock") hasta que aterricen los
+// endpoints /api/issues + /api/prs (fuera del scope de #130). El runner
+// igual recibe el string raw (ej. "#1284") y lo resuelve via gh — el modal
+// solo elige la referencia.
+const MOCK_ISSUES = [
+  { id: "#1284", title: "runner: context.Canceled bleeds into step error", labels: ["bug", "runner"], updated: "2h ago" },
+  { id: "#1281", title: "validator pauses but dash shows running", labels: ["bug", "dash"], updated: "5h ago" },
+  { id: "#1277", title: "docs/cli.md drift after flag rename", labels: ["docs"], updated: "1d ago" },
+  { id: "#1270", title: "add --resume to `che new` wizard", labels: ["enhancement", "wizard"], updated: "2d ago" },
+  { id: "#1264", title: "SSE heartbeat drops on macOS Sequoia", labels: ["bug", "dash"], updated: "4d ago" },
+];
+
+const MOCK_PRS = [
+  { id: "#1289", title: "runner: preserve context.Canceled semantics", author: "@mat", state: "open",  updated: "40m ago" },
+  { id: "#1287", title: "dash: validator history panel",              author: "@mat", state: "open",  updated: "3h ago" },
+  { id: "#1283", title: "manifest: add validator.history field",       author: "@nico", state: "open",  updated: "6h ago" },
+  { id: "#1278", title: "docs: regenerate cli.md from --help",         author: "@bot",  state: "draft", updated: "1d ago" },
+];
+
+const RunModal = ({ pipeline, onClose, onConfirm, error, pending }) => {
+  const [value, setValue] = useState("");
+  const ref = useRef(null);
+  useEffect(() => { ref.current && ref.current.focus(); }, []);
+  const needsInput = !!(pipeline.input && pipeline.input.kind && pipeline.input.kind !== "none");
+  const isMockPicker = needsInput && (pipeline.input.kind === "issue" || pipeline.input.kind === "pr");
+
+  const submit = (e) => {
+    e && e.preventDefault();
+    if (pending) return;
+    if (needsInput && !value.trim()) return;
+    onConfirm(value.trim());
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center"
+         style={{background:"rgba(20,20,24,0.35)"}}
+         onClick={pending ? undefined : onClose}>
+      <form
+        className="panel rounded-lg w-[480px] shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+      >
+        <div className="px-5 py-4 border-b hairline">
+          <div className="text-[11px] uppercase tracking-wider ink-3 font-semibold mb-1">launch run</div>
+          <div className="mono text-[15px] ink font-semibold">{pipeline.name}</div>
+        </div>
+        <div className="px-5 py-5">
+          {isMockPicker ? (
+            <>
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className="text-[12px] ink-2">{pipeline.input.label || (pipeline.input.kind === "issue" ? "Select an issue" : "Select a pull request")}</span>
+                <span className="badge mono" style={{padding:"0 6px",fontSize:10}}>input: {pipeline.input.kind}</span>
+                <span className="ml-auto text-[10.5px] ink-3 mono">datos mock</span>
+              </div>
+              <div className="border hairline rounded-md max-h-[260px] overflow-y-auto scroll-thin">
+                {(pipeline.input.kind === "issue" ? MOCK_ISSUES : MOCK_PRS).map(it => {
+                  const selected = value === it.id;
+                  return (
+                    <div
+                      key={it.id}
+                      className={"w-full flex items-stretch border-b hairline last:border-b-0 transition-colors " + (selected ? "bg-black/[0.04]" : "hover:bg-black/[0.02]")}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setValue(it.id)}
+                        className="flex-1 text-left px-3 py-2.5 flex items-center gap-3 min-w-0"
+                      >
+                        <span className={"mono text-[11.5px] shrink-0 w-14 " + (selected ? "ink font-semibold" : "ink-2")}>{it.id}</span>
+                        <span className="text-[12.5px] ink truncate flex-1">{it.title}</span>
+                        {it.labels && it.labels.map(l => (
+                          <span key={l} className="badge mono" style={{padding:"0 6px",fontSize:10}}>{l}</span>
+                        ))}
+                        {it.state && (
+                          <span className={"badge mono " + (it.state === "draft" ? "" : "badge-running")} style={{padding:"0 6px",fontSize:10}}>{it.state}</span>
+                        )}
+                        <span className="text-[10.5px] ink-3 mono shrink-0">{it.updated}</span>
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="text-[11px] ink-3 mt-2">
+                Placeholder hasta que aterricen /api/issues + /api/prs. El runner recibe el id raw (<span className="mono">{value || "#…"}</span>) y lo resuelve via <span className="mono">gh {pipeline.input.kind} view</span>.
+              </div>
+            </>
+          ) : needsInput ? (
+            <>
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className="text-[12px] ink-2">{pipeline.input.label || "Input"}</span>
+                <span className="badge mono" style={{padding:"0 6px",fontSize:10}}>input: {pipeline.input.kind}</span>
+              </div>
+              <input
+                ref={ref}
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                placeholder={pipeline.input.placeholder || ""}
+                className="w-full mono text-[13px] ink px-3 py-2 rounded border hairline outline-none focus:border-[var(--ink)]"
+              />
+              <div className="text-[11px] ink-3 mt-2">
+                El runner resuelve este valor en R1 · InputPrompt según el tipo <span className="mono">{pipeline.input.kind}</span>, y lo pasa al primer step como su input.
+              </div>
+            </>
+          ) : (
+            <div className="text-[13px] ink-2">
+              Sin input — Start run para arrancar el pipeline.
+            </div>
+          )}
+          {error && (
+            <div className="mt-3 text-[12.5px]" style={{color:"#c0392b"}} role="alert">
+              {error}
+            </div>
+          )}
+        </div>
+        <div className="px-5 py-3 border-t hairline flex items-center justify-end gap-2">
+          <button type="button" className="btn" onClick={onClose} disabled={pending}>Cancel</button>
+          <button type="submit" className="btn btn-primary" disabled={pending || (needsInput && !value.trim())}>
+            {pending ? "Starting…" : "Start run"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────
 // Undo toast
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1234,6 +1370,9 @@ const App = () => {
   const [selectedStepIdx, setSelectedStepIdx] = useState(0);
   const [toast, setToast] = useState(null);
   const [notesOpen, setNotesOpen] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalError, setModalError] = useState(null);
+  const [modalPending, setModalPending] = useState(false);
 
   const [streamLines, setStreamLines] = useState([]);
 
@@ -1551,15 +1690,60 @@ const App = () => {
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === "Escape") {
-        if (notesOpen) setNotesOpen(false);
+        if (modalOpen && !modalPending) closeModal();
+        else if (notesOpen) setNotesOpen(false);
         else if (openRunId) setOpenRunId(null);
+      }
+      if (e.key.toLowerCase() === "r" && !modalOpen && !openRunId) {
+        // No interferir cuando el foco esta en un input/textarea: el usuario
+        // tipeando "r" en el drawer de notes no debe abrir el modal.
+        const tag = (e.target && e.target.tagName) || "";
+        if (tag === "INPUT" || tag === "TEXTAREA" || (e.target && e.target.isContentEditable)) return;
+        if (selectedPipeline && selectedPipeline.status === "ready") setModalOpen(true);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [notesOpen, openRunId]);
+  }, [modalOpen, modalPending, notesOpen, openRunId, selectedPipeline]);
 
   // ── handlers ──────────────────────────────────────────────────────
+  const requestRun = () => { setModalError(null); setModalOpen(true); };
+  const closeModal = () => { setModalOpen(false); setModalError(null); setModalPending(false); };
+
+  const confirmRun = async (input) => {
+    if (!selectedSlug) return;
+    setModalError(null);
+    setModalPending(true);
+    try {
+      const body = input ? JSON.stringify({ input }) : null;
+      const res = await fetch("/api/pipelines/" + encodeURIComponent(selectedSlug) + "/runs", {
+        method: "POST",
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body,
+      });
+      if (!res.ok) {
+        let errMsg = "Error " + res.status;
+        try {
+          const data = await res.json();
+          if (data && data.error) errMsg = data.error;
+        } catch (_) {}
+        setModalError(errMsg);
+        setModalPending(false);
+        return;
+      }
+      const data = await res.json();
+      setModalOpen(false);
+      setModalError(null);
+      setModalPending(false);
+      const newId = (data && data.run_id) || "(unknown)";
+      setToast({ message: "Run started · " + newId, remaining: 0, kind: "started" });
+      setTimeout(() => setToast(null), 2200);
+    } catch (e) {
+      setModalError((e && e.message) || "Error de red");
+      setModalPending(false);
+    }
+  };
+
   const cancelRun = () => {
     if (!openRun) return;
     const id = openRun.id;
@@ -1734,6 +1918,7 @@ const App = () => {
               pipeline={selectedPipeline}
               runs={runs}
               onOpenRun={(id) => { setOpenRunId(id); setSelectedStepIdx(0); setRunDetail(null); }}
+              onRequestRun={requestRun}
               onResumeDraft={() => alert("Prototype: would run `che new --resume " + selectedPipeline.slug + "` in the user's terminal.")}
               fadedRunIds={fadedSlugs}
             />
@@ -1751,6 +1936,16 @@ const App = () => {
       </button>
 
       <NotesDrawer open={notesOpen} onClose={() => setNotesOpen(false)} />
+
+      {modalOpen && selectedPipeline && (
+        <RunModal
+          pipeline={selectedPipeline}
+          onClose={closeModal}
+          onConfirm={confirmRun}
+          error={modalError}
+          pending={modalPending}
+        />
+      )}
 
       <UndoToast toast={toast} onUndo={toast?.undoId ? undoCancel : () => setToast(null)} />
     </div>
