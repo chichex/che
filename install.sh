@@ -29,8 +29,21 @@ trap "rm -rf $TMP" EXIT
 curl -sL "$URL" -o "$TMP/che.tar.gz"
 tar -xzf "$TMP/che.tar.gz" -C "$TMP"
 
+# Locate the binary inside the tarball. goreleaser stable builds package
+# it as `che`; pre-release builds (.goreleaser.beta.yml) package it as
+# `che-beta`. Pick whichever exists.
+if [ -f "$TMP/che" ]; then
+  SRC="$TMP/che"
+elif [ -f "$TMP/che-beta" ]; then
+  SRC="$TMP/che-beta"
+else
+  echo "Failed to find che binary inside tarball ($TMP)"
+  ls -la "$TMP"
+  exit 1
+fi
+
 mkdir -p "$INSTALL_DIR"
-cp "$TMP/che" "$INSTALL_DIR/che"
+cp "$SRC" "$INSTALL_DIR/che"
 chmod +x "$INSTALL_DIR/che"
 
 # Ad-hoc codesign on macOS to prevent Gatekeeper from killing the binary
