@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,6 +99,50 @@ func TestHeadless_SmokeManifestDone(t *testing.T) {
 	wantPrefix := filepath.Join(runsRoot, wizard.Slug(p.Name))
 	if !strings.HasPrefix(hr.RunDir, wantPrefix) {
 		t.Errorf("RunDir no esta bajo runsRoot/<slug>: got %q want prefix %q", hr.RunDir, wantPrefix)
+	}
+}
+
+// TestHeadless_LiveOutput verifica que cuando LiveOutput esta seteado, las lineas
+// del step se escriben con el prefijo "[step.name] " al writer.
+func TestHeadless_LiveOutput(t *testing.T) {
+	prev := spawnCmdFn
+	t.Cleanup(func() { spawnCmdFn = prev })
+	spawnCmdFn = func(_ wizard.Step, _ string) (*exec.Cmd, error) {
+		return exec.Command("/bin/echo", "linea de prueba"), nil
+	}
+
+	runsRoot := t.TempDir()
+	p := wizard.Pipeline{
+		Name: "headless-live",
+		Steps: []wizard.Step{
+			{
+				Name:    "my-step",
+				CLI:     "echo",
+				Kind:    wizard.KindPrompt,
+				Input:   wizard.InputNone,
+				Content: "x",
+			},
+		},
+	}
+
+	hr, err := startHeadlessFromPipeline(p, "test:headless-live", "", runsRoot)
+	if err != nil {
+		t.Fatalf("startHeadlessFromPipeline: %v", err)
+	}
+
+	var buf bytes.Buffer
+	hr.LiveOutput = &buf
+
+	if err := hr.Execute(); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+
+	got := buf.String()
+	if !strings.Contains(got, "[my-step]") {
+		t.Errorf("LiveOutput no contiene prefijo '[my-step]': %q", got)
+	}
+	if !strings.Contains(got, "linea de prueba") {
+		t.Errorf("LiveOutput no contiene 'linea de prueba': %q", got)
 	}
 }
 

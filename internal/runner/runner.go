@@ -2,6 +2,8 @@ package runner
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -23,6 +25,45 @@ import (
 // El caller (cmd/root.go.runMyPipelines) decide como surfacearlo. En H2+ esto
 // se convertira en un toast inline sobre el lister; H1 deja la decision al
 // caller para no inflar el contrato.
+// LoadPipelineByTarget es la version exportada de loadPipelineForRun.
+// Resuelve `target` a un Pipeline parseado: si tiene el prefijo "builtin:"
+// lo carga desde wizard.Builtins() (in-memory); caso contrario lee del FS
+// via wizard.Load. Los callers externos (cmd/run.go) usan esta version.
+func LoadPipelineByTarget(target string) (wizard.Pipeline, error) {
+	return loadPipelineForRun(target)
+}
+
+// ResolveSlug convierte un slug de usuario en el target que StartHeadless
+// espera y en el inputKind del primer step. Busca en este orden:
+//  1. ~/.che/pipelines/<slug>.yaml (pipelines de usuario)
+//  2. builtin:<slug> (pipelines embebidos via wizard.Builtins)
+//
+// Devuelve error si el slug no existe en ninguna fuente. inputKind es
+// wizard.InputNone ("none") si no se pudo cargar el pipeline — el caller
+// debe chequear error primero.
+func ResolveSlug(slug string) (target, inputKind string, err error) {
+	home, herr := os.UserHomeDir()
+	if herr == nil {
+		path := filepath.Join(home, ".che", "pipelines", slug+".yaml")
+		if _, sterr := os.Stat(path); sterr == nil {
+			p, lerr := wizard.Load(path)
+			if lerr != nil {
+				return "", wizard.InputNone, fmt.Errorf("runner: load %s: %w", path, lerr)
+			}
+			return path, firstInputKind(p), nil
+		}
+	}
+	// Fallback: builtin.
+	b, berr := wizard.BuiltinBySlug(slug)
+	if berr != nil {
+		return "", wizard.InputNone, fmt.Errorf("runner: builtin lookup %q: %w", slug, berr)
+	}
+	if b == nil {
+		return "", wizard.InputNone, fmt.Errorf("runner: pipeline %q no encontrado", slug)
+	}
+	return "builtin:" + slug, firstInputKind(b.Pipeline), nil
+}
+
 // loadPipelineForRun resuelve `target` a un Pipeline parseado. Si target
 // tiene el prefijo "builtin:" carga desde wizard.Builtins() (in-memory);
 // caso contrario lee del FS via wizard.Load. Devuelve el error con contexto

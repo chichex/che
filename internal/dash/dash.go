@@ -49,6 +49,23 @@ func Serve(ctx context.Context, opts Options) error {
 		return err
 	}
 
+	// Escribir ~/.che/dash.port con el TCP port del listener para que
+	// `che run` pueda descubrir el dash sin configuracion. Si falla,
+	// logear y seguir — el dash debe arrancar igual aunque `che run`
+	// no pueda descubrirlo y caiga a headless.
+	portFile := ""
+	if home, herr := os.UserHomeDir(); herr == nil {
+		portFile = filepath.Join(home, ".che", "dash.port")
+		addr := ln.Addr().(*net.TCPAddr)
+		if werr := os.WriteFile(portFile, []byte(fmt.Sprintf("%d", addr.Port)), 0o600); werr != nil {
+			fmt.Fprintf(out, "[dash] no se pudo escribir dash.port: %v\n", werr)
+			portFile = "" // no intentar borrar lo que no se creo
+		}
+	}
+	if portFile != "" {
+		defer os.Remove(portFile)
+	}
+
 	// Resolve pipelines and runs directories. On failure use "" so handlers
 	// return empty list / 404 instead of crashing.
 	pipelinesDir := ""
