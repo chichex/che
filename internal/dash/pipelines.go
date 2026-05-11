@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -43,6 +44,7 @@ type pipelineJSON struct {
 	Description string          `json:"description,omitempty"`
 	Status      string          `json:"status"`
 	LastRun     *lastRunSummary `json:"last_run,omitempty"`
+	Builtin     bool            `json:"builtin,omitempty"`
 }
 
 // pipelineDetailJSON is the wire shape for GET /api/pipelines/:slug.
@@ -52,6 +54,7 @@ type pipelineDetailJSON struct {
 	Description string     `json:"description,omitempty"`
 	Status      string     `json:"status"`
 	Steps       []stepJSON `json:"steps"`
+	Builtin     bool       `json:"builtin,omitempty"`
 }
 
 // stepJSON is the wire shape for a pipeline step.
@@ -142,6 +145,51 @@ func loadPipelinesFromDir(dir string) []struct {
 	return result
 }
 
+// pipelinePair is an enriched (slug, pipeline, builtin) tuple used internally.
+type pipelinePair struct {
+	slug    string
+	p       wizard.Pipeline
+	builtin bool
+}
+
+// mergeBuiltinsAndDisk combines builtin pipelines with pipelines loaded from
+// dir. On-disk entries win on slug collision (consistent with copy-on-edit).
+// If wizard.Builtins() fails it is logged with prefix [dash] and execution
+// continues with on-disk only. The result is sorted stably by slug.
+func mergeBuiltinsAndDisk(dir string) []pipelinePair {
+	// Load on-disk pipelines.
+	diskEntries := loadPipelinesFromDir(dir)
+	diskBySlug := make(map[string]struct{}, len(diskEntries))
+	for _, e := range diskEntries {
+		diskBySlug[e.slug] = struct{}{}
+	}
+
+	// Load builtins.
+	builtins, err := wizard.Builtins()
+	if err != nil {
+		log.Printf("[dash] wizard.Builtins(): %v", err)
+		builtins = nil
+	}
+
+	// Start with builtins that are not overridden on disk.
+	result := make([]pipelinePair, 0, len(builtins)+len(diskEntries))
+	for _, b := range builtins {
+		if _, overridden := diskBySlug[b.Slug]; overridden {
+			continue
+		}
+		result = append(result, pipelinePair{slug: b.Slug, p: b.Pipeline, builtin: true})
+	}
+	// Append on-disk entries (not marked as builtin even if slug matches).
+	for _, e := range diskEntries {
+		result = append(result, pipelinePair{slug: e.slug, p: e.p, builtin: false})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].slug < result[j].slug
+	})
+	return result
+}
+
 // lookupLastRun reads the most-recent run manifest for slug from runsDir.
 // Results are cached with a 1s TTL.
 // Returns nil if no runs exist.
@@ -222,12 +270,12 @@ func fetchLastRun(runsDir, slug string) *lastRunSummary {
 }
 
 // handleListPipelines returns an http.HandlerFunc for GET /api/pipelines.
-// It reads all *.yaml pipelines from dir, skipping corrupt files.
-// Returns JSON array (empty array if dir is empty or missing).
+// It merges builtin pipelines with on-disk ones (on-disk-wins), skipping
+// corrupt files. Returns JSON array (never null).
 // runsDir is used to populate last_run for each pipeline.
 func handleListPipelines(dir, runsDir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		pairs := loadPipelinesFromDir(dir)
+		pairs := mergeBuiltinsAndDisk(dir)
 		list := make([]pipelineJSON, 0, len(pairs))
 		for _, pair := range pairs {
 			list = append(list, pipelineJSON{
@@ -236,6 +284,7 @@ func handleListPipelines(dir, runsDir string) http.HandlerFunc {
 				Description: pair.p.Description,
 				Status:      pipelineStatus(pair.p),
 				LastRun:     lookupLastRun(runsDir, pair.slug),
+				Builtin:     pair.builtin,
 			})
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -263,28 +312,48 @@ func handleGetPipeline(dir string) http.HandlerFunc {
 }
 
 // getPipelineDetail is the helper that loads a pipeline by slug from dir and
-// writes the JSON detail response. Used by both handleGetPipeline and the
+// writes the JSON detail response. When the on-disk YAML does not exist it
+// falls back to wizard.BuiltinBySlug. Used by both handleGetPipeline and the
 // dispatcher in dispatchPipelinesPrefix.
 func getPipelineDetail(dir, slug string, w http.ResponseWriter, r *http.Request) {
-	if dir == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"pipeline not found"}`))
-		return
+	var (
+		p         wizard.Pipeline
+		foundDisk bool
+		isBuiltin bool
+	)
+
+	// Try loading from disk first.
+	if dir != "" {
+		path := filepath.Join(dir, slug+".yaml")
+		loaded, err := wizard.Load(path)
+		if err == nil {
+			p = loaded
+			foundDisk = true
+		} else if os.IsNotExist(err) {
+			// Fall through to builtin lookup.
+		} else {
+			log.Printf("[dash] load %s: %v", path, err)
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			return
+		}
 	}
 
-	path := filepath.Join(dir, slug+".yaml")
-	p, err := wizard.Load(path)
-	if err != nil {
-		if os.IsNotExist(err) {
+	// If not found on disk, try builtins.
+	if !foundDisk {
+		b, err := wizard.BuiltinBySlug(slug)
+		if err != nil {
+			log.Printf("[dash] wizard.BuiltinBySlug(%s): %v", slug, err)
+			http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
+			return
+		}
+		if b == nil {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"error":"pipeline not found"}`))
 			return
 		}
-		log.Printf("[dash] load %s: %v", path, err)
-		http.Error(w, `{"error":"internal server error"}`, http.StatusInternalServerError)
-		return
+		p = b.Pipeline
+		isBuiltin = true
 	}
 
 	steps := make([]stepJSON, 0, len(p.Steps))
@@ -298,6 +367,7 @@ func getPipelineDetail(dir, slug string, w http.ResponseWriter, r *http.Request)
 		Description: p.Description,
 		Status:      pipelineStatus(p),
 		Steps:       steps,
+		Builtin:     isBuiltin,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(detail)
