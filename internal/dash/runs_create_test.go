@@ -19,18 +19,23 @@ import (
 
 // recordingStarter es un runStarter de tests: registra cada Start y devuelve
 // un runID determinista. Sirve para los happy-paths (verificamos que el
-// handler llamo al starter con los argumentos esperados).
+// handler llamo al starter con los argumentos esperados). El callback
+// onDone se guarda para los tests que quieren simular "Execute() termino"
+// invocandolo manualmente; los demas lo ignoran y el lock queda retenido
+// durante la duracion del test (semantica original).
 type recordingStarter struct {
 	mu        sync.Mutex
 	calls     []struct{ target, input string }
+	dones     []func()
 	nextRunID string
 	err       error
 }
 
-func (s *recordingStarter) Start(target, input string) (string, error) {
+func (s *recordingStarter) Start(target, input string, onDone func()) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.calls = append(s.calls, struct{ target, input string }{target, input})
+	s.dones = append(s.dones, onDone)
 	if s.err != nil {
 		return "", s.err
 	}
@@ -41,7 +46,7 @@ func (s *recordingStarter) Start(target, input string) (string, error) {
 // rutas donde el resultado del Start no importa (ej. dispatcher routing).
 type noopStarter struct{}
 
-func (s *noopStarter) Start(_, _ string) (string, error) { return "noop-run", nil }
+func (s *noopStarter) Start(_, _ string, _ func()) (string, error) { return "noop-run", nil }
 
 // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -316,6 +321,45 @@ func TestCreateRun_StarterErrorReleasesLock(t *testing.T) {
 	rr2 := postRun(t, dispatcher, "boom-pipe", nil)
 	if rr2.Code != http.StatusCreated {
 		t.Fatalf("retry: want 201, got %d body=%s", rr2.Code, rr2.Body.String())
+	}
+}
+
+// TestCreateRun_LockReleasedOnExecuteDone verifica el AC del fix: una vez
+// que Execute() termina (el starter invoca onDone), el lock por-slug queda
+// libre y un POST posterior puede arrancar un run nuevo. Sin esto, el
+// dash quedaba "atascado" en 409 hasta reiniciar el server.
+func TestCreateRun_LockReleasedOnExecuteDone(t *testing.T) {
+	pipelinesDir := t.TempDir()
+	runsDir := t.TempDir()
+	writeYAML(t, pipelinesDir, "loop-pipe", wizard.Pipeline{
+		Name:  "loop-pipe",
+		Steps: []wizard.Step{{Name: "single", CLI: "claude", Kind: "prompt", Input: wizard.InputNone}},
+	})
+	starter := &recordingStarter{nextRunID: "RUN-A"}
+	lock := newRunLock()
+	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir, NewBus(runsDir), starter, lock)
+
+	// Primer run arranca OK.
+	rr1 := postRun(t, dispatcher, "loop-pipe", nil)
+	if rr1.Code != http.StatusCreated {
+		t.Fatalf("first run: want 201, got %d body=%s", rr1.Code, rr1.Body.String())
+	}
+
+	// Simula "Execute() termino" invocando el onDone que el handler le paso al starter.
+	starter.mu.Lock()
+	if len(starter.dones) != 1 || starter.dones[0] == nil {
+		starter.mu.Unlock()
+		t.Fatalf("expected starter to receive onDone callback, got dones=%v", starter.dones)
+	}
+	done := starter.dones[0]
+	starter.mu.Unlock()
+	done()
+
+	// Lock liberado → segundo POST arranca, no devuelve 409.
+	starter.nextRunID = "RUN-B"
+	rr2 := postRun(t, dispatcher, "loop-pipe", nil)
+	if rr2.Code != http.StatusCreated {
+		t.Fatalf("second run after onDone: want 201, got %d body=%s", rr2.Code, rr2.Body.String())
 	}
 }
 

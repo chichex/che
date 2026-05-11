@@ -23,8 +23,13 @@ import (
 // — el impl real (`runnerStarter`) llama a `runner.StartHeadless` + corre
 // `Execute()` en goroutine; los tests pasan un mock que solo registra el
 // llamado y devuelve un runID determinista.
+//
+// onDone se invoca cuando Execute() termina (ok o fallo) — el handler lo usa
+// para liberar el lock por-slug y habilitar runs posteriores del mismo
+// pipeline dentro de la misma sesion del dash. Es opcional (nil OK): los
+// tests con mocks no necesitan simular el ciclo de vida del Execute.
 type runStarter interface {
-	Start(target, input string) (runID string, err error)
+	Start(target, input string, onDone func()) (runID string, err error)
 }
 
 // runnerStarter es el impl real del runStarter sobre internal/runner. El
@@ -40,13 +45,19 @@ type runnerStarter struct {
 // run-dir asi el caller puede responder 201 sin esperar a que el pipeline
 // termine. Errores de Execute() en la goroutine se logean con prefijo
 // [dash] (idem el resto del paquete) — el manifest queda como auditoria
-// en disco.
-func (s *runnerStarter) Start(target, input string) (string, error) {
+// en disco. onDone se invoca al final del Execute() (en defer asi tambien
+// corre si Execute panickea) para que el handler libere el lock por-slug.
+func (s *runnerStarter) Start(target, input string, onDone func()) (string, error) {
 	hr, err := runner.StartHeadless(target, input, s.runsRoot)
 	if err != nil {
 		return "", err
 	}
 	go func() {
+		defer func() {
+			if onDone != nil {
+				onDone()
+			}
+		}()
 		if err := hr.Execute(); err != nil {
 			log.Printf("[dash] run %s/%s execute: %v", filepath.Base(filepath.Dir(hr.RunDir)), hr.RunID, err)
 		}
@@ -241,7 +252,14 @@ func handleCreateRun(pipelinesDir, runsDir string, starter runStarter, lock *run
 			return
 		}
 
-		runID, err := starter.Start(target, body.Input)
+		// onDone libera el lock cuando Execute() del runner termina. Asi un
+		// segundo POST al mismo slug, despues de que el primer run cierre,
+		// puede arrancar sin esperar a que el server reinicie. Los tests
+		// con mocks (recordingStarter) pueden ignorar el callback para
+		// preservar el comportamiento "lock retenido durante el test".
+		slugCopy := slug
+		onDone := func() { lock.release(slugCopy) }
+		runID, err := starter.Start(target, body.Input, onDone)
 		if err != nil {
 			lock.release(slug)
 			log.Printf("[dash] starter.Start %s: %v", slug, err)

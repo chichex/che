@@ -1145,8 +1145,12 @@ const RunModal = ({ pipeline, onClose, onConfirm, error, pending }) => {
   const [value, setValue] = useState("");
   const ref = useRef(null);
   useEffect(() => { ref.current && ref.current.focus(); }, []);
-  const needsInput = !!(pipeline.input && pipeline.input.kind && pipeline.input.kind !== "none");
-  const isMockPicker = needsInput && (pipeline.input.kind === "issue" || pipeline.input.kind === "pr");
+  // El input shape se deriva de steps[0].input (la API ya lo expone como string).
+  // Trato vacio/missing como "none" — mismo criterio que runner.firstInputKind.
+  const firstStep = (pipeline.steps && pipeline.steps[0]) || null;
+  const inputKind = (firstStep && firstStep.input) ? firstStep.input : "none";
+  const needsInput = inputKind !== "none";
+  const isMockPicker = needsInput && (inputKind === "issue" || inputKind === "pr");
 
   const submit = (e) => {
     e && e.preventDefault();
@@ -1172,12 +1176,12 @@ const RunModal = ({ pipeline, onClose, onConfirm, error, pending }) => {
           {isMockPicker ? (
             <>
               <div className="flex items-center gap-2 mb-1.5">
-                <span className="text-[12px] ink-2">{pipeline.input.label || (pipeline.input.kind === "issue" ? "Select an issue" : "Select a pull request")}</span>
-                <span className="badge mono" style={{padding:"0 6px",fontSize:10}}>input: {pipeline.input.kind}</span>
+                <span className="text-[12px] ink-2">{inputKind === "issue" ? "Select an issue" : "Select a pull request"}</span>
+                <span className="badge mono" style={{padding:"0 6px",fontSize:10}}>input: {inputKind}</span>
                 <span className="ml-auto text-[10.5px] ink-3 mono">datos mock</span>
               </div>
               <div className="border hairline rounded-md max-h-[260px] overflow-y-auto scroll-thin">
-                {(pipeline.input.kind === "issue" ? MOCK_ISSUES : MOCK_PRS).map(it => {
+                {(inputKind === "issue" ? MOCK_ISSUES : MOCK_PRS).map(it => {
                   const selected = value === it.id;
                   return (
                     <div
@@ -1204,24 +1208,23 @@ const RunModal = ({ pipeline, onClose, onConfirm, error, pending }) => {
                 })}
               </div>
               <div className="text-[11px] ink-3 mt-2">
-                Placeholder hasta que aterricen /api/issues + /api/prs. El runner recibe el id raw (<span className="mono">{value || "#…"}</span>) y lo resuelve via <span className="mono">gh {pipeline.input.kind} view</span>.
+                Placeholder hasta que aterricen /api/issues + /api/prs. El runner recibe el id raw (<span className="mono">{value || "#…"}</span>) y lo resuelve via <span className="mono">gh {inputKind} view</span>.
               </div>
             </>
           ) : needsInput ? (
             <>
               <div className="flex items-center gap-2 mb-1.5">
-                <span className="text-[12px] ink-2">{pipeline.input.label || "Input"}</span>
-                <span className="badge mono" style={{padding:"0 6px",fontSize:10}}>input: {pipeline.input.kind}</span>
+                <span className="text-[12px] ink-2">Input</span>
+                <span className="badge mono" style={{padding:"0 6px",fontSize:10}}>input: {inputKind}</span>
               </div>
               <input
                 ref={ref}
                 value={value}
                 onChange={(e) => setValue(e.target.value)}
-                placeholder={pipeline.input.placeholder || ""}
                 className="w-full mono text-[13px] ink px-3 py-2 rounded border hairline outline-none focus:border-[var(--ink)]"
               />
               <div className="text-[11px] ink-3 mt-2">
-                El runner resuelve este valor en R1 · InputPrompt según el tipo <span className="mono">{pipeline.input.kind}</span>, y lo pasa al primer step como su input.
+                El runner resuelve este valor en R1 · InputPrompt según el tipo <span className="mono">{inputKind}</span>, y lo pasa al primer step como su input.
               </div>
             </>
           ) : (
