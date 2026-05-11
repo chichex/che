@@ -271,16 +271,25 @@ func (w *watcher) checkStdout(runDir string, m *runner.Manifest, states map[int]
 		}
 
 		scanner := bufio.NewScanner(f)
+		// Buffer grande para no truncar lineas largas de stream-json
+		// (memory bufio.Scanner 64 KiB default — claude emite >>64K).
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		ts := time.Now().UTC().Format(time.RFC3339)
 		for scanner.Scan() {
 			line := scanner.Text()
-			// Skip empty lines at EOF (partial last line).
 			if line == "" {
+				continue
+			}
+			// Parser → texto humano. Si devuelve "" el evento no aporta
+			// nada al viewport (system_init, ping, etc) — ni emit ni
+			// ordinal bump.
+			pretty := formatRawLineJoined(s.CLI, line)
+			if pretty == "" {
 				continue
 			}
 			w.publish(EventStepStdout, map[string]any{
 				"idx":     s.Idx,
-				"line":    line,
+				"line":    pretty,
 				"ts":      ts,
 				"ordinal": st.nextOrdinal,
 			})

@@ -174,15 +174,30 @@ func emitReplay(w http.ResponseWriter, flusher http.Flusher, runDir string, m ru
 		if s.Status == "running" || s.Status == "done" || s.Status == "failed" {
 			lines, err := readStdoutLines(runDir, s.Idx)
 			if err == nil && len(lines) > 0 {
-				for ordinal, line := range lines {
+				// Mismo parser que el watcher: claude → texto humano,
+				// otros CLIs → pass-through. Lineas que el parser
+				// descarta (system_init, ping) no consumen ordinal,
+				// asi el set queda alineado con el del watcher en
+				// vivo (el frontend deduplica por (idx, ordinal)).
+				ordinal := 0
+				emitted := false
+				for _, raw := range lines {
+					pretty := formatRawLineJoined(s.CLI, raw)
+					if pretty == "" {
+						continue
+					}
 					writeSSEEvent(w, Event{Type: EventStepStdout, Payload: map[string]any{
 						"idx":     s.Idx,
-						"line":    line,
+						"line":    pretty,
 						"ts":      now,
 						"ordinal": ordinal,
 					}})
+					ordinal++
+					emitted = true
 				}
-				flusher.Flush()
+				if emitted {
+					flusher.Flush()
+				}
 			}
 		}
 
