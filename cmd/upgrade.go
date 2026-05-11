@@ -265,7 +265,8 @@ func extractCheFromTarball(data []byte) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("tar: %w", err)
 		}
-		if filepath.Base(hdr.Name) == "che" {
+		base := filepath.Base(hdr.Name)
+		if base == "che" || base == "che-beta" {
 			return io.ReadAll(tr)
 		}
 	}
