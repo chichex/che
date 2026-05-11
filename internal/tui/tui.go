@@ -41,6 +41,7 @@ var menu = []item{
 type model struct {
 	cursor   int
 	selected *item
+	version  string
 }
 
 func (m model) Init() tea.Cmd { return nil }
@@ -119,14 +120,17 @@ func (m model) View() string {
 		b.WriteString("  " + digitStyle.Render(it.digit+".") + " " + itemStyle.Render(it.label) + "\n")
 	}
 	b.WriteString("\n" + hintStyle.Render("↑/↓ navigate · enter select · 0-4 jump · q quit") + "\n")
+	b.WriteString(dimStyle.Render("v"+m.version) + "\n")
 	return b.String()
 }
 
 // Run levanta el menu interactivo. Devuelve la Action elegida o ActionExit
 // si el usuario salio (ctrl+c, q, esc, o item 0). El error solo aparece si
-// bubbletea no pudo arrancar (p.ej. stdout no es TTY).
-func Run() (Action, error) {
-	final, err := tea.NewProgram(model{}, tea.WithAltScreen()).Run()
+// bubbletea no pudo arrancar (p.ej. stdout no es TTY). version se renderiza
+// como linea dim al pie del menu para que el usuario sepa que build esta
+// corriendo; el caller la pasa desde cmd.Version (inyectada via ldflag).
+func Run(version string) (Action, error) {
+	final, err := tea.NewProgram(model{version: version}, tea.WithAltScreen()).Run()
 	if err != nil {
 		return ActionExit, err
 	}
