@@ -544,7 +544,7 @@ const PipelineDeletedState = () => (
 // Pipeline detail (runs history + Run button)
 // ─────────────────────────────────────────────────────────────────────
 
-const PipelineDetail = ({ pipeline, runs, onOpenRun, onRequestRun, onResumeDraft, fadedRunIds }) => {
+const PipelineDetail = ({ pipeline, runs, onOpenRun, onResumeDraft, fadedRunIds }) => {
   const list = runs[pipeline.slug] || [];
   const [pipelineStepIdx, setPipelineStepIdx] = useState(-1);
   useEffect(() => { setPipelineStepIdx(-1); }, [pipeline.slug]);
@@ -582,14 +582,6 @@ const PipelineDetail = ({ pipeline, runs, onOpenRun, onRequestRun, onResumeDraft
           </div>
           <p className="ink-2 text-[14px] max-w-[640px]">{pipeline.description}</p>
         </div>
-        <button
-          className="btn btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
-          disabled
-          title="v1 read-only — usar TUI para lanzar"
-        >
-          Run pipeline
-          <span className="kbd" style={{borderColor:"rgba(255,255,255,0.25)",color:"rgba(255,255,255,0.7)",background:"transparent"}}>R</span>
-        </button>
       </div>
 
       {/* Steps stripe */}
@@ -1119,133 +1111,6 @@ const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onRes
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// Run modal
-// ─────────────────────────────────────────────────────────────────────
-
-const MOCK_ISSUES = [
-  { id: "#1284", title: "runner: context.Canceled bleeds into step error", labels: ["bug", "runner"], updated: "2h ago" },
-  { id: "#1281", title: "validator pauses but dash shows running", labels: ["bug", "dash"], updated: "5h ago" },
-  { id: "#1277", title: "docs/cli.md drift after flag rename", labels: ["docs"], updated: "1d ago" },
-  { id: "#1270", title: "add --resume to `che new` wizard", labels: ["enhancement", "wizard"], updated: "2d ago" },
-  { id: "#1264", title: "SSE heartbeat drops on macOS Sequoia", labels: ["bug", "dash"], updated: "4d ago" },
-];
-
-const MOCK_PRS = [
-  { id: "#1289", title: "runner: preserve context.Canceled semantics", author: "@mat", state: "open",  updated: "40m ago" },
-  { id: "#1287", title: "dash: validator history panel",              author: "@mat", state: "open",  updated: "3h ago" },
-  { id: "#1283", title: "manifest: add validator.history field",       author: "@nico", state: "open",  updated: "6h ago" },
-  { id: "#1278", title: "docs: regenerate cli.md from --help",         author: "@bot",  state: "draft", updated: "1d ago" },
-];
-
-const RunModal = ({ pipeline, onClose, onConfirm }) => {
-  const [value, setValue] = useState("");
-  const ref = useRef(null);
-  useEffect(() => { ref.current && ref.current.focus(); }, []);
-  const needsInput = !!(pipeline.input && pipeline.input.kind && pipeline.input.kind !== "none");
-
-  const submit = (e) => {
-    e && e.preventDefault();
-    if (needsInput && !value.trim()) return;
-    onConfirm(value.trim());
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center"
-         style={{background:"rgba(20,20,24,0.35)"}}
-         onClick={onClose}>
-      <form
-        className="panel rounded-lg w-[480px] shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-        onSubmit={submit}
-      >
-        <div className="px-5 py-4 border-b hairline">
-          <div className="text-[11px] uppercase tracking-wider ink-3 font-semibold mb-1">launch run</div>
-          <div className="mono text-[15px] ink font-semibold">{pipeline.name}</div>
-        </div>
-        <div className="px-5 py-5">
-          {needsInput && (pipeline.input.kind === "issue" || pipeline.input.kind === "pr") ? (
-            <>
-              <div className="flex items-center gap-2 mb-1.5">
-                <span className="text-[12px] ink-2">{pipeline.input.label || (pipeline.input.kind === "issue" ? "Select an issue" : "Select a pull request")}</span>
-                <span className="badge mono" style={{padding:"0 6px",fontSize:10}}>input: {pipeline.input.kind}</span>
-                <span className="ml-auto text-[10.5px] ink-3 mono">via gh</span>
-              </div>
-              <div className="border hairline rounded-md max-h-[260px] overflow-y-auto scroll-thin">
-                {(pipeline.input.kind === "issue" ? MOCK_ISSUES : MOCK_PRS).map(it => {
-                  const selected = value === it.id;
-                  const ghUrl = "https://github.com/chichex/che/" + (pipeline.input.kind === "issue" ? "issues" : "pull") + "/" + it.id.replace("#", "");
-                  return (
-                    <div
-                      key={it.id}
-                      className={"w-full flex items-stretch border-b hairline last:border-b-0 transition-colors " + (selected ? "bg-black/[0.04]" : "hover:bg-black/[0.02]")}
-                    >
-                      <button
-                        onClick={() => setValue(it.id)}
-                        className="flex-1 text-left px-3 py-2.5 flex items-center gap-3 min-w-0"
-                      >
-                        <span className={"mono text-[11.5px] shrink-0 w-14 " + (selected ? "ink font-semibold" : "ink-2")}>{it.id}</span>
-                        <span className="text-[12.5px] ink truncate flex-1">{it.title}</span>
-                        {it.labels && it.labels.map(l => (
-                          <span key={l} className="badge mono" style={{padding:"0 6px",fontSize:10}}>{l}</span>
-                        ))}
-                        {it.state && (
-                          <span className={"badge mono " + (it.state === "draft" ? "" : "badge-running")} style={{padding:"0 6px",fontSize:10}}>{it.state}</span>
-                        )}
-                        <span className="text-[10.5px] ink-3 mono shrink-0">{it.updated}</span>
-                      </button>
-                      <a
-                        href={ghUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        onClick={(e) => e.stopPropagation()}
-                        title="Open on GitHub"
-                        className="flex items-center justify-center px-3 border-l hairline ink-3 hover:ink transition-colors"
-                      >
-                        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M9 2h5v5"/><path d="M14 2L7 9"/><path d="M13 9.5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h3.5"/></svg>
-                      </a>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="text-[11px] ink-3 mt-2">
-                El runner resuelve <span className="mono">{value || (pipeline.input.kind === "issue" ? "#…" : "#…")}</span> vía <span className="mono">gh {pipeline.input.kind} view --json</span> y lo pasa como input al primer step.
-              </div>
-            </>
-          ) : needsInput ? (
-            <>
-              <div className="flex items-center gap-2 mb-1.5">
-                <span className="text-[12px] ink-2">{pipeline.input.label}</span>
-                <span className="badge mono" style={{padding:"0 6px",fontSize:10}}>input: {pipeline.input.kind}</span>
-              </div>
-              <input
-                ref={ref}
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-                placeholder={pipeline.input.placeholder}
-                className="w-full mono text-[13px] ink px-3 py-2 rounded border hairline outline-none focus:border-[var(--ink)]"
-              />
-              <div className="text-[11px] ink-3 mt-2">
-                El runner resuelve este valor en R1 · InputPrompt según el tipo <span className="mono">{pipeline.input.kind}</span>, y lo pasa al primer step como su input.
-              </div>
-            </>
-          ) : (
-            <div className="text-[13px] ink-2">
-              Pipeline con <span className="mono">input: none</span>. R1 · InputPrompt skipea directo a R2 · Preflight.
-            </div>
-          )}
-        </div>
-        <div className="px-5 py-3 border-t hairline flex items-center justify-end gap-2">
-          <button type="button" className="btn" onClick={onClose}>Cancel</button>
-          <button type="submit" className="btn btn-primary" disabled={needsInput && !value.trim()}>
-            Start run
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-};
-
-// ─────────────────────────────────────────────────────────────────────
 // Undo toast
 // ─────────────────────────────────────────────────────────────────────
 
@@ -1367,7 +1232,6 @@ const App = () => {
   const [openRunId, setOpenRunId] = useState(null);
   const [runDetail, setRunDetail] = useState(null);
   const [selectedStepIdx, setSelectedStepIdx] = useState(0);
-  const [modalOpen, setModalOpen] = useState(false);
   const [toast, setToast] = useState(null);
   const [notesOpen, setNotesOpen] = useState(false);
 
@@ -1687,45 +1551,15 @@ const App = () => {
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === "Escape") {
-        if (modalOpen) setModalOpen(false);
-        else if (notesOpen) setNotesOpen(false);
+        if (notesOpen) setNotesOpen(false);
         else if (openRunId) setOpenRunId(null);
-      }
-      if (e.key.toLowerCase() === "r" && !modalOpen && !openRunId) {
-        if (selectedPipeline && selectedPipeline.status === "ready") setModalOpen(true);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [modalOpen, notesOpen, openRunId, selectedPipeline]);
+  }, [notesOpen, openRunId]);
 
   // ── handlers ──────────────────────────────────────────────────────
-  const requestRun = () => setModalOpen(true);
-
-  const confirmRun = (input) => {
-    setModalOpen(false);
-    // create a fake new run
-    const newId = Math.random().toString(16).slice(2, 8);
-    setRuns(prev => {
-      const list = prev[selectedSlug] || [];
-      const fresh = {
-        id: newId,
-        status: "running",
-        started_at: new Date().toISOString(),
-        finished_at: null,
-        input: input || null,
-        steps: (selectedPipeline.steps || []).map((s, i) => ({
-          name: s.name,
-          status: i === 0 ? "running" : "pending",
-          started_at: i === 0 ? new Date().toISOString() : null,
-        })),
-      };
-      return { ...prev, [selectedSlug]: [fresh, ...list].slice(0, 10) };
-    });
-    setToast({ message: "Run started · " + newId, remaining: 0, kind: "started" });
-    setTimeout(() => setToast(null), 2200);
-  };
-
   const cancelRun = () => {
     if (!openRun) return;
     const id = openRun.id;
@@ -1900,7 +1734,6 @@ const App = () => {
               pipeline={selectedPipeline}
               runs={runs}
               onOpenRun={(id) => { setOpenRunId(id); setSelectedStepIdx(0); setRunDetail(null); }}
-              onRequestRun={requestRun}
               onResumeDraft={() => alert("Prototype: would run `che new --resume " + selectedPipeline.slug + "` in the user's terminal.")}
               fadedRunIds={fadedSlugs}
             />
@@ -1918,14 +1751,6 @@ const App = () => {
       </button>
 
       <NotesDrawer open={notesOpen} onClose={() => setNotesOpen(false)} />
-
-      {modalOpen && selectedPipeline && (
-        <RunModal
-          pipeline={selectedPipeline}
-          onClose={() => setModalOpen(false)}
-          onConfirm={confirmRun}
-        />
-      )}
 
       <UndoToast toast={toast} onUndo={toast?.undoId ? undoCancel : () => setToast(null)} />
     </div>
