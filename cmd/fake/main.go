@@ -131,6 +131,16 @@ func main() {
 	}
 
 	joinedArgs := strings.Join(args, " ")
+	// Fix #114 extendido: claude y codex pasan el prompt por stdin, no argv.
+	// Los tests historicos hacen WhenArgsMatch("token-del-content") esperando
+	// matchear cuando el content viajaba por argv. Para preservarlos, el
+	// regex de args se evalua contra "argv + stdin" cuando el bin es uno de
+	// los CLIs que migraron a stdin. WhenStdinContains sigue funcionando
+	// independiente (es AND, no OR).
+	regexHaystack := joinedArgs
+	if (identity == "claude" || identity == "codex") && len(stdin) > 0 {
+		regexHaystack = joinedArgs + "\n" + string(stdin)
+	}
 	var matched *matcher
 	var matchedIdx int
 	for i := range scr.Matchers {
@@ -140,7 +150,7 @@ func main() {
 			if err != nil {
 				continue
 			}
-			if !re.MatchString(joinedArgs) {
+			if !re.MatchString(regexHaystack) {
 				continue
 			}
 		}
