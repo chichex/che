@@ -111,6 +111,7 @@ type Step struct {
 	Kind       string     `yaml:"kind,omitempty"`
 	Content    string     `yaml:"content,omitempty"`
 	Input      string     `yaml:"input,omitempty"`
+	Model      string     `yaml:"model,omitempty"`
 	Validator  *Validator `yaml:"validator,omitempty"`
 	MaxLoops   int        `yaml:"max_loops,omitempty"`
 	OnMaxLoops string     `yaml:"on_max_loops,omitempty"`
@@ -121,6 +122,7 @@ type Validator struct {
 	CLI     string `yaml:"cli"`
 	Kind    string `yaml:"kind"`
 	Content string `yaml:"content"`
+	Model   string `yaml:"model,omitempty"`
 }
 
 // StepFieldFocus indica que campo de S2 tiene el foco.

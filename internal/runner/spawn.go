@@ -80,8 +80,8 @@ var spawnCmdFn = defaultSpawnCmd
 // defaultSpawnCmd construye el comando segun el cli/kind del step. Tabla
 // del doc:
 //
-//	claude   -p <skill-or-prompt> --output-format stream-json --verbose
-//	codex    exec --json <skill-or-prompt>
+//	claude   -p --output-format stream-json --verbose --model <model>
+//	codex    exec --json
 //	gemini   -p <prompt>  /  /<skill>
 //	opencode run <prompt>
 //
@@ -91,19 +91,18 @@ var spawnCmdFn = defaultSpawnCmd
 // con el payload resuelto — el payload sigue viajando por stdin tambien para
 // preservar la compat (Fix #107).
 //
-// Fix #114 (E2BIG): para CLI=codex el prompt interpolado viaja por stdin en
-// lugar de argv, eliminando el "argument list too long" cuando {{INPUT}} se
-// sustituye por payloads >= 256 KB. buildSpawnArgs devuelve ["exec", "--json"]
-// (sin content). El stdin se arma segun si el content original embedia
-// {{INPUT}}:
+// Fix #114 (E2BIG): para CLI=codex/claude el prompt interpolado viaja por
+// stdin en lugar de argv, eliminando el "argument list too long" cuando
+// {{INPUT}} se sustituye por payloads grandes. buildSpawnArgs devuelve los
+// args sin el content; el content interpolado viaja por stdin. El stdin se
+// arma segun si el content original embedia {{INPUT}}:
 //   - Si SI embedia {{INPUT}}: stdin = content interpolado (payload ya inline).
 //   - Si NO embedia {{INPUT}}: stdin = content + "\n" + payload (payload
-//     concatenado para que codex lo reciba como bloque <stdin> adicional,
+//     concatenado para que el CLI lo reciba como bloque <stdin> adicional,
 //     necesario p.ej. en validators que no embeben {{INPUT}} pero leen la
 //     salida del step previo desde stdin).
 //
-// Para otros CLIs (claude/gemini/opencode) no hay cambios: content por argv +
-// payload por stdin.
+// Para gemini/opencode no hay cambios: content por argv + payload por stdin.
 func defaultSpawnCmd(step wizard.Step, payload string) (*exec.Cmd, error) {
 	stepForArgs := step
 	stepForArgs.Content = interpolateInput(step.Content, payload)
@@ -112,12 +111,12 @@ func defaultSpawnCmd(step wizard.Step, payload string) (*exec.Cmd, error) {
 		return nil, err
 	}
 	cmd := exec.Command(step.CLI, args...)
-	if step.CLI == "codex" {
+	if step.CLI == "codex" || step.CLI == "claude" {
 		// Fix #114: prompt via stdin para evitar E2BIG.
 		// Si el content original embedia {{INPUT}}, el payload ya quedo
 		// sustituido inline — mandamos solo el content interpolado.
 		// Si no embedia {{INPUT}}, concatenamos payload al final para que
-		// codex lo reciba (validators que leen la salida del step previo
+		// el CLI lo reciba (validators que leen la salida del step previo
 		// desde stdin sin placeholder explicit).
 		stdinContent := stepForArgs.Content
 		if !strings.Contains(step.Content, "{{INPUT}}") {
@@ -144,12 +143,31 @@ func interpolateInput(content, payload string) string {
 	return strings.ReplaceAll(content, "{{INPUT}}", payload)
 }
 
+// defaultClaudeModel es el modelo por default cuando un step claude no
+// declara `model:` explicito en el YAML. Default global a opus segun decision
+// del usuario (todos los claude del repo usan opus salvo override por step).
+const defaultClaudeModel = "opus"
+
+// claudeModel resuelve el modelo a pasarle a `claude --model`. Si el step
+// declara `model:` explicito en el YAML lo respeta, si no cae al default.
+func claudeModel(step wizard.Step) string {
+	if strings.TrimSpace(step.Model) != "" {
+		return step.Model
+	}
+	return defaultClaudeModel
+}
+
 // buildSpawnArgs es la parte testeable de defaultSpawnCmd: dado un step,
 // devuelve los args para el subprocess (sin tocar exec.Command).
 //
-// H5: claude ahora pasa --output-format stream-json --verbose (el parser
+// H5: claude pasa --output-format stream-json --verbose (el parser
 // de internal/runner/parser/claude.go lo consume). codex se mantiene en
 // `exec --json` (parser stub que cae a raw — ver parser/codex.go).
+//
+// Fix #114 extendido: claude ahora omite el content del argv — el prompt
+// viaja por stdin (ver defaultSpawnCmd) para evitar E2BIG cuando {{INPUT}} se
+// expande a payloads grandes. Ademas se le pasa `--model <X>` explicito
+// (default opus, override por `model:` del step en el YAML).
 func buildSpawnArgs(step wizard.Step) ([]string, error) {
 	if step.CLI == "" {
 		return nil, fmt.Errorf("step sin cli")
@@ -159,10 +177,15 @@ func buildSpawnArgs(step wizard.Step) ([]string, error) {
 	}
 	switch step.CLI {
 	case "claude":
+		// Fix #114 extendido: omitir el content del argv — el prompt
+		// viaja por stdin (ver defaultSpawnCmd). claude -p sin arg
+		// posicional lee el prompt de stdin (modo pipe declarado en
+		// `claude --help`: "-p/--print ... useful for pipes").
 		return []string{
-			"-p", step.Content,
+			"-p",
 			"--output-format", "stream-json",
 			"--verbose",
+			"--model", claudeModel(step),
 		}, nil
 	case "codex":
 		// Fix #114: omitir el content como tercer argv — el prompt viaja

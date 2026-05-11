@@ -149,16 +149,17 @@ func TestDefaultSpawnCmd_CodexStdinHasContent(t *testing.T) {
 	}
 }
 
-// TestBuildSpawnArgs_NonCodexCLIs_NoRegression valida que claude/gemini/opencode
-// mantienen el content en argv (sin regresion por Fix #114).
-func TestBuildSpawnArgs_NonCodexCLIs_NoRegression(t *testing.T) {
+// TestBuildSpawnArgs_GeminiOpencodeContentInArgv valida que gemini/opencode
+// mantienen el content en argv (sin regresion por Fix #114). claude/codex se
+// excluyen porque ahora pasan el prompt via stdin (ver
+// TestBuildSpawnArgs_ClaudeExcludesContent y TestBuildSpawnArgs_CodexExcludesContent).
+func TestBuildSpawnArgs_GeminiOpencodeContentInArgv(t *testing.T) {
 	cases := []struct {
 		cli     string
 		kind    string
 		content string
 		wantArg string // fragmento que debe aparecer en algun arg
 	}{
-		{"claude", wizard.KindPrompt, "mi prompt claude", "mi prompt claude"},
 		{"gemini", wizard.KindPrompt, "mi prompt gemini", "mi prompt gemini"},
 		{"opencode", wizard.KindPrompt, "mi prompt opencode", "mi prompt opencode"},
 	}
@@ -180,6 +181,94 @@ func TestBuildSpawnArgs_NonCodexCLIs_NoRegression(t *testing.T) {
 				t.Errorf("%s: content %q no aparece en argv %v", tc.cli, tc.wantArg, args)
 			}
 		})
+	}
+}
+
+// TestBuildSpawnArgs_ClaudeExcludesContent valida que claude (igual que codex
+// post-Fix #114) NO lleva el content en argv — el prompt viaja por stdin.
+// Tambien valida que se inyecta `--model opus` por default.
+func TestBuildSpawnArgs_ClaudeExcludesContent(t *testing.T) {
+	step := wizard.Step{
+		CLI:     "claude",
+		Kind:    wizard.KindPrompt,
+		Content: "prompt largo que no debe viajar por argv",
+	}
+	args, err := buildSpawnArgs(step)
+	if err != nil {
+		t.Fatalf("buildSpawnArgs error: %v", err)
+	}
+	for _, a := range args {
+		if strings.Contains(a, "prompt largo") {
+			t.Errorf("buildSpawnArgs claude incluye el content en argv: %q", a)
+		}
+	}
+	// Debe pasar --model opus por default (sin step.Model declarado).
+	wantPairs := map[string]string{"--model": "opus"}
+	for flag, val := range wantPairs {
+		idx := -1
+		for i, a := range args {
+			if a == flag {
+				idx = i
+				break
+			}
+		}
+		if idx < 0 || idx+1 >= len(args) || args[idx+1] != val {
+			t.Errorf("buildSpawnArgs claude: expected %s %s en argv, got %v", flag, val, args)
+		}
+	}
+}
+
+// TestBuildSpawnArgs_ClaudeHonorsStepModel valida que el campo `model:` del
+// step claude se traduce a `--model <X>` (override del default opus).
+func TestBuildSpawnArgs_ClaudeHonorsStepModel(t *testing.T) {
+	step := wizard.Step{
+		CLI:     "claude",
+		Kind:    wizard.KindPrompt,
+		Content: "p",
+		Model:   "sonnet",
+	}
+	args, err := buildSpawnArgs(step)
+	if err != nil {
+		t.Fatalf("buildSpawnArgs error: %v", err)
+	}
+	idx := -1
+	for i, a := range args {
+		if a == "--model" {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || idx+1 >= len(args) || args[idx+1] != "sonnet" {
+		t.Errorf("buildSpawnArgs claude: expected --model sonnet, got %v", args)
+	}
+}
+
+// TestDefaultSpawnCmd_ClaudeLargePayload verifica que un step claude con un
+// payload sintetico de >= 512 KB arma el cmd sin error, los args quedan
+// acotados (sin el payload en argv), y stdin contiene el payload completo
+// (via content interpolado con {{INPUT}}) — Fix #114 extendido a claude.
+func TestDefaultSpawnCmd_ClaudeLargePayload(t *testing.T) {
+	largePayload := strings.Repeat("A", 512*1024)
+	step := wizard.Step{
+		CLI:     "claude",
+		Kind:    wizard.KindPrompt,
+		Content: "analiza:\n<<<\n{{INPUT}}\n>>>",
+	}
+	cmd, err := defaultSpawnCmd(step, largePayload)
+	if err != nil {
+		t.Fatalf("defaultSpawnCmd con payload grande error: %v", err)
+	}
+	for _, a := range cmd.Args {
+		if len(a) > 1000 {
+			t.Errorf("arg demasiado largo (%d bytes) — el payload viajo por argv", len(a))
+		}
+	}
+	sr, ok := cmd.Stdin.(*strings.Reader)
+	if !ok {
+		t.Fatalf("cmd.Stdin no es *strings.Reader para claude")
+	}
+	if sr.Len() < 512*1024 {
+		t.Errorf("stdin demasiado corto (%d bytes) — el payload no esta completo en stdin", sr.Len())
 	}
 }
 

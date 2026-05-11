@@ -12,9 +12,13 @@
 #   2. close postea un template de scoring (1-10 en completitud / fidelidad /
 #      alineación) como comment del PR. El humano lo llena fuera del pipeline.
 #      No hay gate humano en medio del run.
-#   3. El validator de cada step usa codex en lugar de claude para reducir
-#      groupthink (cross-CLI review). Si el usuario solo tiene claude
-#      instalado, puede editar el YAML o borrar el bloque validator.
+#   3. El validator de cada step usa claude (mismo CLI que el executor).
+#      Antes se usaba codex como cross-CLI review, pero (a) el rol no se
+#      respetaba bien cuando el contexto crecia y (b) codex tiene un cap
+#      de 1 MB de prompt que reventaba con outputs grandes del step. El
+#      runner pasa `--model opus` por default para que el validator
+#      tenga el headroom necesario; si queres override, agregale `model:`
+#      al bloque validator del YAML.
 #
 # Permisos requeridos por los CLIs invocados:
 #   - gh (issue create / edit / comment / view; pr create / view / diff /
@@ -131,7 +135,7 @@ steps:
   # Acción: para cada issue, generar plan consolidado, postear comment de
   #         análisis, reescribir body con "## Plan consolidado", aplicar
   #         che:planning → che:plan.
-  # Validator (codex): revisa el plan, postea comment de validación, aplica
+  # Validator (claude): revisa el plan, postea comment de validación, aplica
   #                    plan-validated:approve|changes-requested|needs-human.
   #                    Si changes-requested, max_loops=3 re-corre este step
   #                    para que aplique los fixes (efectivo iterate).
@@ -289,7 +293,7 @@ steps:
       {{INPUT}}
       >>>
     validator:
-      cli: codex
+      cli: claude
       kind: prompt
       content: |
         Sos un validador técnico senior. Otro agente produjo un PLAN DE
@@ -323,8 +327,8 @@ steps:
 
         4. Posteá un comment en el issue con header tracking:
 
-               <!-- claude-cli: flow=validate iter=1 agent=codex role=validator -->
-               ## [validator:codex · iter:1] — verdict: <verdict>
+               <!-- claude-cli: flow=validate iter=1 agent=claude role=validator -->
+               ## [validator:claude · iter:1] — verdict: <verdict>
 
                **Resumen:** <tu opinión global, 1-2 oraciones>
 
@@ -376,7 +380,7 @@ steps:
   # Acción: por cada issue, parsear el plan del body, crear worktree,
   #         implementar, commit + push, abrir PR draft contra main, aplicar
   #         che:executing → che:executed.
-  # Validator (codex): revisar el diff del PR, postear comment, aplicar
+  # Validator (claude): revisar el diff del PR, postear comment, aplicar
   #                    validated:*. Si changes_requested → max_loops=3
   #                    re-corre execute con feedback (iterate).
   - name: execute
@@ -499,7 +503,7 @@ steps:
       {{INPUT}}
       >>>
     validator:
-      cli: codex
+      cli: claude
       kind: prompt
       content: |
         Sos un validador técnico senior. Otro agente acaba de correr el step
@@ -509,7 +513,7 @@ steps:
 
         Cómo leer la entrada:
 
-        - El bloque entre <<< y >>> es la salida que claude/codex emitió al
+        - El bloque entre <<< y >>> es la salida que claude emitió al
           terminar el step. En el flujo feliz contiene una lista de PRs
           (uno por issue procesado), típicamente como `prs:` o como una
           enumeración en prosa con números de PR y URLs. Aceptá CUALQUIER
@@ -549,8 +553,8 @@ steps:
 
         4. Posteá comment en el PR con header tracking:
 
-               <!-- claude-cli: flow=validate iter=1 agent=codex role=validator -->
-               ## [validator:codex · iter:1] — verdict: <verdict>
+               <!-- claude-cli: flow=validate iter=1 agent=claude role=validator -->
+               ## [validator:claude · iter:1] — verdict: <verdict>
 
                **Resumen:** <opinión global>
 

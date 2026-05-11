@@ -595,6 +595,7 @@ func runValidator(step wizard.Step, payload string, runDir string, stepIdx, loop
 		CLI:     step.Validator.CLI,
 		Kind:    step.Validator.Kind,
 		Content: interpolateInput(step.Validator.Content, payload),
+		Model:   step.Validator.Model,
 	}
 
 	full := validatorPreamble + payload
