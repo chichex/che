@@ -74,11 +74,17 @@ func Serve(ctx context.Context, opts Options) error {
 		rw.stop()
 	}()
 
+	// Run starter + lock — comparte estado entre handlers para que el POST
+	// /runs no pueda double-arrancar el mismo slug. runsRoot="" deja al
+	// runner usar ~/.che/runs (mismo path que la TUI).
+	starter := &runnerStarter{runsRoot: ""}
+	lock := newRunLock()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
 	mux.HandleFunc("/api/events", handleGlobalEvents(bus))
 	mux.HandleFunc("/api/pipelines", handleListPipelines(pipelinesDir, runsDir))
-	mux.HandleFunc("/api/pipelines/", dispatchPipelinesPrefix(pipelinesDir, runsDir, bus))
+	mux.HandleFunc("/api/pipelines/", dispatchPipelinesPrefix(pipelinesDir, runsDir, bus, starter, lock))
 
 	srv := &http.Server{
 		Handler:           mux,

@@ -325,15 +325,17 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 // to sub-handlers based on path segments.
 //
 // Supported routes:
-//   /api/pipelines/<slug>                                  → pipeline detail (spec 1)
-//   /api/pipelines/<slug>/runs                             → list runs
-//   /api/pipelines/<slug>/runs/<runId>                     → get run
-//   /api/pipelines/<slug>/runs/<runId>/events              → SSE per-run stream (spec 3)
-//   /api/pipelines/<slug>/runs/<runId>/steps/<idx>/stdout  → get step stdout
+//   GET  /api/pipelines/<slug>                                  → pipeline detail (spec 1)
+//   GET  /api/pipelines/<slug>/runs                             → list runs
+//   POST /api/pipelines/<slug>/runs                             → start a new run
+//   GET  /api/pipelines/<slug>/runs/<runId>                     → get run
+//   GET  /api/pipelines/<slug>/runs/<runId>/events              → SSE per-run stream (spec 3)
+//   GET  /api/pipelines/<slug>/runs/<runId>/steps/<idx>/stdout  → get step stdout
 //
 // Any other pattern returns 404.
-func dispatchPipelinesPrefix(pipelinesDir, runsDir string, bus *Bus) http.HandlerFunc {
+func dispatchPipelinesPrefix(pipelinesDir, runsDir string, bus *Bus, starter runStarter, lock *runLock) http.HandlerFunc {
 	listRunsH := handleListRuns(runsDir)
+	createRunH := handleCreateRun(pipelinesDir, runsDir, starter, lock)
 	getRunH := handleGetRun(runsDir)
 	getStdoutH := handleGetStepStdout(runsDir)
 	getEventsH := handleEvents(runsDir, bus)
@@ -366,7 +368,12 @@ func dispatchPipelinesPrefix(pipelinesDir, runsDir string, bus *Bus) http.Handle
 				return
 			}
 			r2 := requestWithHeaders(r, map[string]string{hdrSlug: slug})
-			listRunsH(w, r2)
+			switch r.Method {
+			case http.MethodPost:
+				createRunH(w, r2)
+			default:
+				listRunsH(w, r2)
+			}
 
 		case 3:
 			// /api/pipelines/<slug>/runs/<runId>
