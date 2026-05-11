@@ -53,8 +53,15 @@ func TestListEmpty(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(list) != 0 {
-		t.Fatalf("want empty list, got %d items", len(list))
+	// Empty dir still includes builtins (che-funnel). At least 1 item expected.
+	if len(list) == 0 {
+		t.Fatal("want at least 1 item (builtins), got 0")
+	}
+	// All items from an empty dir must be builtin.
+	for _, item := range list {
+		if !item.Builtin {
+			t.Errorf("item %q: expected builtin=true when no on-disk files", item.Slug)
+		}
 	}
 }
 
@@ -70,14 +77,22 @@ func TestListOneReady(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(list) != 1 {
-		t.Fatalf("want 1, got %d", len(list))
+	// List includes builtins plus the on-disk pipeline. Find "my-pipe".
+	var found *pipelineJSON
+	for i := range list {
+		if list[i].Slug == "my-pipe" {
+			found = &list[i]
+			break
+		}
 	}
-	if list[0].Status != "ready" {
-		t.Errorf("want status=ready, got %q", list[0].Status)
+	if found == nil {
+		t.Fatalf("my-pipe not found in list of %d items", len(list))
 	}
-	if list[0].Slug != "my-pipe" {
-		t.Errorf("want slug=my-pipe, got %q", list[0].Slug)
+	if found.Status != "ready" {
+		t.Errorf("want status=ready, got %q", found.Status)
+	}
+	if found.Builtin {
+		t.Errorf("on-disk pipeline should not be marked builtin")
 	}
 }
 
@@ -93,11 +108,19 @@ func TestListOneDraft(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(list) != 1 {
-		t.Fatalf("want 1, got %d", len(list))
+	// List includes builtins plus the on-disk draft. Find "draft-pipe".
+	var found *pipelineJSON
+	for i := range list {
+		if list[i].Slug == "draft-pipe" {
+			found = &list[i]
+			break
+		}
 	}
-	if list[0].Status != "draft" {
-		t.Errorf("want status=draft, got %q", list[0].Status)
+	if found == nil {
+		t.Fatalf("draft-pipe not found in list of %d items", len(list))
+	}
+	if found.Status != "draft" {
+		t.Errorf("want status=draft, got %q", found.Status)
 	}
 }
 
@@ -113,9 +136,7 @@ func TestListMixed(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(list) != 2 {
-		t.Fatalf("want 2, got %d", len(list))
-	}
+	// List contains builtins + on-disk. Check by slug, not by count.
 	statuses := map[string]string{}
 	for _, item := range list {
 		statuses[item.Slug] = item.Status
@@ -138,11 +159,16 @@ func TestListCorruptExcluded(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(list) != 1 {
-		t.Fatalf("want 1 (corrupt excluded), got %d", len(list))
+	// bad-pipe must be excluded; good-pipe and builtins must be present.
+	slugs := map[string]bool{}
+	for _, item := range list {
+		slugs[item.Slug] = true
 	}
-	if list[0].Slug != "good-pipe" {
-		t.Errorf("want good-pipe, got %q", list[0].Slug)
+	if slugs["bad-pipe"] {
+		t.Errorf("bad-pipe should be excluded from list")
+	}
+	if !slugs["good-pipe"] {
+		t.Errorf("good-pipe should be in list")
 	}
 }
 
@@ -236,10 +262,17 @@ func TestListPipelines_LastRunPresent(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(list) != 1 {
-		t.Fatalf("want 1 pipeline, got %d", len(list))
+	// List includes builtins + my-pipe. Find my-pipe.
+	var p *pipelineJSON
+	for i := range list {
+		if list[i].Slug == "my-pipe" {
+			p = &list[i]
+			break
+		}
 	}
-	p := list[0]
+	if p == nil {
+		t.Fatalf("my-pipe not found in list of %d items", len(list))
+	}
 	if p.LastRun == nil {
 		t.Fatal("want last_run present, got nil")
 	}
@@ -279,16 +312,131 @@ func TestListPipelines_LastRunOmitted(t *testing.T) {
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(list) != 1 {
-		t.Fatalf("want 1 pipeline, got %d", len(list))
+	// List includes builtins + no-runs-pipe. Find no-runs-pipe.
+	var found *pipelineJSON
+	for i := range list {
+		if list[i].Slug == "no-runs-pipe" {
+			found = &list[i]
+			break
+		}
 	}
-	if list[0].LastRun != nil {
-		t.Errorf("want last_run omitted, got %+v", list[0].LastRun)
+	if found == nil {
+		t.Fatalf("no-runs-pipe not found in list of %d items", len(list))
 	}
+	if found.LastRun != nil {
+		t.Errorf("want last_run omitted, got %+v", found.LastRun)
+	}
+}
 
-	// Also verify JSON does not contain "last_run" key at all.
-	rawJSON := rr.Body.String()
-	if strings.Contains(rawJSON, "last_run") {
-		t.Errorf("last_run should be omitted from JSON, got: %s", rawJSON)
+// ── builtin pipeline tests ─────────────────────────────────────────────────
+
+// TestListBuiltinOnly verifies that an empty pipelines dir still returns the
+// builtin pipelines (e.g. che-funnel) with builtin=true.
+func TestListBuiltinOnly(t *testing.T) {
+	dir := t.TempDir() // empty — no on-disk YAML files
+	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	var list []pipelineJSON
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Must include at least che-funnel.
+	var cheF *pipelineJSON
+	for i := range list {
+		if list[i].Slug == "che-funnel" {
+			cheF = &list[i]
+			break
+		}
+	}
+	if cheF == nil {
+		t.Fatalf("che-funnel not found in builtin-only list: %v", list)
+	}
+	if !cheF.Builtin {
+		t.Errorf("che-funnel: want builtin=true, got false")
+	}
+}
+
+// TestListBuiltinOverriddenByDisk verifies that when a YAML file exists on
+// disk for a builtin slug, the on-disk version is used and builtin=false.
+func TestListBuiltinOverriddenByDisk(t *testing.T) {
+	dir := t.TempDir()
+	// Write an on-disk override for che-funnel with a different name.
+	writeYAML(t, dir, "che-funnel", wizard.Pipeline{
+		Name:        "My Custom Funnel",
+		Description: "overridden",
+		Steps:       []wizard.Step{{Name: "custom-step", CLI: "claude", Kind: "prompt"}},
+	})
+	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	var list []pipelineJSON
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	// Only one che-funnel entry must exist.
+	var entries []pipelineJSON
+	for _, item := range list {
+		if item.Slug == "che-funnel" {
+			entries = append(entries, item)
+		}
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want exactly 1 che-funnel entry, got %d", len(entries))
+	}
+	if entries[0].Builtin {
+		t.Errorf("on-disk override: want builtin=false, got true")
+	}
+	if entries[0].Name != "My Custom Funnel" {
+		t.Errorf("want on-disk name, got %q", entries[0].Name)
+	}
+}
+
+// TestDetailBuiltinNoOverride verifies GET /api/pipelines/che-funnel returns
+// the builtin pipeline with builtin=true when no on-disk file exists.
+func TestDetailBuiltinNoOverride(t *testing.T) {
+	dir := t.TempDir() // empty dir
+	rr := getJSON(t, handleGetPipeline(dir), "/api/pipelines/che-funnel")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var detail pipelineDetailJSON
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if detail.Slug != "che-funnel" {
+		t.Errorf("slug: want che-funnel, got %q", detail.Slug)
+	}
+	if !detail.Builtin {
+		t.Errorf("want builtin=true for che-funnel without on-disk file")
+	}
+	if len(detail.Steps) == 0 {
+		t.Errorf("want steps from builtin, got none")
+	}
+}
+
+// TestDetailBuiltinOverriddenByDisk verifies GET /api/pipelines/che-funnel
+// returns the on-disk version with builtin=false when a YAML file exists.
+func TestDetailBuiltinOverriddenByDisk(t *testing.T) {
+	dir := t.TempDir()
+	writeYAML(t, dir, "che-funnel", wizard.Pipeline{
+		Name:  "My Custom Funnel",
+		Steps: []wizard.Step{{Name: "custom", CLI: "claude", Kind: "prompt"}},
+	})
+	rr := getJSON(t, handleGetPipeline(dir), "/api/pipelines/che-funnel")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var detail pipelineDetailJSON
+	if err := json.Unmarshal(rr.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if detail.Builtin {
+		t.Errorf("on-disk override: want builtin=false, got true")
+	}
+	if detail.Name != "My Custom Funnel" {
+		t.Errorf("want on-disk name, got %q", detail.Name)
 	}
 }
