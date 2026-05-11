@@ -248,7 +248,10 @@ func handleGetRun(runsDir string) http.HandlerFunc {
 
 // handleGetStepStdout returns an http.HandlerFunc for
 // GET /api/pipelines/:slug/runs/:runId/steps/:idx/stdout.
-// Serves the step-NN.stdout.log file (NN = 1-indexed, 2-padded).
+// Serves the step-NN.stdout.log file (NN = 1-indexed, 2-padded), pasandolo
+// por el mismo parser que el SSE en vivo para que el frontend de runs
+// frozen vea el mismo formato humano (stream-json → lineas legibles).
+// Soporta ?raw=1 para devolver el log original sin parsear (debug).
 // Returns 404 JSON if missing.
 func handleGetStepStdout(runsDir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -258,9 +261,9 @@ func handleGetStepStdout(runsDir string) http.HandlerFunc {
 			return
 		}
 
-		// NN is 1-indexed, 2-padded
+		runDir := filepath.Join(runsDir, slug, runID)
 		nn := fmt.Sprintf("%02d", stepIdx+1)
-		logPath := filepath.Join(runsDir, slug, runID, "step-"+nn+".stdout.log")
+		logPath := filepath.Join(runDir, "step-"+nn+".stdout.log")
 
 		if _, err := os.Stat(logPath); os.IsNotExist(err) {
 			writeJSONError(w, http.StatusNotFound, "stdout not found")
@@ -268,7 +271,50 @@ func handleGetStepStdout(runsDir string) http.HandlerFunc {
 		}
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		http.ServeFile(w, r, logPath)
+
+		// Escape hatch para inspeccion cruda (debug, soporte). El parser
+		// es lossy a proposito (oculta system_init, etc); raw=1 muestra
+		// todo lo que escribio el CLI.
+		if r.URL.Query().Get("raw") == "1" {
+			http.ServeFile(w, r, logPath)
+			return
+		}
+
+		// Resolver CLI del step desde el manifest. Si falla (manifest
+		// corrupto, step fuera de rango), caemos a servir el log crudo
+		// — preferimos contenido legible no-formateado a un 500.
+		cli := ""
+		if m, err := parseManifest(filepath.Join(runDir, "manifest.yaml")); err == nil {
+			for _, s := range m.Steps {
+				if s.Idx == stepIdx {
+					cli = s.CLI
+					break
+				}
+			}
+		}
+
+		raw, err := os.ReadFile(logPath)
+		if err != nil {
+			http.ServeFile(w, r, logPath)
+			return
+		}
+		// Split en lineas preservando vacias intermedias; descartamos
+		// solo el ultimo split vacio (trailing \n del file).
+		rawStr := string(raw)
+		rawStr = strings.TrimRight(rawStr, "\n")
+		if rawStr == "" {
+			return
+		}
+		var out strings.Builder
+		for _, line := range strings.Split(rawStr, "\n") {
+			pretty := formatRawLineJoined(cli, line)
+			if pretty == "" {
+				continue
+			}
+			out.WriteString(pretty)
+			out.WriteByte('\n')
+		}
+		_, _ = w.Write([]byte(out.String()))
 	}
 }
 
