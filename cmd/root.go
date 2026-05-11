@@ -25,7 +25,7 @@ var rootCmd = &cobra.Command{
 		// esc desde el listado de skills) re-entran al menu principal. Las
 		// que piden exit total (q/ctrl+c) cortan el loop.
 		for {
-			action, err := tui.Run()
+			action, err := tui.Run(Version)
 			if err != nil {
 				return err
 			}
