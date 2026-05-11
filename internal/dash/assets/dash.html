@@ -134,7 +134,6 @@
   /* Global connection badge states */
   .badge-live    { color: var(--done);    border-color: color-mix(in oklch, var(--done) 25%, var(--line)); }
   .badge-reconn  { color: var(--warn);    border-color: color-mix(in oklch, var(--warn) 25%, var(--line)); }
-  .badge-disconn { color: var(--failed);  border-color: color-mix(in oklch, var(--failed) 25%, var(--line)); }
 </style>
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
@@ -412,7 +411,7 @@ const Badge = ({ kind, children }) => (
 // Top bar
 // ─────────────────────────────────────────────────────────────────────
 
-const TopBar = ({ pipelines, runs, globalConnState, onRetryGlobal }) => {
+const TopBar = ({ pipelines, runs, globalConnState }) => {
   const liveRuns = useMemo(() => {
     let n = 0;
     for (const slug in runs) for (const r of runs[slug]) if (r.status === "running") n++;
@@ -442,14 +441,6 @@ const TopBar = ({ pipelines, runs, globalConnState, onRetryGlobal }) => {
         {globalConnState === "reconnecting" && (
           <span className="badge badge-reconn">
             <span className="dot dot-paused" /> reconnecting…
-          </span>
-        )}
-        {globalConnState === "disconnected" && (
-          <span className="flex items-center gap-2">
-            <span className="badge badge-disconn">
-              <span className="dot dot-failed" /> disconnected
-            </span>
-            <button className="btn btn-ghost mono text-[10.5px] ink-3" onClick={onRetryGlobal}>retry</button>
           </span>
         )}
         {/* "hidden" state: no badge shown */}
@@ -694,8 +685,7 @@ const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onRes
   const [stdoutLines, setStdoutLines] = useState({}); // { [stepIdx]: string[] }
   const nextLineOrdinal = useRef({});                  // { [stepIdx]: int }
   const seenKeys = useRef(new Set());                  // dedup: "step:<i>:start", etc.
-  const [sseStatus, setSseStatus] = useState("idle"); // idle | live | reconnecting | disconnected
-  const disconnectTimerRef = useRef(null);
+  const [sseStatus, setSseStatus] = useState("idle"); // idle | live | reconnecting
   const outputScrollRef = useRef(null);
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
 
@@ -734,24 +724,11 @@ const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onRes
 
     es.onopen = () => {
       setSseStatus("live");
-      if (disconnectTimerRef.current) {
-        clearTimeout(disconnectTimerRef.current);
-        disconnectTimerRef.current = null;
-      }
     };
 
     es.onerror = () => {
       if (es.readyState === EventSource.CONNECTING) {
         setSseStatus("reconnecting");
-      } else {
-        setSseStatus("disconnected");
-      }
-      // Start 10s timer to declare permanently disconnected.
-      if (!disconnectTimerRef.current) {
-        disconnectTimerRef.current = setTimeout(() => {
-          setSseStatus("disconnected");
-          disconnectTimerRef.current = null;
-        }, 10000);
       }
     };
 
@@ -804,10 +781,6 @@ const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onRes
 
     return () => {
       es.close();
-      if (disconnectTimerRef.current) {
-        clearTimeout(disconnectTimerRef.current);
-        disconnectTimerRef.current = null;
-      }
     };
   }, [slug, runId, run?.status]);
 
@@ -1020,9 +993,6 @@ const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onRes
               )}
               {sseStatus === "reconnecting" && (
                 <span className="badge badge-paused"><span className="dot dot-paused" /> reconnecting…</span>
-              )}
-              {sseStatus === "disconnected" && (
-                <span className="badge badge-failed"><span className="dot dot-failed" /> disconnected</span>
               )}
               {paneView === "definition"
                 ? <span>step {(selectedStepIdx+1).toString().padStart(2,"00")} / {steps.length.toString().padStart(2,"00")}</span>
@@ -1387,9 +1357,8 @@ const App = () => {
   const [streamLines, setStreamLines] = useState([]);
 
   // Global SSE state
-  const [globalConnState, setGlobalConnState] = useState("hidden"); // hidden|live|reconnecting|disconnected
+  const [globalConnState, setGlobalConnState] = useState("hidden"); // hidden|live|reconnecting
   const globalEsRef = useRef(null);
-  const globalDisconnTimerRef = useRef(null);
   const globalHadErrorRef = useRef(false);
   const finishedRunsDedup = useRef(new Set()); // set of "runId:status"
   const fadedSlugsRef = useRef(new Set()); // slugs with fade-in animation pending
@@ -1456,10 +1425,6 @@ const App = () => {
 
     es.onopen = () => {
       setGlobalConnState("live");
-      if (globalDisconnTimerRef.current) {
-        clearTimeout(globalDisconnTimerRef.current);
-        globalDisconnTimerRef.current = null;
-      }
       // If we had an error before (reconnect), refetch pipeline list and runs.
       if (globalHadErrorRef.current) {
         globalHadErrorRef.current = false;
@@ -1481,14 +1446,6 @@ const App = () => {
       globalHadErrorRef.current = true;
       if (es.readyState === EventSource.CONNECTING) {
         setGlobalConnState("reconnecting");
-      } else {
-        setGlobalConnState("disconnected");
-      }
-      if (!globalDisconnTimerRef.current) {
-        globalDisconnTimerRef.current = setTimeout(() => {
-          setGlobalConnState("disconnected");
-          globalDisconnTimerRef.current = null;
-        }, 10000);
       }
     };
 
@@ -1601,15 +1558,7 @@ const App = () => {
     const es = openGlobalES();
     return () => {
       es.close();
-      if (globalDisconnTimerRef.current) {
-        clearTimeout(globalDisconnTimerRef.current);
-      }
     };
-  }, [openGlobalES]);
-
-  const retryGlobal = useCallback(() => {
-    setGlobalConnState("reconnecting");
-    openGlobalES();
   }, [openGlobalES]);
 
   // ── fetch run detail when openRunId changes ───────────────────────
@@ -1891,7 +1840,7 @@ const App = () => {
 
   return (
     <div className="h-screen flex flex-col">
-      <TopBar pipelines={pipelines} runs={runs} globalConnState={globalConnState} onRetryGlobal={retryGlobal} />
+      <TopBar pipelines={pipelines} runs={runs} globalConnState={globalConnState} />
       <div className="flex flex-1 min-h-0">
         <Sidebar
           pipelines={pipelines}
