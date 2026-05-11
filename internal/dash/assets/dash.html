@@ -1494,7 +1494,7 @@ const App = () => {
           const slug = "refactor-go";
           return {
             ...prev,
-            [slug]: prev[slug].map(r => {
+            [slug]: (prev[slug] || []).map(r => {
               if (r.id !== "7c2a91") return r;
               const steps = r.steps.map(s => ({ ...s,
                 status: s.status === "pending" || s.status === "running" ? "done" : s.status,
@@ -1519,7 +1519,7 @@ const App = () => {
       if (next.text.startsWith("validator: loop 3 verdict = accepted")) {
         setRuns(prev => ({
           ...prev,
-          "refactor-go": prev["refactor-go"].map(r => {
+          "refactor-go": (prev["refactor-go"] || []).map(r => {
             if (r.id !== "7c2a91") return r;
             const steps = [...r.steps];
             steps[2] = { ...steps[2], status: "done", exit_code: 0, duration_ms: 60000,
@@ -1533,7 +1533,7 @@ const App = () => {
       if (next.text.startsWith("ok  internal/runner/stream")) {
         setRuns(prev => ({
           ...prev,
-          "refactor-go": prev["refactor-go"].map(r => {
+          "refactor-go": (prev["refactor-go"] || []).map(r => {
             if (r.id !== "7c2a91") return r;
             const steps = [...r.steps];
             steps[3] = { ...steps[3], status: "done", exit_code: 0, duration_ms: 17000 };
@@ -1566,7 +1566,7 @@ const App = () => {
     // optimistic cancel
     setRuns(prev => ({
       ...prev,
-      [selectedSlug]: prev[selectedSlug].map(r =>
+      [selectedSlug]: (prev[selectedSlug] || []).map(r =>
         r.id === id ? { ...r, status: "cancelled", finished_at: new Date().toISOString() } : r)
     }));
     // start undo countdown
@@ -1588,7 +1588,7 @@ const App = () => {
     const id = toast.undoId;
     setRuns(prev => ({
       ...prev,
-      [selectedSlug]: prev[selectedSlug].map(r =>
+      [selectedSlug]: (prev[selectedSlug] || []).map(r =>
         r.id === id ? { ...r, status: "running", finished_at: null } : r)
     }));
     setToast(null);
@@ -1598,7 +1598,7 @@ const App = () => {
     if (!openRun) return;
     setRuns(prev => ({
       ...prev,
-      [selectedSlug]: prev[selectedSlug].map(r => {
+      [selectedSlug]: (prev[selectedSlug] || []).map(r => {
         if (r.id !== openRun.id) return r;
         const steps = r.steps.map(s => s.status === "paused" ? { ...s, status: "running" } : s);
         return { ...r, status: "running", steps };
