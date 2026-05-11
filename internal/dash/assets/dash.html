@@ -506,7 +506,6 @@ const Sidebar = ({ pipelines, runs, selectedSlug, onSelect, fadedSlugs }) => {
     <aside className="w-[296px] shrink-0 border-r hairline bg-panel flex flex-col">
       <div className="px-4 pt-4 pb-2 flex items-center justify-between">
         <span className="text-[11px] uppercase tracking-wider ink-3 font-semibold">pipelines</span>
-        <button className="btn btn-ghost mono text-[11px] ink-3" title="not wired in prototype">+ new</button>
       </div>
       <div className="px-2 pb-2 flex flex-col gap-0.5 overflow-y-auto scroll-thin">
         {pipelines.length === 0 && (
@@ -699,6 +698,14 @@ const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onRes
   const disconnectTimerRef = useRef(null);
   const outputScrollRef = useRef(null);
   const [autoScrollEnabled, setAutoScrollEnabled] = useState(true);
+
+  // 1s tick so "live Xs" en el header refresca entre eventos SSE
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    if (run?.status !== "running") return;
+    const id = setInterval(() => setNowTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [run?.status]);
 
   // run may be null while the detail fetch is in flight — guard defensively
   const steps = run?.steps || [];
@@ -1045,7 +1052,7 @@ const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onRes
                         {selectedStep.error}
                       </div>
                     )}
-                    <pre className="mono text-[12px] ink whitespace-pre-wrap">{liveLines.join("\n")}</pre>
+                    <pre className="mono text-[12px] whitespace-pre-wrap">{liveLines.join("\n")}</pre>
                     {isLiveRun && selectedStep?.status === "running" && (
                       <span className="caret" />
                     )}
@@ -1063,7 +1070,7 @@ const RunDetail = ({ pipeline, run, slug, runId, stream, onBack, onCancel, onRes
                         {selectedStep.error}
                       </div>
                     )}
-                    <pre className="mono text-[12px] ink whitespace-pre-wrap">{stdoutText}</pre>
+                    <pre className="mono text-[12px] whitespace-pre-wrap">{stdoutText}</pre>
                   </>
                 )}
               </div>
