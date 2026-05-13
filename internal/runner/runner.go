@@ -3,11 +3,11 @@ package runner
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/chichex/che/internal/pipelines"
 	"github.com/chichex/che/internal/wizard"
 )
 
@@ -34,34 +34,26 @@ func LoadPipelineByTarget(target string) (wizard.Pipeline, error) {
 }
 
 // ResolveSlug convierte un slug de usuario en el target que StartHeadless
-// espera y en el inputKind del primer step. Busca en este orden:
-//  1. ~/.che/pipelines/<slug>.yaml (pipelines de usuario)
-//  2. builtin:<slug> (pipelines embebidos via wizard.Builtins)
+// espera y en el inputKind del primer step. Delega a pipelines.Resolve
+// para mantener una unica fuente de verdad del orden de busqueda:
+//  1. <cwd>/.che/pipelines/<slug>.yaml (scope project)
+//  2. ~/.che/pipelines/<slug>.yaml (scope global)
+//  3. builtin:<slug> (pipelines embebidos via wizard.Builtins)
 //
 // Devuelve error si el slug no existe en ninguna fuente. inputKind es
 // wizard.InputNone ("none") si no se pudo cargar el pipeline — el caller
 // debe chequear error primero.
 func ResolveSlug(slug string) (target, inputKind string, err error) {
-	home, herr := os.UserHomeDir()
-	if herr == nil {
-		path := filepath.Join(home, ".che", "pipelines", slug+".yaml")
-		if _, sterr := os.Stat(path); sterr == nil {
-			p, lerr := wizard.Load(path)
-			if lerr != nil {
-				return "", wizard.InputNone, fmt.Errorf("runner: load %s: %w", path, lerr)
-			}
-			return path, firstInputKind(p), nil
-		}
+	cwd, _ := os.Getwd()
+	home, _ := os.UserHomeDir()
+	res, found, rerr := pipelines.Resolve(cwd, home, slug)
+	if rerr != nil {
+		return "", wizard.InputNone, fmt.Errorf("runner: resolve %q: %w", slug, rerr)
 	}
-	// Fallback: builtin.
-	b, berr := wizard.BuiltinBySlug(slug)
-	if berr != nil {
-		return "", wizard.InputNone, fmt.Errorf("runner: builtin lookup %q: %w", slug, berr)
-	}
-	if b == nil {
+	if !found {
 		return "", wizard.InputNone, fmt.Errorf("runner: pipeline %q no encontrado", slug)
 	}
-	return "builtin:" + slug, firstInputKind(b.Pipeline), nil
+	return res.Target, firstInputKind(res.Pipeline), nil
 }
 
 // loadPipelineForRun resuelve `target` a un Pipeline parseado. Si target

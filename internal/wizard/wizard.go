@@ -3,6 +3,8 @@ package wizard
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -44,6 +46,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch m.screen {
 	case ScreenInfo:
 		return m.updateInfo(key)
+	case ScreenScope:
+		return m.updateScope(key)
 	case ScreenStep:
 		return m.updateStep(key)
 	case ScreenStepReview:
@@ -69,6 +73,8 @@ func (m model) View() string {
 	switch m.screen {
 	case ScreenInfo:
 		return m.viewInfo()
+	case ScreenScope:
+		return m.viewScope()
 	case ScreenStep:
 		return m.viewStep()
 	case ScreenStepReview:
@@ -90,14 +96,27 @@ func (m model) View() string {
 }
 
 // newModel construye el modelo inicial con el HOME indicado. home=""
-// significa "usar $HOME real"; los tests inyectan tmp dir.
+// significa "usar $HOME real"; los tests inyectan tmp dir. El cwd se
+// resuelve via os.Getwd() — si falla queda vacio y el scope project
+// queda deshabilitado en la pantalla S1.5.
 func newModel(home string) model {
+	cwd, _ := os.Getwd()
+	return newModelWithDirs(home, cwd)
+}
+
+// newModelWithDirs es el entrypoint testeable que permite inyectar
+// tanto home como cwd. El scope default es global para preservar
+// back-compat (usuarios existentes que no eligen nada caen al scope
+// previo).
+func newModelWithDirs(home, cwd string) model {
 	return model{
 		screen:    ScreenInfo,
 		focus:     FocusName,
 		nameInput: newSingleLine("ej: Triage checkout flow"),
 		descInput: newMultiLine("ej: toma una metrica anomala y dispara un triage"),
 		homeDir:   home,
+		cwd:       cwd,
+		scope:     WizardScopeGlobal,
 	}
 }
 
@@ -143,6 +162,7 @@ func RunResume(path string) (bool, error) {
 func runResumeWithHome(home, path string) (bool, error) {
 	m := newModel(home)
 	m.path = path
+	m.scope = scopeFromPath(path, m.cwd, home)
 	p, err := Load(path)
 	if err != nil {
 		// Fallback duro: archivo ilegible. Arrancamos en S1 sin path para
@@ -216,6 +236,33 @@ func RunEditReady(path string) (bool, error) {
 	return runEditReadyWithHome("", path)
 }
 
+// scopeFromPath infiere el WizardScope mirando el path: si esta bajo
+// `<cwd>/.che/pipelines/` es project; cualquier otra cosa cae a global.
+// Sirve para que RunResume / RunEditReady levanten el scope correcto al
+// rehidratar un draft existente sin pasar por ScreenScope.
+func scopeFromPath(path, cwd, _ string) WizardScope {
+	if cwd == "" || path == "" {
+		return WizardScopeGlobal
+	}
+	projectDir, err := filepath.Abs(filepath.Join(cwd, projectPipelinesSubdir))
+	if err != nil {
+		return WizardScopeGlobal
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return WizardScopeGlobal
+	}
+	rel, err := filepath.Rel(projectDir, abs)
+	if err != nil {
+		return WizardScopeGlobal
+	}
+	// rel sin ".." significa que el path vive dentro del project dir.
+	if rel != "" && !strings.HasPrefix(rel, "..") && rel != "." {
+		return WizardScopeProject
+	}
+	return WizardScopeGlobal
+}
+
 func runEditReadyWithHome(home, path string) (bool, error) {
 	p, err := Load(path)
 	if err != nil {
@@ -260,6 +307,7 @@ func runEditReadyWithHome(home, path string) (bool, error) {
 	}
 	m := newModel(home)
 	m.path = path
+	m.scope = scopeFromPath(path, m.cwd, home)
 	m.pipeline = p
 	m.originalReadySnapshot = origSnapshot
 	if p.Name != "" {

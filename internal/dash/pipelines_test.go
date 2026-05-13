@@ -45,7 +45,7 @@ func getJSON(t *testing.T, handler http.HandlerFunc, path string) *httptest.Resp
 
 func TestListEmpty(t *testing.T) {
 	dir := t.TempDir()
-	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines("", dir, ""), "/api/pipelines")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", rr.Code)
 	}
@@ -72,7 +72,7 @@ func TestListOneReady(t *testing.T) {
 		Description: "test ready",
 		Steps:       []wizard.Step{{Name: "step1", CLI: "claude", Kind: "prompt"}},
 	})
-	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines("", dir, ""), "/api/pipelines")
 	var list []pipelineJSON
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -103,7 +103,7 @@ func TestListOneDraft(t *testing.T) {
 		Name:   "Draft Pipe",
 		Status: draftStatus,
 	})
-	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines("", dir, ""), "/api/pipelines")
 	var list []pipelineJSON
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -131,7 +131,7 @@ func TestListMixed(t *testing.T) {
 		Name:   "Draft",
 		Status: &wizard.Status{Stage: wizard.StageStep},
 	})
-	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines("", dir, ""), "/api/pipelines")
 	var list []pipelineJSON
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -154,7 +154,7 @@ func TestListCorruptExcluded(t *testing.T) {
 	writeCorrupt(t, dir, "bad-pipe")
 	writeYAML(t, dir, "good-pipe", wizard.Pipeline{Name: "Good"})
 
-	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines("", dir, ""), "/api/pipelines")
 	var list []pipelineJSON
 	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -176,7 +176,7 @@ func TestListCorruptExcluded(t *testing.T) {
 
 func TestDetailMissingSlug(t *testing.T) {
 	dir := t.TempDir()
-	rr := getJSON(t, handleGetPipeline(dir), "/api/pipelines/nonexistent")
+	rr := getJSON(t, handleGetPipeline("", dir), "/api/pipelines/nonexistent")
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("want 404, got %d", rr.Code)
 	}
@@ -197,7 +197,7 @@ func TestDetailFound(t *testing.T) {
 		},
 	})
 
-	rr := getJSON(t, handleGetPipeline(dir), "/api/pipelines/my-pipe")
+	rr := getJSON(t, handleGetPipeline("", dir), "/api/pipelines/my-pipe")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", rr.Code, rr.Body.String())
 	}
@@ -253,7 +253,7 @@ func TestListPipelines_LastRunPresent(t *testing.T) {
 	lastRunCache.entries = make(map[string]lastRunCacheEntry)
 	lastRunCache.mu.Unlock()
 
-	rr := getJSON(t, handleListPipelines(pipelinesDir, runsDir), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines("", pipelinesDir, runsDir), "/api/pipelines")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", rr.Code)
 	}
@@ -303,7 +303,7 @@ func TestListPipelines_LastRunOmitted(t *testing.T) {
 	lastRunCache.entries = make(map[string]lastRunCacheEntry)
 	lastRunCache.mu.Unlock()
 
-	rr := getJSON(t, handleListPipelines(pipelinesDir, runsDir), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines("", pipelinesDir, runsDir), "/api/pipelines")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", rr.Code)
 	}
@@ -334,7 +334,7 @@ func TestListPipelines_LastRunOmitted(t *testing.T) {
 // builtin pipelines (e.g. che-funnel) with builtin=true.
 func TestListBuiltinOnly(t *testing.T) {
 	dir := t.TempDir() // empty — no on-disk YAML files
-	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines("", dir, ""), "/api/pipelines")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", rr.Code)
 	}
@@ -368,7 +368,7 @@ func TestListBuiltinOverriddenByDisk(t *testing.T) {
 		Description: "overridden",
 		Steps:       []wizard.Step{{Name: "custom-step", CLI: "claude", Kind: "prompt"}},
 	})
-	rr := getJSON(t, handleListPipelines(dir, ""), "/api/pipelines")
+	rr := getJSON(t, handleListPipelines("", dir, ""), "/api/pipelines")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d", rr.Code)
 	}
@@ -398,7 +398,7 @@ func TestListBuiltinOverriddenByDisk(t *testing.T) {
 // the builtin pipeline with builtin=true when no on-disk file exists.
 func TestDetailBuiltinNoOverride(t *testing.T) {
 	dir := t.TempDir() // empty dir
-	rr := getJSON(t, handleGetPipeline(dir), "/api/pipelines/che-funnel")
+	rr := getJSON(t, handleGetPipeline("", dir), "/api/pipelines/che-funnel")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", rr.Code, rr.Body.String())
 	}
@@ -425,7 +425,7 @@ func TestDetailBuiltinOverriddenByDisk(t *testing.T) {
 		Name:  "My Custom Funnel",
 		Steps: []wizard.Step{{Name: "custom", CLI: "claude", Kind: "prompt"}},
 	})
-	rr := getJSON(t, handleGetPipeline(dir), "/api/pipelines/che-funnel")
+	rr := getJSON(t, handleGetPipeline("", dir), "/api/pipelines/che-funnel")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", rr.Code, rr.Body.String())
 	}
@@ -438,5 +438,102 @@ func TestDetailBuiltinOverriddenByDisk(t *testing.T) {
 	}
 	if detail.Name != "My Custom Funnel" {
 		t.Errorf("want on-disk name, got %q", detail.Name)
+	}
+}
+
+// ── dual scope (project vs global) tests ───────────────────────────────────
+
+// TestListScopeFields cubre el AC: el JSON del listado expone el campo
+// scope con valores "project" | "global" | "builtin". Builtin sigue
+// presente por back-compat.
+func TestListScopeFields(t *testing.T) {
+	dir := t.TempDir()
+	writeYAML(t, dir, "global-pipe", wizard.Pipeline{
+		Name:  "Global Pipe",
+		Steps: []wizard.Step{{Name: "s1", CLI: "claude", Kind: "prompt"}},
+	})
+
+	rr := getJSON(t, handleListPipelines("", dir, ""), "/api/pipelines")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	var list []pipelineJSON
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	bySlug := map[string]pipelineJSON{}
+	for _, p := range list {
+		bySlug[p.Slug] = p
+	}
+
+	gp, ok := bySlug["global-pipe"]
+	if !ok {
+		t.Fatalf("global-pipe not in list")
+	}
+	if gp.Scope != "global" {
+		t.Errorf("global-pipe.Scope = %q, want \"global\"", gp.Scope)
+	}
+	if gp.Builtin {
+		t.Errorf("global-pipe.Builtin = true, want false")
+	}
+
+	cf, ok := bySlug["che-funnel"]
+	if !ok {
+		t.Fatalf("che-funnel builtin not in list")
+	}
+	if cf.Scope != "builtin" {
+		t.Errorf("che-funnel.Scope = %q, want \"builtin\"", cf.Scope)
+	}
+	if !cf.Builtin {
+		t.Errorf("che-funnel.Builtin = false, want true (back-compat)")
+	}
+}
+
+// TestListProjectOverridesGlobal verifica que cuando un mismo slug existe
+// en project (cwd) y global (home/.che/pipelines/), el listado del dash
+// devuelve el de scope project con scope="project".
+func TestListProjectOverridesGlobal(t *testing.T) {
+	globalDir := t.TempDir()
+	projectRoot := t.TempDir()
+	projectDir := filepath.Join(projectRoot, ".che", "pipelines")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	writeYAML(t, globalDir, "demo", wizard.Pipeline{
+		Name:  "Demo Global",
+		Steps: []wizard.Step{{Name: "s1", CLI: "claude", Kind: "prompt"}},
+	})
+	writeYAML(t, projectDir, "demo", wizard.Pipeline{
+		Name:  "Demo Project",
+		Steps: []wizard.Step{{Name: "s1", CLI: "claude", Kind: "prompt"}},
+	})
+
+	rr := getJSON(t, handleListPipelines(projectRoot, globalDir, ""), "/api/pipelines")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rr.Code)
+	}
+	var list []pipelineJSON
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	var demoCount int
+	var demo pipelineJSON
+	for _, p := range list {
+		if p.Slug == "demo" {
+			demoCount++
+			demo = p
+		}
+	}
+	if demoCount != 1 {
+		t.Fatalf("expected exactly 1 demo entry, got %d", demoCount)
+	}
+	if demo.Scope != "project" {
+		t.Errorf("demo.Scope = %q, want \"project\"", demo.Scope)
+	}
+	if demo.Name != "Demo Project" {
+		t.Errorf("demo.Name = %q, want \"Demo Project\" (project should override global)", demo.Name)
 	}
 }

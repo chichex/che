@@ -106,7 +106,7 @@ func TestCreateRun_HappyPathNoInput(t *testing.T) {
 		Steps: []wizard.Step{{Name: "single", CLI: "claude", Kind: "prompt", Input: wizard.InputNone}},
 	})
 	starter := &recordingStarter{nextRunID: "RUN-001"}
-	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
+	dispatcher := dispatchPipelinesPrefix("", pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
 
 	rr := postRun(t, dispatcher, "no-input-pipe", nil)
 	if rr.Code != http.StatusCreated {
@@ -141,7 +141,7 @@ func TestCreateRun_HappyPathWithInput(t *testing.T) {
 		Steps: []wizard.Step{{Name: "single", CLI: "claude", Kind: "prompt", Input: wizard.InputText}},
 	})
 	starter := &recordingStarter{nextRunID: "RUN-text"}
-	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
+	dispatcher := dispatchPipelinesPrefix("", pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
 
 	rr := postRun(t, dispatcher, "text-pipe", map[string]string{"input": "foo"})
 	if rr.Code != http.StatusCreated {
@@ -161,7 +161,7 @@ func TestCreateRun_BuiltinSlug(t *testing.T) {
 	pipelinesDir := t.TempDir()
 	runsDir := t.TempDir()
 	starter := &recordingStarter{nextRunID: "RUN-builtin"}
-	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
+	dispatcher := dispatchPipelinesPrefix("", pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
 
 	rr := postRun(t, dispatcher, "che-funnel", map[string]string{"input": "una idea"})
 	if rr.Code != http.StatusCreated {
@@ -182,7 +182,7 @@ func TestCreateRun_InputRequired(t *testing.T) {
 		Steps: []wizard.Step{{Name: "single", CLI: "claude", Kind: "prompt", Input: wizard.InputText}},
 	})
 	starter := &recordingStarter{}
-	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
+	dispatcher := dispatchPipelinesPrefix("", pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
 
 	rr := postRun(t, dispatcher, "text-pipe", nil)
 	if rr.Code != http.StatusBadRequest {
@@ -202,7 +202,7 @@ func TestCreateRun_NotFound(t *testing.T) {
 	pipelinesDir := t.TempDir()
 	runsDir := t.TempDir()
 	starter := &recordingStarter{}
-	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
+	dispatcher := dispatchPipelinesPrefix("", pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
 
 	rr := postRun(t, dispatcher, "no-existe", nil)
 	if rr.Code != http.StatusNotFound {
@@ -224,7 +224,7 @@ func TestCreateRun_ConflictLockHeldByMemory(t *testing.T) {
 	})
 	starter := &recordingStarter{nextRunID: "RUN-lock"}
 	lock := newRunLock()
-	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir, NewBus(runsDir), starter, lock)
+	dispatcher := dispatchPipelinesPrefix("", pipelinesDir, runsDir, NewBus(runsDir), starter, lock)
 
 	// Primer POST OK.
 	rr1 := postRun(t, dispatcher, "lock-pipe", nil)
@@ -261,7 +261,7 @@ func TestCreateRun_ConflictRecentManifest(t *testing.T) {
 		Status:    runner.ManifestStatusRunning,
 	})
 	starter := &recordingStarter{}
-	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
+	dispatcher := dispatchPipelinesPrefix("", pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
 
 	rr := postRun(t, dispatcher, "race-pipe", nil)
 	if rr.Code != http.StatusConflict {
@@ -287,7 +287,7 @@ func TestCreateRun_OldRunningManifestDoesNotBlock(t *testing.T) {
 		RunID: "old-run", Pipeline: "stale-pipe", StartedAt: old, Status: runner.ManifestStatusRunning,
 	})
 	starter := &recordingStarter{nextRunID: "RUN-fresh"}
-	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
+	dispatcher := dispatchPipelinesPrefix("", pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
 
 	rr := postRun(t, dispatcher, "stale-pipe", nil)
 	if rr.Code != http.StatusCreated {
@@ -307,7 +307,7 @@ func TestCreateRun_StarterErrorReleasesLock(t *testing.T) {
 	})
 	starter := &recordingStarter{err: errors.New("simulated")}
 	lock := newRunLock()
-	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir, NewBus(runsDir), starter, lock)
+	dispatcher := dispatchPipelinesPrefix("", pipelinesDir, runsDir, NewBus(runsDir), starter, lock)
 
 	rr1 := postRun(t, dispatcher, "boom-pipe", nil)
 	if rr1.Code != http.StatusInternalServerError {
@@ -337,7 +337,7 @@ func TestCreateRun_LockReleasedOnExecuteDone(t *testing.T) {
 	})
 	starter := &recordingStarter{nextRunID: "RUN-A"}
 	lock := newRunLock()
-	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir, NewBus(runsDir), starter, lock)
+	dispatcher := dispatchPipelinesPrefix("", pipelinesDir, runsDir, NewBus(runsDir), starter, lock)
 
 	// Primer run arranca OK.
 	rr1 := postRun(t, dispatcher, "loop-pipe", nil)
@@ -372,7 +372,7 @@ func TestCreateRun_InvalidJSON(t *testing.T) {
 		Steps: []wizard.Step{{Name: "single", CLI: "claude", Kind: "prompt", Input: wizard.InputNone}},
 	})
 	starter := &recordingStarter{}
-	dispatcher := dispatchPipelinesPrefix(pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
+	dispatcher := dispatchPipelinesPrefix("", pipelinesDir, runsDir, NewBus(runsDir), starter, newRunLock())
 
 	req := httptest.NewRequest(http.MethodPost, "/api/pipelines/any-pipe/runs", strings.NewReader("not json"))
 	req.Header.Set("Content-Type", "application/json")

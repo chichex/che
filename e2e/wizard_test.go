@@ -46,7 +46,7 @@ func TestWizard_S1PersistsDraft(t *testing.T) {
 
 	// Avanzar con ctrl+s — en H3 esto lleva a S2 (no mas placeholder).
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
+	if err := p.Send("\x13\x13"); err != nil {
 		t.Fatalf("send ctrl+s: %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
@@ -152,8 +152,11 @@ func TestWizard_S1Collision(t *testing.T) {
 		t.Fatalf("send name: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
-		t.Fatalf("send ctrl+s: %v", err)
+	// S1 ctrl+s → ScreenScope; ctrl+s otra vez commitea scope (global por
+	// default) y la deteccion de colision dispara el modal porque el path
+	// `<home>/.che/pipelines/demo.yaml` ya existe.
+	if err := p.Send("\x13\x13"); err != nil {
+		t.Fatalf("send ctrl+s S1→scope→commit: %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "ya existe", 3*time.Second) {
 		t.Fatalf("collision modal never opened\n%s", p.Since(mark))
@@ -219,7 +222,7 @@ func TestWizard_S1DiscardRemovesDraft(t *testing.T) {
 		t.Fatalf("send name: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
+	if err := p.Send("\x13\x13"); err != nil {
 		t.Fatalf("send ctrl+s: %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
@@ -308,8 +311,8 @@ func TestWizard_S2H3CreateFirstStep(t *testing.T) {
 		t.Fatalf("send desc: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
-		t.Fatalf("send ctrl+s S1→S2: %v", err)
+	if err := p.Send("\x13\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2 (scope+commit): %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
 		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
@@ -419,8 +422,8 @@ func TestWizard_S2H4ValidatorOn(t *testing.T) {
 		t.Fatalf("send name: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
-		t.Fatalf("send ctrl+s S1→S2: %v", err)
+	if err := p.Send("\x13\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2 (scope+commit): %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
 		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
@@ -550,8 +553,8 @@ func TestWizard_S2H4ValidatorOff(t *testing.T) {
 		t.Fatalf("send name: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
-		t.Fatalf("send ctrl+s S1→S2: %v", err)
+	if err := p.Send("\x13\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2 (scope+commit): %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
 		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
@@ -653,8 +656,8 @@ func TestWizard_S2H5LoopTwoSteps(t *testing.T) {
 		t.Fatalf("send name: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
-		t.Fatalf("send ctrl+s S1→S2: %v", err)
+	if err := p.Send("\x13\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2 (scope+commit): %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
 		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
@@ -783,8 +786,8 @@ func TestWizard_S2H5BackFromStep2(t *testing.T) {
 		t.Fatalf("send name: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
-		t.Fatalf("send ctrl+s S1→S2: %v", err)
+	if err := p.Send("\x13\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2 (scope+commit): %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
 		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
@@ -906,7 +909,7 @@ func TestWizard_S2H3BackToInfo(t *testing.T) {
 		t.Fatalf("send name: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
+	if err := p.Send("\x13\x13"); err != nil {
 		t.Fatalf("send ctrl+s: %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
@@ -1021,7 +1024,7 @@ func TestWizard_S2YAMLCombinations(t *testing.T) {
 		t.Fatalf("send desc: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
+	if err := p.Send("\x13\x13"); err != nil {
 		t.Fatalf("ctrl+s S1->S2: %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
@@ -1312,8 +1315,8 @@ func TestWizard_S3SummarySavesReady(t *testing.T) {
 		t.Fatalf("send name: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
-		t.Fatalf("ctrl+s S1→S2: %v", err)
+	if err := p.Send("\x13\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2 (scope+commit): %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
 		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
@@ -1447,8 +1450,8 @@ func TestWizard_S3InvalidStays(t *testing.T) {
 		t.Fatalf("send name: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
-		t.Fatalf("ctrl+s S1→S2: %v", err)
+	if err := p.Send("\x13\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2 (scope+commit): %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
 		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
@@ -1603,8 +1606,8 @@ func TestWizard_S3EscNoChangesExitsDirect(t *testing.T) {
 		t.Fatalf("send name: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
-		t.Fatalf("ctrl+s S1→S2: %v", err)
+	if err := p.Send("\x13\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2 (scope+commit): %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
 		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
@@ -1690,8 +1693,8 @@ func h7BuildThreeSteps(t *testing.T, p *harness.PTYRun, name string) {
 		t.Fatalf("send name: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
-		t.Fatalf("ctrl+s S1→S2: %v", err)
+	if err := p.Send("\x13\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2 (scope+commit): %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
 		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
@@ -2154,8 +2157,8 @@ func TestWizard_S3H7DeleteBreaksPrevDep(t *testing.T) {
 		t.Fatalf("send name: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
-		t.Fatalf("ctrl+s S1→S2: %v", err)
+	if err := p.Send("\x13\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2 (scope+commit): %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
 		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
