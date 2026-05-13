@@ -143,18 +143,20 @@ func interpolateInput(content, payload string) string {
 	return strings.ReplaceAll(content, "{{INPUT}}", payload)
 }
 
-// defaultClaudeModel es el modelo por default cuando un step claude no
-// declara `model:` explicito en el YAML. Default global a opus segun decision
-// del usuario (todos los claude del repo usan opus salvo override por step).
-const defaultClaudeModel = "opus"
-
-// claudeModel resuelve el modelo a pasarle a `claude --model`. Si el step
-// declara `model:` explicito en el YAML lo respeta, si no cae al default.
-func claudeModel(step wizard.Step) string {
-	if strings.TrimSpace(step.Model) != "" {
-		return step.Model
+// modelFor resuelve el modelo a pasarle al CLI del step. Si el step declara
+// `model:` explicito en el YAML lo respeta; si no, cae al default por CLI
+// (ver defaultModelByCLI en models.go). Para CLIs sin default y sin override
+// devuelve "" — el caller decide si emitir el flag o no (opencode entra
+// por este path: defaultModelByCLI["opencode"] == "" y buildSpawnArgs no
+// agrega el flag).
+//
+// La validacion del whitelist (rechazar modelos no soportados) ocurre en
+// preflight, no aca: este helper trabaja con el string ya aceptado.
+func modelFor(step wizard.Step) string {
+	if m := strings.TrimSpace(step.Model); m != "" {
+		return m
 	}
-	return defaultClaudeModel
+	return DefaultModel(step.CLI)
 }
 
 // buildSpawnArgs es la parte testeable de defaultSpawnCmd: dado un step,
@@ -164,10 +166,16 @@ func claudeModel(step wizard.Step) string {
 // de internal/runner/parser/claude.go lo consume). codex se mantiene en
 // `exec --json` (parser stub que cae a raw — ver parser/codex.go).
 //
-// Fix #114 extendido: claude ahora omite el content del argv — el prompt
+// Fix #114 extendido: claude/codex omiten el content del argv — el prompt
 // viaja por stdin (ver defaultSpawnCmd) para evitar E2BIG cuando {{INPUT}} se
-// expande a payloads grandes. Ademas se le pasa `--model <X>` explicito
-// (default opus, override por `model:` del step en el YAML).
+// expande a payloads grandes.
+//
+// Issue #142: el flag de modelo se inyecta por CLI cuando hay default o
+// override declarado en el YAML:
+//   - claude → `--model <X>` (default opus)
+//   - codex  → `-m <X>` (default gpt-5.5)
+//   - gemini → `-m <X>` (default gemini-2.5-pro)
+//   - opencode → no se inyecta (la config vive en el CLI propio)
 func buildSpawnArgs(step wizard.Step) ([]string, error) {
 	if step.CLI == "" {
 		return nil, fmt.Errorf("step sin cli")
@@ -175,32 +183,51 @@ func buildSpawnArgs(step wizard.Step) ([]string, error) {
 	if step.Content == "" {
 		return nil, fmt.Errorf("step sin content")
 	}
+	model := modelFor(step)
 	switch step.CLI {
 	case "claude":
 		// Fix #114 extendido: omitir el content del argv — el prompt
 		// viaja por stdin (ver defaultSpawnCmd). claude -p sin arg
 		// posicional lee el prompt de stdin (modo pipe declarado en
 		// `claude --help`: "-p/--print ... useful for pipes").
-		return []string{
+		args := []string{
 			"-p",
 			"--output-format", "stream-json",
 			"--verbose",
-			"--model", claudeModel(step),
-		}, nil
+		}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		return args, nil
 	case "codex":
 		// Fix #114: omitir el content como tercer argv — el prompt viaja
 		// por stdin (ver defaultSpawnCmd). Esto elimina E2BIG cuando el
 		// content interpolado supera ARG_MAX (~256 KB en macOS).
 		// codex exec lee el prompt desde stdin cuando se omite el arg
 		// posicional (validado contra `codex exec --help`).
-		return []string{"exec", "--json"}, nil
+		args := []string{"exec", "--json"}
+		if model != "" {
+			args = append(args, "-m", model)
+		}
+		return args, nil
 	case "gemini":
 		// kind=skill se invoca como /<skill> en gemini (alias TOML).
 		if step.Kind == wizard.KindSkill {
-			return []string{"/" + step.Content}, nil
+			args := []string{}
+			if model != "" {
+				args = append(args, "-m", model)
+			}
+			return append(args, "/"+step.Content), nil
 		}
-		return []string{"-p", step.Content}, nil
+		args := []string{}
+		if model != "" {
+			args = append(args, "-m", model)
+		}
+		return append(args, "-p", step.Content), nil
 	case "opencode":
+		// opencode no soporta override de modelo desde YAML — la validacion
+		// del whitelist en preflight rechaza step.Model != "" para este CLI.
+		// Aca no se inyecta flag, queda lo que tenga configurado el propio CLI.
 		return []string{"run", step.Content}, nil
 	default:
 		return nil, fmt.Errorf("cli %q no soportado", step.CLI)

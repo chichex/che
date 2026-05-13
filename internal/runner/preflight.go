@@ -146,6 +146,17 @@ func buildPreflightChecks(p wizard.Pipeline, inputKind, inputValue string) []Pre
 		})
 	}
 
+	// Model whitelist: un row por cada (cli, model) declarado explicito en
+	// step.Model o step.Validator.Model. Rechaza modelos desconocidos por
+	// CLI ANTES de spawnear (issue #142). Steps sin `model:` no aportan
+	// rows aca — caen al default por CLI sin chequeo.
+	for _, r := range distinctModelRefs(p) {
+		checks = append(checks, PreflightCheck{
+			Label:  fmt.Sprintf("model %s para cli %s", r.Model, r.CLI),
+			Status: PreflightPending,
+		})
+	}
+
 	// gh auth + git repo context: ambos solo aplican si algun step usa
 	// input pr|issue. El row de repo aparece antes que el de auth porque
 	// "no estas en un repo" es un fail mas estructural que "no estas
@@ -208,6 +219,41 @@ func distinctCLIs(p wizard.Pipeline) []string {
 		out = append(out, c)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// modelRef es una tupla cli+model declarada en el YAML (step.Model o
+// step.Validator.Model). El preflight la usa para chequear que el modelo
+// matchea el whitelist por CLI ANTES de spawnear (issue #142).
+type modelRef struct {
+	CLI   string
+	Model string
+}
+
+// distinctModelRefs deduplica + ordena los pares (cli, model) para steps y
+// validators que declaran `model:` explicito. Steps con model=="" caen al
+// default por CLI y no necesitan validacion. Para cli=="" defensivamente
+// skipeamos — IsValid del wizard ya deberia haberlo rechazado.
+func distinctModelRefs(p wizard.Pipeline) []modelRef {
+	seen := map[modelRef]struct{}{}
+	for _, st := range p.Steps {
+		if st.CLI != "" && strings.TrimSpace(st.Model) != "" {
+			seen[modelRef{CLI: st.CLI, Model: st.Model}] = struct{}{}
+		}
+		if st.Validator != nil && st.Validator.CLI != "" && strings.TrimSpace(st.Validator.Model) != "" {
+			seen[modelRef{CLI: st.Validator.CLI, Model: st.Validator.Model}] = struct{}{}
+		}
+	}
+	out := make([]modelRef, 0, len(seen))
+	for r := range seen {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CLI != out[j].CLI {
+			return out[i].CLI < out[j].CLI
+		}
+		return out[i].Model < out[j].Model
+	})
 	return out
 }
 
@@ -285,6 +331,8 @@ func resolveCheck(c PreflightCheck, p wizard.Pipeline, inputKind, inputValue str
 		return resolveCliCheck(c, cliInstalled)
 	case strings.HasPrefix(c.Label, "skill "):
 		return resolveSkillCheck(c, cliSkills)
+	case strings.HasPrefix(c.Label, "model "):
+		return resolveModelCheck(c)
 	case c.Label == "git repo context":
 		info := repoctx.Detect()
 		if info.InGitHubRepo {
@@ -345,6 +393,34 @@ func resolveCliCheck(c PreflightCheck, cliInstalled map[string]bool) PreflightCh
 	}
 	c.Status = PreflightFail
 	c.Remedy = fmt.Sprintf("instalar %s o cambiar el step a otro CLI", name)
+	return c
+}
+
+// resolveModelCheck valida (cli, model) contra el whitelist hardcoded en
+// models.go. Label format: "model <X> para cli <Y>". El preflight es el
+// unico punto donde se chequea el whitelist; el runner asume que cualquier
+// model que llegue a buildSpawnArgs ya pasó este filtro.
+func resolveModelCheck(c PreflightCheck) PreflightCheck {
+	// Label format: "model <model> para cli <cli>". Splitteamos por " para cli "
+	// para tolerar nombres de modelo con espacios (defensive — el whitelist
+	// actual no los tiene, pero el separador es univoco).
+	const sep = " para cli "
+	body := strings.TrimPrefix(c.Label, "model ")
+	idx := strings.Index(body, sep)
+	if idx < 0 {
+		c.Status = PreflightFail
+		c.Remedy = "label model malformado"
+		return c
+	}
+	model := body[:idx]
+	cli := body[idx+len(sep):]
+	if err := ValidateModel(cli, model); err != nil {
+		c.Status = PreflightFail
+		c.Remedy = err.Error()
+		return c
+	}
+	c.Status = PreflightOK
+	c.Remedy = ""
 	return c
 }
 

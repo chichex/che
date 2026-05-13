@@ -350,3 +350,129 @@ func TestResolveFileCheck_HappyPath(t *testing.T) {
 		t.Errorf("got %v, want OK", got.Status)
 	}
 }
+
+// TestBuildPreflightChecks_ModelRowsOnlyWhenDeclared garantiza que el row
+// "model X para cli Y" aparece SOLO si el YAML declara `model:`. Steps sin
+// model caen al default por CLI silenciosamente.
+func TestBuildPreflightChecks_ModelRowsOnlyWhenDeclared(t *testing.T) {
+	pNone := wizard.Pipeline{
+		Name: "p",
+		Steps: []wizard.Step{
+			{Name: "a", CLI: "claude", Kind: wizard.KindPrompt, Input: wizard.InputText},
+		},
+	}
+	for _, c := range buildPreflightChecks(pNone, wizard.InputText, "") {
+		if strings.HasPrefix(c.Label, "model ") {
+			t.Errorf("did not expect model row when step.Model=\"\", got: %v", c)
+		}
+	}
+
+	pDeclared := wizard.Pipeline{
+		Name: "p",
+		Steps: []wizard.Step{
+			{Name: "a", CLI: "claude", Kind: wizard.KindPrompt, Input: wizard.InputText, Model: "sonnet"},
+			{Name: "b", CLI: "codex", Kind: wizard.KindPrompt, Input: wizard.InputPreviousOutput, Model: "gpt-5.4",
+				Validator: &wizard.Validator{CLI: "gemini", Kind: wizard.KindPrompt, Content: "v", Model: "gemini-2.5-flash"}},
+		},
+	}
+	wantLabels := map[string]bool{
+		"model sonnet para cli claude":          false,
+		"model gpt-5.4 para cli codex":          false,
+		"model gemini-2.5-flash para cli gemini": false,
+	}
+	for _, c := range buildPreflightChecks(pDeclared, wizard.InputText, "") {
+		if _, ok := wantLabels[c.Label]; ok {
+			wantLabels[c.Label] = true
+		}
+	}
+	for label, found := range wantLabels {
+		if !found {
+			t.Errorf("expected row %q in preflight checks", label)
+		}
+	}
+}
+
+// TestResolveModelCheck_ValidPasses cubre el happy path: modelo en el
+// whitelist → row OK sin remedio.
+func TestResolveModelCheck_ValidPasses(t *testing.T) {
+	c := PreflightCheck{Label: "model opus para cli claude", Status: PreflightPending}
+	got := resolveModelCheck(c)
+	if got.Status != PreflightOK {
+		t.Errorf("got %v, want OK (remedy=%q)", got.Status, got.Remedy)
+	}
+	if got.Remedy != "" {
+		t.Errorf("expected empty remedy, got %q", got.Remedy)
+	}
+}
+
+// TestResolveModelCheck_InvalidFails cubre el rechazo: modelo fuera del
+// whitelist → row Fail + remedio que cita el CLI, el modelo y la lista.
+func TestResolveModelCheck_InvalidFails(t *testing.T) {
+	c := PreflightCheck{Label: "model gpt-4o para cli claude", Status: PreflightPending}
+	got := resolveModelCheck(c)
+	if got.Status != PreflightFail {
+		t.Errorf("got %v, want Fail", got.Status)
+	}
+	for _, want := range []string{"gpt-4o", "claude", "aceptados"} {
+		if !strings.Contains(got.Remedy, want) {
+			t.Errorf("remedy debe mencionar %q; got %q", want, got.Remedy)
+		}
+	}
+}
+
+// TestResolveModelCheck_OpencodeFails cubre la regla del body: opencode
+// con `model:` falla con mensaje explicito.
+func TestResolveModelCheck_OpencodeFails(t *testing.T) {
+	c := PreflightCheck{Label: "model anything para cli opencode", Status: PreflightPending}
+	got := resolveModelCheck(c)
+	if got.Status != PreflightFail {
+		t.Errorf("got %v, want Fail", got.Status)
+	}
+	if !strings.Contains(got.Remedy, "opencode no soporta override") {
+		t.Errorf("remedy debe explicar la regla opencode; got %q", got.Remedy)
+	}
+}
+
+// TestRunPreflightChecks_ModelInvalidFails integra: un pipeline con un step
+// claude que declara model: gpt-4o cae a verdict=HasFail con el remedy de
+// ValidateModel propagado al row.
+func TestRunPreflightChecks_ModelInvalidFails(t *testing.T) {
+	savedDetect := detectSkills
+	savedDisk := diskFreeFn
+	savedLook := lookPathFn
+	t.Cleanup(func() {
+		detectSkills = savedDetect
+		diskFreeFn = savedDisk
+		lookPathFn = savedLook
+	})
+
+	detectSkills = func() []skills.CLI {
+		return []skills.CLI{{Name: "claude", Installed: true}}
+	}
+	lookPathFn = func(string) (string, error) { return "/usr/bin/claude", nil }
+	diskFreeFn = func(string) uint64 { return 9999 * 1024 * 1024 }
+
+	p := wizard.Pipeline{
+		Name: "p",
+		Steps: []wizard.Step{
+			{Name: "a", CLI: "claude", Kind: wizard.KindPrompt, Input: wizard.InputText, Model: "gpt-4o"},
+		},
+	}
+	checks := buildPreflightChecks(p, wizard.InputText, "")
+	got := runPreflightChecks(checks, p, wizard.InputText, "")
+	if summarizePreflight(got) != preflightVerdictHasFail {
+		t.Errorf("verdict = %v, want HasFail", summarizePreflight(got))
+	}
+	foundModelFail := false
+	for _, c := range got {
+		if strings.HasPrefix(c.Label, "model gpt-4o ") && c.Status == PreflightFail {
+			foundModelFail = true
+			if c.Remedy == "" {
+				t.Errorf("model fail row sin remedy")
+			}
+		}
+	}
+	if !foundModelFail {
+		t.Errorf("expected model row to fail in checks: %v", got)
+	}
+}
