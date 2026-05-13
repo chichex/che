@@ -65,10 +65,13 @@ func TestBuildSpawnArgs_StepContentInterpolated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("defaultSpawnCmd error: %v", err)
 	}
-	// Fix #114: args = [codex, exec, --json] — sin content en argv.
+	// Fix #114: args = [codex, exec, --json, ...] — sin content en argv.
+	// Issue #142: ahora tambien se inyecta `-m <default>` cuando no hay override.
 	// El content interpolado viaja por stdin.
-	if len(cmd.Args) != 3 {
-		t.Fatalf("expected 3 args (codex exec --json), got %d: %#v", len(cmd.Args), cmd.Args)
+	for _, a := range cmd.Args {
+		if strings.Contains(a, "{{INPUT}}") || strings.Contains(a, "PAYLOAD-X") || strings.Contains(a, "ejecuta:") {
+			t.Errorf("codex argv no debe contener content/payload, got: %q", a)
+		}
 	}
 	// Verificar que stdin contiene el payload sustituido (no el placeholder literal).
 	sr, ok := cmd.Stdin.(*strings.Reader)
@@ -98,16 +101,12 @@ func TestBuildSpawnArgs_CodexExcludesContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildSpawnArgs error: %v", err)
 	}
-	want := []string{"exec", "--json"}
-	if len(args) != len(want) {
-		t.Fatalf("buildSpawnArgs codex: expected %v, got %v", want, args)
+	// Issue #142: codex sin step.Model recibe `-m <default>` ademas de
+	// `exec --json`. Validamos que los primeros dos sigan siendo exec/--json
+	// y que el content NO aparezca en ningun arg.
+	if len(args) < 2 || args[0] != "exec" || args[1] != "--json" {
+		t.Fatalf("buildSpawnArgs codex: expected prefix [exec --json], got %v", args)
 	}
-	for i, w := range want {
-		if args[i] != w {
-			t.Errorf("args[%d]: expected %q, got %q", i, w, args[i])
-		}
-	}
-	// El content NO debe aparecer en ningún arg.
 	for _, a := range args {
 		if strings.Contains(a, "prompt largo") {
 			t.Errorf("buildSpawnArgs codex incluye el content en argv: %q", a)
@@ -288,10 +287,8 @@ func TestDefaultSpawnCmd_CodexLargePayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("defaultSpawnCmd con payload grande error: %v", err)
 	}
-	// Args deben ser acotados: [codex, exec, --json] — sin el payload.
-	if len(cmd.Args) != 3 {
-		t.Fatalf("expected 3 args, got %d — el payload no debe viajar por argv", len(cmd.Args))
-	}
+	// Args deben ser acotados: [codex, exec, --json, -m, <default>] — sin el payload.
+	// Issue #142 sumo `-m <default>` por step.
 	for _, a := range cmd.Args {
 		if len(a) > 1000 {
 			t.Errorf("arg demasiado largo (%d bytes) — el payload viajo por argv", len(a))
@@ -389,5 +386,122 @@ func TestRunStep_RotatesEventsAcrossReruns(t *testing.T) {
 	// crearse cuando eventsRun > 0 — el fix garantiza paths versionados.
 	if _, err := os.Stat(filepath.Join(runDir, "step-01.events.jsonl")); !os.IsNotExist(err) {
 		t.Errorf("legacy events.jsonl NO debe existir cuando se rota; stat err=%v", err)
+	}
+}
+
+// findFlagValue busca un flag (ej. "-m" o "--model") en argv y devuelve el
+// valor inmediatamente siguiente. Devuelve "" si el flag no aparece o no
+// tiene valor (defensive — no deberia pasar en los tests porque siempre
+// emitimos pares).
+func findFlagValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+// TestBuildSpawnArgs_CodexInjectsModelFlag valida que codex recibe `-m <X>`
+// cuando hay default o override declarado (issue #142).
+func TestBuildSpawnArgs_CodexInjectsModelFlag(t *testing.T) {
+	cases := []struct {
+		name      string
+		stepModel string
+		wantModel string
+	}{
+		{"default cuando no se declara", "", "gpt-5.5"},
+		{"override valido", "gpt-5.4", "gpt-5.4"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			step := wizard.Step{
+				CLI:     "codex",
+				Kind:    wizard.KindPrompt,
+				Content: "p",
+				Model:   tc.stepModel,
+			}
+			args, err := buildSpawnArgs(step)
+			if err != nil {
+				t.Fatalf("buildSpawnArgs error: %v", err)
+			}
+			got := findFlagValue(args, "-m")
+			if got != tc.wantModel {
+				t.Errorf("buildSpawnArgs codex: expected -m %s, got %v", tc.wantModel, args)
+			}
+		})
+	}
+}
+
+// TestBuildSpawnArgs_GeminiInjectsModelFlag valida que gemini recibe `-m <X>`
+// cuando hay default o override declarado, tanto para kind=prompt como
+// kind=skill.
+func TestBuildSpawnArgs_GeminiInjectsModelFlag(t *testing.T) {
+	cases := []struct {
+		name      string
+		kind      string
+		stepModel string
+		wantModel string
+	}{
+		{"prompt default", wizard.KindPrompt, "", "gemini-2.5-pro"},
+		{"prompt override", wizard.KindPrompt, "gemini-2.5-flash", "gemini-2.5-flash"},
+		{"skill default", wizard.KindSkill, "", "gemini-2.5-pro"},
+		{"skill override", wizard.KindSkill, "gemini-2.5-flash-lite", "gemini-2.5-flash-lite"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			step := wizard.Step{
+				CLI:     "gemini",
+				Kind:    tc.kind,
+				Content: "x",
+				Model:   tc.stepModel,
+			}
+			args, err := buildSpawnArgs(step)
+			if err != nil {
+				t.Fatalf("buildSpawnArgs error: %v", err)
+			}
+			got := findFlagValue(args, "-m")
+			if got != tc.wantModel {
+				t.Errorf("buildSpawnArgs gemini: expected -m %s, got %v", tc.wantModel, args)
+			}
+		})
+	}
+}
+
+// TestBuildSpawnArgs_OpencodeNoModelFlag valida que opencode nunca recibe
+// flag de modelo, ni siquiera cuando el step trae model: (que en realidad
+// preflight ya rechazo — el test es defensivo sobre el contrato de spawn).
+func TestBuildSpawnArgs_OpencodeNoModelFlag(t *testing.T) {
+	step := wizard.Step{
+		CLI:     "opencode",
+		Kind:    wizard.KindPrompt,
+		Content: "p",
+	}
+	args, err := buildSpawnArgs(step)
+	if err != nil {
+		t.Fatalf("buildSpawnArgs error: %v", err)
+	}
+	for _, a := range args {
+		if a == "-m" || a == "--model" {
+			t.Errorf("opencode no debe llevar flag de modelo; got args=%v", args)
+		}
+	}
+}
+
+// TestBuildSpawnArgs_ClaudeUsesDefaultOpus es un sanity check sobre la nueva
+// implementacion via modelFor(): claude sin step.Model debe seguir pasando
+// `--model opus`.
+func TestBuildSpawnArgs_ClaudeUsesDefaultOpus(t *testing.T) {
+	step := wizard.Step{
+		CLI:     "claude",
+		Kind:    wizard.KindPrompt,
+		Content: "p",
+	}
+	args, err := buildSpawnArgs(step)
+	if err != nil {
+		t.Fatalf("buildSpawnArgs error: %v", err)
+	}
+	if got := findFlagValue(args, "--model"); got != "opus" {
+		t.Errorf("expected --model opus, got %v", args)
 	}
 }

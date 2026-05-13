@@ -15,10 +15,11 @@
 #   3. El validator de cada step usa claude (mismo CLI que el executor).
 #      Antes se usaba codex como cross-CLI review, pero (a) el rol no se
 #      respetaba bien cuando el contexto crecia y (b) codex tiene un cap
-#      de 1 MB de prompt que reventaba con outputs grandes del step. El
-#      runner pasa `--model opus` por default para que el validator
-#      tenga el headroom necesario; si queres override, agregale `model:`
-#      al bloque validator del YAML.
+#      de 1 MB de prompt que reventaba con outputs grandes del step. Cada
+#      bloque `validator:` declara `model: opus` explicito; si queres otro
+#      modelo, cambialo ahi (issue #142). Los modelos validos por CLI
+#      viven hardcoded en internal/runner/models.go y se chequean en
+#      preflight antes de spawnear.
 #
 # Permisos requeridos por los CLIs invocados:
 #   - gh (issue create / edit / comment / view; pr create / view / diff /
@@ -295,6 +296,7 @@ steps:
     validator:
       cli: claude
       kind: prompt
+      model: opus
       content: |
         Sos un validador técnico senior. Otro agente produjo un PLAN DE
         IMPLEMENTACIÓN para uno o más issues. Tu tarea es revisar el plan
@@ -505,6 +507,7 @@ steps:
     validator:
       cli: claude
       kind: prompt
+      model: opus
       content: |
         Sos un validador técnico senior. Otro agente acaba de correr el step
         `execute` del pipeline che-funnel. Tu tarea es leer la SALIDA REAL
