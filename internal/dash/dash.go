@@ -66,13 +66,23 @@ func Serve(ctx context.Context, opts Options) error {
 		defer os.Remove(portFile)
 	}
 
-	// Resolve pipelines and runs directories. On failure use "" so handlers
-	// return empty list / 404 instead of crashing.
+	// Resolve pipelines (global) and runs directories. On failure use ""
+	// so handlers return empty list / 404 instead of crashing.
+	//
+	// cwd se resuelve UNA vez al startup para soportar pipelines de scope
+	// project (cwd-local en `./.che/pipelines/`). Si `cd` ocurre mientras
+	// el server corre, el cwd del proceso no cambia — el badge "project"
+	// deja claro al usuario que esto refleja el dir de arranque.
 	pipelinesDir := ""
 	runsDir := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		pipelinesDir = filepath.Join(home, ".che", "pipelines")
-		runsDir = filepath.Join(home, ".che", "runs")
+	if h, err := os.UserHomeDir(); err == nil {
+		pipelinesDir = filepath.Join(h, ".che", "pipelines")
+		runsDir = filepath.Join(h, ".che", "runs")
+	}
+	cwd, cerr := os.Getwd()
+	if cerr != nil {
+		fmt.Fprintf(out, "[dash] no se pudo resolver cwd (%v) — scope project deshabilitado\n", cerr)
+		cwd = ""
 	}
 
 	// Singleton bus for SSE per-run streaming.
@@ -100,8 +110,8 @@ func Serve(ctx context.Context, opts Options) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", handleIndex)
 	mux.HandleFunc("/api/events", handleGlobalEvents(bus))
-	mux.HandleFunc("/api/pipelines", handleListPipelines(pipelinesDir, runsDir))
-	mux.HandleFunc("/api/pipelines/", dispatchPipelinesPrefix(pipelinesDir, runsDir, bus, starter, lock))
+	mux.HandleFunc("/api/pipelines", handleListPipelines(cwd, pipelinesDir, runsDir))
+	mux.HandleFunc("/api/pipelines/", dispatchPipelinesPrefix(cwd, pipelinesDir, runsDir, bus, starter, lock))
 
 	srv := &http.Server{
 		Handler:           mux,

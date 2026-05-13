@@ -27,6 +27,18 @@ const (
 	ScreenDiscardWarn                        // confirmacion extra antes de discard
 	ScreenSummaryConfirmDelete               // modal confirm "borrar step" desde S3 (H7)
 	ScreenStepReview                         // modal "Review del prompt" (claude analiza el prompt antes de guardar)
+	ScreenScope                              // S1.5: selector de scope (project vs global) — solo en first save
+)
+
+// WizardScope refleja el scope que el usuario eligio para persistir el
+// pipeline. Es estado UI puro — el scope efectivo del pipeline en disco
+// queda implicito en su ubicacion (proyecto vs global). El default es
+// scope global (para preservar back-compat con usuarios existentes).
+type WizardScope int
+
+const (
+	WizardScopeGlobal WizardScope = iota
+	WizardScopeProject
 )
 
 // FieldFocus marca cual campo de S1 tiene el foco. tab/shift+tab cyclan
@@ -361,6 +373,20 @@ type model struct {
 
 	// HomeDir a usar. "" significa $HOME real; los tests inyectan tmp dir.
 	homeDir string
+
+	// cwd a usar para scope project. "" desactiva el scope project — el
+	// wizard sigue funcionando exactamente como antes (default global).
+	// Tests pueden inyectar tmp dir; el caller real lo setea via newModel
+	// con os.Getwd().
+	cwd string
+
+	// scope elegido por el usuario en ScreenScope. Default global asi un
+	// usuario que se saltea la pantalla (por ejemplo, ENTER directo sobre
+	// la opcion preselected) mantiene el comportamiento previo. Solo se
+	// usa cuando m.path == "" (primer save). Si el wizard se reanuda
+	// sobre un draft existente, el scope ya esta definido por la
+	// ubicacion del archivo en disco y la pantalla no aparece.
+	scope WizardScope
 
 	// originalReadySnapshot guarda los bytes del archivo ready original
 	// cuando entramos al wizard via RunEditReady. Si el usuario elige

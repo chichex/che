@@ -270,10 +270,15 @@ func builtinToListItem(b BuiltinPipeline) listItem {
 	}
 }
 
-// builtinTargetPrefix es el sentinel que el lister usa al devolver
+// BuiltinTargetPrefix es el sentinel que el lister usa al devolver
 // ListActionRun sobre un builtin. El runner detecta el prefijo y carga el
-// pipeline via wizard.Builtins() en vez de tocar el FS.
-const builtinTargetPrefix = "builtin:"
+// pipeline via wizard.Builtins() en vez de tocar el FS. Exportado para
+// que internal/pipelines tambien lo emita al resolver scope=builtin.
+const BuiltinTargetPrefix = "builtin:"
+
+// builtinTargetPrefix mantiene el simbolo previo (unexported) para no
+// alterar callsites internos del paquete. Es alias de BuiltinTargetPrefix.
+const builtinTargetPrefix = BuiltinTargetPrefix
 
 // IsBuiltinTarget devuelve true si target tiene el prefijo de builtin.
 // El runner lo usa para ramificar entre Load(path) y BuiltinBySlug.

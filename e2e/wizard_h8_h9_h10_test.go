@@ -47,8 +47,8 @@ func h8BuildOneStepPipeline(t *testing.T, p *harness.PTYRun, name string) {
 		t.Fatalf("send name: %v", err)
 	}
 	mark = p.Mark()
-	if err := p.Send("\x13"); err != nil {
-		t.Fatalf("ctrl+s S1→S2: %v", err)
+	if err := p.Send("\x13\x13"); err != nil {
+		t.Fatalf("ctrl+s S1→S2 (scope+commit): %v", err)
 	}
 	if !p.WaitForOutputSince(t, mark, "step 1 (create)", 3*time.Second) {
 		t.Fatalf("S2 never rendered\n%s", p.Since(mark))

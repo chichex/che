@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chichex/che/internal/pipelines"
 	"github.com/chichex/che/internal/runner"
 	"github.com/chichex/che/internal/wizard"
 	"gopkg.in/yaml.v3"
@@ -164,30 +165,24 @@ func hasRecentRunningManifest(runsDir, slug string, now time.Time) bool {
 	return now.Sub(latest.startedAt) < recentRunningWindow
 }
 
-// loadPipelineForSlug busca un pipeline por slug: primero en disco
-// (pipelinesDir/<slug>.yaml), luego en wizard.Builtins(). Devuelve la
-// pipeline, el target que el runner espera ("<path>" o "builtin:<slug>"),
-// y found=false si no existe en ningun lado. Errores reales (IO, parse)
-// se logean igual que en el resto del dash.
-func loadPipelineForSlug(pipelinesDir, slug string) (p wizard.Pipeline, target string, found bool, err error) {
-	if pipelinesDir != "" {
-		path := filepath.Join(pipelinesDir, slug+".yaml")
-		loaded, lerr := wizard.Load(path)
-		if lerr == nil {
-			return loaded, path, true, nil
-		}
-		if !os.IsNotExist(lerr) {
-			return wizard.Pipeline{}, "", false, lerr
-		}
+// loadPipelineForSlug busca un pipeline por slug usando
+// pipelines.ResolveInDirs (orden project → global → builtin). Devuelve
+// la pipeline, el target que el runner espera ("<path>" o
+// "builtin:<slug>"), y found=false si no existe en ningun lado.
+// Errores reales (IO, parse) se logean igual que en el resto del dash.
+//
+// Es un thin wrapper sobre pipelines.ResolveInDirs — la funcion se
+// mantiene para no romper los call sites internos. cwd="" desactiva
+// scope project (path usado por tests).
+func loadPipelineForSlug(cwd, dir, slug string) (p wizard.Pipeline, target string, found bool, err error) {
+	res, ok, err := pipelines.ResolveInDirs(cwd, dir, slug)
+	if err != nil {
+		return wizard.Pipeline{}, "", false, err
 	}
-	b, berr := wizard.BuiltinBySlug(slug)
-	if berr != nil {
-		return wizard.Pipeline{}, "", false, berr
-	}
-	if b == nil {
+	if !ok {
 		return wizard.Pipeline{}, "", false, nil
 	}
-	return b.Pipeline, "builtin:" + slug, true, nil
+	return res.Pipeline, res.Target, true, nil
 }
 
 // createRunBody es el body JSON esperado por POST /api/pipelines/:slug/runs.
@@ -207,8 +202,10 @@ type createRunResponse struct {
 
 // handleCreateRun devuelve el handler de POST /api/pipelines/:slug/runs.
 // El slug llega por header (puesto por el dispatcher antes de invocar el
-// handler — mismo mecanismo que listRunsH / getRunH).
-func handleCreateRun(pipelinesDir, runsDir string, starter runStarter, lock *runLock) http.HandlerFunc {
+// handler — mismo mecanismo que listRunsH / getRunH). cwd se resolvio una
+// vez al startup del dash; vacio = scope project deshabilitado.
+// dir = directorio global ya resuelto (`<home>/.che/pipelines/`).
+func handleCreateRun(cwd, dir, runsDir string, starter runStarter, lock *runLock) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		slug := extractSlug(r)
 		if slug == "" {
@@ -216,8 +213,8 @@ func handleCreateRun(pipelinesDir, runsDir string, starter runStarter, lock *run
 			return
 		}
 
-		// Validar slug + cargar pipeline (disk first, builtin fallback).
-		p, target, found, err := loadPipelineForSlug(pipelinesDir, slug)
+		// Validar slug + cargar pipeline (project → global → builtin).
+		p, target, found, err := loadPipelineForSlug(cwd, dir, slug)
 		if err != nil {
 			log.Printf("[dash] createRun load %s: %v", slug, err)
 			writeJSONError(w, http.StatusInternalServerError, "internal server error")

@@ -474,7 +474,9 @@ const Sidebar = ({ pipelines, runs, selectedSlug, onSelect, fadedSlugs }) => {
         <div className="flex items-center justify-between gap-2">
           <span className="mono text-[13px] ink truncate">{p.name}</span>
           <div className="flex items-center gap-1.5 shrink-0">
-            {p.builtin && <span className="badge" style={{fontSize:"10.5px",padding:"0 5px"}}>default</span>}
+            {p.scope === "project" && <span className="badge" style={{fontSize:"10.5px",padding:"0 5px",background:"#2dd4bf22",color:"#2dd4bf"}}>project</span>}
+            {p.scope === "global" && <span className="badge" style={{fontSize:"10.5px",padding:"0 5px",background:"#a78bfa22",color:"#a78bfa"}}>global</span>}
+            {(p.scope === "builtin" || (!p.scope && p.builtin)) && <span className="badge" style={{fontSize:"10.5px",padding:"0 5px"}}>default</span>}
             {p.status === "draft"
               ? <Badge kind="draft">draft</Badge>
               : live ? <Badge kind="running"><span className="dot dot-running" /> running</Badge>
@@ -568,7 +570,9 @@ const PipelineDetail = ({ pipeline, runs, onOpenRun, onRequestRun, onResumeDraft
           <div className="flex items-center gap-3 mb-1">
             <h1 className="mono text-[22px] font-semibold ink">{pipeline.name}</h1>
             <Badge kind="done">ready</Badge>
-            {pipeline.builtin && <span className="badge" style={{fontSize:"11px"}}>default</span>}
+            {pipeline.scope === "project" && <span className="badge" style={{fontSize:"11px",background:"#2dd4bf22",color:"#2dd4bf"}}>project</span>}
+            {pipeline.scope === "global" && <span className="badge" style={{fontSize:"11px",background:"#a78bfa22",color:"#a78bfa"}}>global</span>}
+            {(pipeline.scope === "builtin" || (!pipeline.scope && pipeline.builtin)) && <span className="badge" style={{fontSize:"11px"}}>default</span>}
           </div>
           <p className="ink-2 text-[14px] max-w-[640px]">{pipeline.description}</p>
         </div>

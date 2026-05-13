@@ -69,8 +69,11 @@ func (m model) passKeyToFocused(key tea.KeyMsg) (model, tea.Cmd) {
 }
 
 // tryAdvance es el handler de "siguiente" (ctrl+s) en S1. Valida nombre
-// + slug, detecta colisiones, persiste el archivo con status:info, y
-// pasa al placeholder de S2.
+// + slug. Si todavia no hay archivo persistido (primer save), abre la
+// pantalla de seleccion de scope (ScreenScope) para que el usuario
+// decida entre project y global. Si ya hay path (re-save del mismo
+// draft), persiste al path existente y avanza a S2 sin volver a pedir
+// scope — el scope ya esta implicito en la ubicacion del archivo.
 func (m model) tryAdvance() (model, tea.Cmd) {
 	name := strings.TrimSpace(m.nameInput.Value())
 	if name == "" {
@@ -83,55 +86,49 @@ func (m model) tryAdvance() (model, tea.Cmd) {
 		return m, nil
 	}
 
-	path, err := PathFor(m.homeDir, slug)
-	if err != nil {
-		m.errMsg = "no se pudo resolver HOME: " + err.Error()
-		return m, nil
-	}
-
-	// Si el path ya existe Y no es nuestro path actual (re-save del
-	// mismo draft), abrimos el modal de colision.
-	if path != m.path {
-		exists, err := Exists(path)
+	// Camino "re-save de draft existente": ya hay path, no abrimos
+	// ScreenScope (el scope es el del path actual). Validamos colision
+	// solo si el slug cambio.
+	if m.path != "" {
+		path, err := PathFor(m.homeDir, slug)
 		if err != nil {
-			m.errMsg = "no se pudo chequear el archivo: " + err.Error()
+			m.errMsg = "no se pudo resolver HOME: " + err.Error()
 			return m, nil
 		}
-		if exists {
-			m.collisionCursor = CollisionOverwrite
-			m.screen = ScreenCollision
+		// Si el path actual no esta bajo el home global lo dejamos
+		// igual — slug puede haber cambiado pero el scope original
+		// gana (project se queda project).
+		_ = path
+		m.pipeline.Name = name
+		m.pipeline.Description = strings.TrimSpace(m.descInput.Value())
+		m.pipeline.Status = &Status{
+			Stage:       StageInfo,
+			LastSavedAt: time.Now(),
+		}
+		if err := Save(m.path, m.pipeline); err != nil {
+			m.errMsg = "no se pudo guardar: " + err.Error()
 			return m, nil
 		}
+		m.errMsg = ""
+		return m.enterStepCreate(0)
 	}
 
-	m.path = path
-	m.pipeline.Name = name
-	m.pipeline.Description = strings.TrimSpace(m.descInput.Value())
-	m.pipeline.Status = &Status{
-		Stage:       StageInfo,
-		LastSavedAt: time.Now(),
-	}
-
-	if err := Save(m.path, m.pipeline); err != nil {
-		m.errMsg = "no se pudo guardar: " + err.Error()
-		return m, nil
-	}
-
+	// First save — necesitamos saber el scope. Abrir ScreenScope. El
+	// cursor se posiciona en global (default). La pantalla de scope
+	// valida colisiones / persiste / avanza a S2.
 	m.errMsg = ""
-	// Entrar a S2 con step 0 mode=create. enterStepCreate persiste de
-	// nuevo con status.stage=step para que el archivo refleje donde
-	// estamos al instante.
-	return m.enterStepCreate(0)
+	m.screen = ScreenScope
+	return m, nil
 }
 
 // confirmOverwrite es la rama "sobreescribir" del modal de colision —
-// fuerza el save al path existente.
+// fuerza el save al path correspondiente al scope elegido.
 func (m model) confirmOverwrite() (model, tea.Cmd) {
 	name := strings.TrimSpace(m.nameInput.Value())
 	slug := Slug(name)
-	path, err := PathFor(m.homeDir, slug)
+	path, err := m.resolvePathForScope(slug)
 	if err != nil {
-		m.errMsg = "no se pudo resolver HOME: " + err.Error()
+		m.errMsg = err.Error()
 		m.screen = ScreenInfo
 		return m, nil
 	}

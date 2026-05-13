@@ -379,9 +379,9 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 //   GET  /api/pipelines/<slug>/runs/<runId>/steps/<idx>/stdout  → get step stdout
 //
 // Any other pattern returns 404.
-func dispatchPipelinesPrefix(pipelinesDir, runsDir string, bus *Bus, starter runStarter, lock *runLock) http.HandlerFunc {
+func dispatchPipelinesPrefix(cwd, pipelinesDir, runsDir string, bus *Bus, starter runStarter, lock *runLock) http.HandlerFunc {
 	listRunsH := handleListRuns(runsDir)
-	createRunH := handleCreateRun(pipelinesDir, runsDir, starter, lock)
+	createRunH := handleCreateRun(cwd, pipelinesDir, runsDir, starter, lock)
 	getRunH := handleGetRun(runsDir)
 	getStdoutH := handleGetStepStdout(runsDir)
 	getEventsH := handleEvents(runsDir, bus)
@@ -404,7 +404,7 @@ func dispatchPipelinesPrefix(pipelinesDir, runsDir string, bus *Bus, starter run
 				writeJSONError(w, http.StatusNotFound, "pipeline not found")
 				return
 			}
-			getPipelineDetail(pipelinesDir, slug, w, r)
+			getPipelineDetail(cwd, pipelinesDir, slug, w, r)
 
 		case 2:
 			// /api/pipelines/<slug>/runs
