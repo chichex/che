@@ -318,13 +318,13 @@ func TestWizard_S2H3CreateFirstStep(t *testing.T) {
 		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
 	}
 
-	// S2: focus arranca en name. Tipear, tab x3 hasta content (cli y kind
+	// S2: focus arranca en name. Tipear, tab x4 hasta content (cli, model y kind
 	// quedan en default claude/prompt — el harness instala claude como
 	// fake binary, asi que la pill se considera installed).
 	if err := p.Send("collect-signals"); err != nil {
 		t.Fatalf("send step name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("send tab #%d: %v", i, err)
 		}
@@ -429,11 +429,11 @@ func TestWizard_S2H4ValidatorOn(t *testing.T) {
 		t.Fatalf("S2 never rendered\n%s", p.Since(mark))
 	}
 
-	// S2 — Name → CLI → Kind → Content
+	// S2 — Name → CLI → Model → Kind → Content
 	if err := p.Send("collect-signals"); err != nil {
 		t.Fatalf("send step name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("send tab #%d: %v", i, err)
 		}
@@ -463,9 +463,9 @@ func TestWizard_S2H4ValidatorOn(t *testing.T) {
 		t.Fatalf("validator block never appeared after toggle\n%s", p.Since(mark))
 	}
 
-	// ValToggle → ValCLI (default claude) → ValKind (default prompt) →
-	// ValContent.
-	for i := 0; i < 3; i++ {
+	// ValToggle → ValCLI (default claude) → ValModel (default opus) →
+	// ValKind (default prompt) → ValContent.
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("send tab into validator block #%d: %v", i, err)
 		}
@@ -563,7 +563,7 @@ func TestWizard_S2H4ValidatorOff(t *testing.T) {
 	if err := p.Send("collect-signals"); err != nil {
 		t.Fatalf("send step name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("send tab #%d: %v", i, err)
 		}
@@ -667,7 +667,7 @@ func TestWizard_S2H5LoopTwoSteps(t *testing.T) {
 	if err := p.Send("collect"); err != nil {
 		t.Fatalf("send step1 name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("send tab #%d: %v", i, err)
 		}
@@ -692,7 +692,7 @@ func TestWizard_S2H5LoopTwoSteps(t *testing.T) {
 	if err := p.Send("digest"); err != nil {
 		t.Fatalf("send step2 name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("send tab step2 #%d: %v", i, err)
 		}
@@ -797,7 +797,7 @@ func TestWizard_S2H5BackFromStep2(t *testing.T) {
 	if err := p.Send("first"); err != nil {
 		t.Fatalf("send step1 name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("send tab #%d: %v", i, err)
 		}
@@ -1035,7 +1035,7 @@ func TestWizard_S2YAMLCombinations(t *testing.T) {
 	if err := p.Send("fetch-data"); err != nil {
 		t.Fatalf("send step1 name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab #%d step1: %v", i, err)
 		}
@@ -1063,7 +1063,10 @@ func TestWizard_S2YAMLCombinations(t *testing.T) {
 		t.Fatalf("tab name->cli step2: %v", err)
 	}
 	if err := p.Send("\t"); err != nil {
-		t.Fatalf("tab cli->kind step2: %v", err)
+		t.Fatalf("tab cli->model step2: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab model->kind step2: %v", err)
 	}
 	mark = p.Mark()
 	if err := p.Send("s"); err != nil {
@@ -1095,7 +1098,10 @@ func TestWizard_S2YAMLCombinations(t *testing.T) {
 		t.Fatalf("send 2 valcli=codex step2: %v", err)
 	}
 	if err := p.Send("\t"); err != nil {
-		t.Fatalf("tab valcli->valkind step2: %v", err)
+		t.Fatalf("tab valcli->valmodel step2: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab valmodel->valkind step2: %v", err)
 	}
 	if err := p.Send("\t"); err != nil {
 		t.Fatalf("tab valkind->valcontent step2: %v", err)
@@ -1134,7 +1140,7 @@ func TestWizard_S2YAMLCombinations(t *testing.T) {
 	if err := p.Send("2"); err != nil {
 		t.Fatalf("send 2 cli=codex step3: %v", err)
 	}
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 3; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab into content step3 #%d: %v", i, err)
 		}
@@ -1158,7 +1164,7 @@ func TestWizard_S2YAMLCombinations(t *testing.T) {
 	if !p.WaitForOutputSince(t, mark, "Bloque validator", 3*time.Second) {
 		t.Fatalf("validator block never appeared step3\n%s", p.Since(mark))
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab into valcontent step3 #%d: %v", i, err)
 		}
@@ -1326,7 +1332,7 @@ func TestWizard_S3SummarySavesReady(t *testing.T) {
 	if err := p.Send("collect"); err != nil {
 		t.Fatalf("send step name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab #%d: %v", i, err)
 		}
@@ -1461,7 +1467,7 @@ func TestWizard_S3InvalidStays(t *testing.T) {
 	if err := p.Send("first"); err != nil {
 		t.Fatalf("send name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab #%d: %v", i, err)
 		}
@@ -1488,6 +1494,9 @@ func TestWizard_S3InvalidStays(t *testing.T) {
 	// gemini = pill 3 (claude/codex/gemini/opencode).
 	if err := p.Send("3"); err != nil {
 		t.Fatalf("send 3 valcli=gemini: %v", err)
+	}
+	if err := p.Send("\t"); err != nil {
+		t.Fatalf("tab→valmodel: %v", err)
 	}
 	if err := p.Send("\t"); err != nil {
 		t.Fatalf("tab→valkind: %v", err)
@@ -1616,7 +1625,7 @@ func TestWizard_S3EscNoChangesExitsDirect(t *testing.T) {
 	if err := p.Send("only"); err != nil {
 		t.Fatalf("send step name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab #%d: %v", i, err)
 		}
@@ -1704,7 +1713,7 @@ func h7BuildThreeSteps(t *testing.T, p *harness.PTYRun, name string) {
 	if err := p.Send("first"); err != nil {
 		t.Fatalf("send step1 name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab #%d step1: %v", i, err)
 		}
@@ -1724,7 +1733,7 @@ func h7BuildThreeSteps(t *testing.T, p *harness.PTYRun, name string) {
 	if err := p.Send("second"); err != nil {
 		t.Fatalf("send step2 name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab #%d step2: %v", i, err)
 		}
@@ -1744,7 +1753,7 @@ func h7BuildThreeSteps(t *testing.T, p *harness.PTYRun, name string) {
 	if err := p.Send("third"); err != nil {
 		t.Fatalf("send step3 name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab #%d step3: %v", i, err)
 		}
@@ -1790,7 +1799,7 @@ func TestWizard_S3H7EditStep(t *testing.T) {
 	}
 
 	// Foco arranca en Name → 3 tabs hasta Content (cli, kind, content).
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab→content #%d: %v", i, err)
 		}
@@ -2062,7 +2071,7 @@ func TestWizard_S3H7AppendStep(t *testing.T) {
 	if err := p.Send("fourth"); err != nil {
 		t.Fatalf("send step4 name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab #%d step4: %v", i, err)
 		}
@@ -2168,7 +2177,7 @@ func TestWizard_S3H7DeleteBreaksPrevDep(t *testing.T) {
 	if err := p.Send("first"); err != nil {
 		t.Fatalf("send step1 name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab #%d step1: %v", i, err)
 		}
@@ -2188,7 +2197,7 @@ func TestWizard_S3H7DeleteBreaksPrevDep(t *testing.T) {
 	if err := p.Send("second"); err != nil {
 		t.Fatalf("send step2 name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab #%d step2: %v", i, err)
 		}

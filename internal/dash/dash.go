@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"time"
+
+	"github.com/chichex/che/internal/pipelines"
 )
 
 //go:embed assets/dash.html
@@ -73,6 +75,11 @@ func Serve(ctx context.Context, opts Options) error {
 	// project (cwd-local en `./.che/pipelines/`). Si `cd` ocurre mientras
 	// el server corre, el cwd del proceso no cambia — el badge "project"
 	// deja claro al usuario que esto refleja el dir de arranque.
+	//
+	// Para que el dash arrancado desde una subcarpeta del proyecto igual
+	// vea los pipelines guardados en `<root>/.che/pipelines/`, hacemos
+	// walk-up hasta el primer ancestro con `.che/pipelines/`. Si ningun
+	// ancestro lo tiene, cwd queda como esta y scope project queda vacio.
 	pipelinesDir := ""
 	runsDir := ""
 	if h, err := os.UserHomeDir(); err == nil {
@@ -83,6 +90,8 @@ func Serve(ctx context.Context, opts Options) error {
 	if cerr != nil {
 		fmt.Fprintf(out, "[dash] no se pudo resolver cwd (%v) — scope project deshabilitado\n", cerr)
 		cwd = ""
+	} else {
+		cwd = pipelines.FindProjectRoot(cwd)
 	}
 
 	// Singleton bus for SSE per-run streaming.

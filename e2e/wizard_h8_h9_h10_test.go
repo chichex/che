@@ -56,7 +56,7 @@ func h8BuildOneStepPipeline(t *testing.T, p *harness.PTYRun, name string) {
 	if err := p.Send("collect"); err != nil {
 		t.Fatalf("send step name: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 4; i++ {
 		if err := p.Send("\t"); err != nil {
 			t.Fatalf("tab #%d: %v", i, err)
 		}

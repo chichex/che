@@ -40,6 +40,9 @@ func stepEqual(a, b Step) bool {
 	if a.CLI != b.CLI {
 		return false
 	}
+	if a.Model != b.Model {
+		return false
+	}
 	if a.Kind != b.Kind {
 		return false
 	}
@@ -65,5 +68,5 @@ func validatorEqual(a, b *Validator) bool {
 	if a == nil {
 		return true
 	}
-	return a.CLI == b.CLI && a.Kind == b.Kind && a.Content == b.Content
+	return a.CLI == b.CLI && a.Kind == b.Kind && a.Content == b.Content && a.Model == b.Model
 }

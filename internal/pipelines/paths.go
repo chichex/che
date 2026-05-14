@@ -35,6 +35,34 @@ func ProjectPipelinesDir(cwd string) string {
 	return filepath.Join(cwd, pipelinesSubdir)
 }
 
+// FindProjectRoot busca el ancestro mas cercano del cwd dado que tenga un
+// directorio `.che/pipelines/` adentro. Devuelve el cwd "efectivo" para
+// scope project — empezando por el cwd mismo y subiendo hasta encontrar
+// uno. Si ninguno tiene `.che/pipelines/`, devuelve cwd tal cual (el
+// caller mantiene el comportamiento previo: scope project vacio).
+//
+// Sirve para que `che dash` arrancado desde una subcarpeta de un proyecto
+// igual vea los pipelines guardados en `<root>/.che/pipelines/` sin
+// obligar al usuario a hacer `cd` exacto. cwd="" devuelve "".
+func FindProjectRoot(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	dir := cwd
+	for {
+		candidate := filepath.Join(dir, pipelinesSubdir)
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// llegamos a la raiz sin encontrar nada.
+			return cwd
+		}
+		dir = parent
+	}
+}
+
 // GlobalPathFor compone el path absoluto del archivo del pipeline de scope
 // global cuyo slug es slug.
 func GlobalPathFor(home, slug string) (string, error) {
