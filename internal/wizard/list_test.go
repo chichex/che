@@ -21,7 +21,7 @@ func TestLoadListItems_EmptyDirReturnsOnlyBuiltins(t *testing.T) {
 	helperFakeAllCLIs(t)
 	home := t.TempDir()
 
-	items, err := loadListItems(home)
+	items, err := loadListItems(home, "")
 	if err != nil {
 		t.Fatalf("loadListItems: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestLoadListItems_FSItemsCoexistWithBuiltins(t *testing.T) {
 		t.Fatalf("Save user: %v", err)
 	}
 
-	items, err := loadListItems(home)
+	items, err := loadListItems(home, "")
 	if err != nil {
 		t.Fatalf("loadListItems: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestLoadListItems_ShadowOverridesBuiltin(t *testing.T) {
 		t.Fatalf("Save shadow: %v", err)
 	}
 
-	items, err := loadListItems(home)
+	items, err := loadListItems(home, "")
 	if err != nil {
 		t.Fatalf("loadListItems: %v", err)
 	}
@@ -134,6 +134,126 @@ func TestLoadListItems_ShadowOverridesBuiltin(t *testing.T) {
 	}
 	if found.nSteps != 1 {
 		t.Errorf("nSteps del shadow: got %d want 1", found.nSteps)
+	}
+}
+
+func TestLoadListItems_ProjectVisibleAndWins(t *testing.T) {
+	helperFakeAllCLIs(t)
+	home := t.TempDir()
+	projectRoot := t.TempDir()
+
+	// Pipeline ready en scope global con slug "shared" + uno solo global.
+	gdir, err := EnsureDir(home)
+	if err != nil {
+		t.Fatalf("EnsureDir global: %v", err)
+	}
+	if err := Save(filepath.Join(gdir, "shared.yaml"), Pipeline{
+		Name: "shared",
+		Steps: []Step{
+			{Name: "g", CLI: "claude", Kind: "prompt", Content: "global", Input: "text"},
+		},
+	}); err != nil {
+		t.Fatalf("Save global shared: %v", err)
+	}
+	if err := Save(filepath.Join(gdir, "only-global.yaml"), Pipeline{
+		Name: "only-global",
+		Steps: []Step{
+			{Name: "g", CLI: "claude", Kind: "prompt", Content: "x", Input: "text"},
+		},
+	}); err != nil {
+		t.Fatalf("Save only-global: %v", err)
+	}
+
+	// Project: override de "shared" + uno exclusivo del project.
+	pdir := filepath.Join(projectRoot, ".che", "pipelines")
+	if err := os.MkdirAll(pdir, 0o700); err != nil {
+		t.Fatalf("mkdir project: %v", err)
+	}
+	if err := Save(filepath.Join(pdir, "shared.yaml"), Pipeline{
+		Name: "shared",
+		Steps: []Step{
+			{Name: "p", CLI: "claude", Kind: "prompt", Content: "project", Input: "text"},
+		},
+	}); err != nil {
+		t.Fatalf("Save project shared: %v", err)
+	}
+	if err := Save(filepath.Join(pdir, "only-project.yaml"), Pipeline{
+		Name: "only-project",
+		Steps: []Step{
+			{Name: "p", CLI: "claude", Kind: "prompt", Content: "x", Input: "text"},
+		},
+	}); err != nil {
+		t.Fatalf("Save only-project: %v", err)
+	}
+
+	items, err := loadListItems(home, projectRoot)
+	if err != nil {
+		t.Fatalf("loadListItems: %v", err)
+	}
+
+	var shared, onlyProject, onlyGlobal *listItem
+	sharedCount := 0
+	for i := range items {
+		switch items[i].slug {
+		case "shared":
+			sharedCount++
+			shared = &items[i]
+		case "only-project":
+			onlyProject = &items[i]
+		case "only-global":
+			onlyGlobal = &items[i]
+		}
+	}
+	if sharedCount != 1 {
+		t.Errorf("esperaba 1 shared (project gana), got %d", sharedCount)
+	}
+	if shared == nil {
+		t.Fatal("shared no aparece")
+	}
+	if !shared.isProject {
+		t.Errorf("shared deberia ser scope project, got isProject=false")
+	}
+	if !strings.Contains(shared.path, projectRoot) {
+		t.Errorf("shared.path deberia apuntar al project dir: got %q", shared.path)
+	}
+	if onlyProject == nil {
+		t.Fatal("only-project no aparece")
+	}
+	if !onlyProject.isProject {
+		t.Errorf("only-project deberia ser scope project")
+	}
+	if onlyGlobal == nil {
+		t.Fatal("only-global no aparece")
+	}
+	if onlyGlobal.isProject {
+		t.Errorf("only-global no deberia ser scope project")
+	}
+}
+
+func TestFindProjectRoot_WalksUp(t *testing.T) {
+	root := t.TempDir()
+	deep := filepath.Join(root, "a", "b", "c")
+	if err := os.MkdirAll(deep, 0o755); err != nil {
+		t.Fatalf("mkdir deep: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".che", "pipelines"), 0o700); err != nil {
+		t.Fatalf("mkdir pipelines: %v", err)
+	}
+
+	if got := findProjectRoot(deep); got != root {
+		t.Errorf("findProjectRoot(deep): got %q want %q", got, root)
+	}
+	if got := findProjectRoot(root); got != root {
+		t.Errorf("findProjectRoot(root): got %q want %q", got, root)
+	}
+
+	// Sin ancestro con .che/pipelines/ → "".
+	orphan := t.TempDir()
+	if got := findProjectRoot(orphan); got != "" {
+		t.Errorf("findProjectRoot(orphan): got %q want %q", got, "")
+	}
+	if got := findProjectRoot(""); got != "" {
+		t.Errorf("findProjectRoot(\"\"): got %q want %q", got, "")
 	}
 }
 
