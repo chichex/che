@@ -67,14 +67,25 @@ type listItem struct {
 	// ~/.che/pipelines/<slug>.yaml; d se rechaza con toast.
 	isBuiltin     bool
 	builtinSource []byte // YAML crudo del builtin para copy-on-edit
+	// isProject = true si el pipeline vive en <projectRoot>/.che/pipelines/
+	// en vez del global ~/.che/pipelines/. Solo informativo para el render
+	// (chip [project]); el path absoluto del archivo va en `path`, asi que
+	// e / d / enter funcionan igual que con un global.
+	isProject bool
 }
 
 // listModel es el bubbletea model del lister "My pipelines".
 type listModel struct {
 	homeDir string
-	items   []listItem
-	cursor  int
-	width   int
+	// projectRoot es el dir cwd-efectivo donde buscar pipelines de scope
+	// project (`<projectRoot>/.che/pipelines/`). Se resuelve una sola vez
+	// en RunList via findProjectRoot(os.Getwd()) — walk-up al primer
+	// ancestro que contenga `.che/pipelines/`. "" desactiva scope project
+	// (mismo flow que dash cuando no hay ningun ancestro con esa carpeta).
+	projectRoot string
+	items       []listItem
+	cursor      int
+	width       int
 
 	// toast = mensaje efimero post-accion ("editor fallo", "borrado",
 	// "ejecución no implementada"). toastOK colorea verde/rojo. Se limpia
@@ -118,11 +129,11 @@ type listLoadedMsg struct {
 	err   error
 }
 
-// loadListItemsCmd corre loadListItems(home) en un goroutine y dispatchea
-// listLoadedMsg al terminar.
-func loadListItemsCmd(home string) tea.Cmd {
+// loadListItemsCmd corre loadListItems(home, projectRoot) en un goroutine y
+// dispatchea listLoadedMsg al terminar.
+func loadListItemsCmd(home, projectRoot string) tea.Cmd {
 	return func() tea.Msg {
-		items, err := loadListItems(home)
+		items, err := loadListItems(home, projectRoot)
 		return listLoadedMsg{items: items, err: err}
 	}
 }
@@ -141,45 +152,111 @@ func loadListItemsCmd(home string) tea.Cmd {
 // activo, asi que reusar editorFinishedMsg directamente es seguro. El
 // wrapper queda comentado por si en el futuro hay UI compartida.
 
-// loadListItems lee ~/.che/pipelines/*.yaml, mergea con los builtins
-// embedded del binario, y devuelve la lista ordenada por when desc (mas
-// reciente primero). Si el usuario tiene un archivo cuyo slug coincide con
-// un builtin (ej. ~/.che/pipelines/che-funnel.yaml), su override gana y el
-// builtin queda hidden — semantica de shadow file.
+// loadListItems lee los pipelines visibles desde el usuario: primero
+// `<projectRoot>/.che/pipelines/` (si projectRoot != ""), despues
+// `~/.che/pipelines/`, y al final los builtins embedded. Devuelve la lista
+// ordenada por when desc (mas reciente primero), excepto los builtins que
+// quedan al final (when=zero por construccion).
+//
+// Reglas de colision por slug: project gana sobre global; global gana
+// sobre builtin. El caso "shadow del builtin" se mantiene (un archivo del
+// usuario con el slug del builtin lo oculta).
 //
 // Archivos ilegibles o con YAML invalido del FS se skipean en silencio
 // (pipelines corruptos no deben volar el lister; al hacer enter sobre uno
 // tampoco habria como reanudarlo). Builtins que no parsean SI rompen el
 // load — eso es bug del binario, no del usuario, y queremos verlo.
 //
-// Si el dir no existe, devolvemos solo los builtins (caso "primer uso").
-func loadListItems(homeDir string) ([]listItem, error) {
+// Si ningun dir existe, devolvemos solo los builtins (caso "primer uso").
+func loadListItems(homeDir, projectRoot string) ([]listItem, error) {
+	seenSlugs := map[string]bool{}
+	var items []listItem
+
+	// 1. Project: solo si projectRoot != "". Gana en colisiones por slug.
+	if projectRoot != "" {
+		projectDir := filepath.Join(projectRoot, pipelinesSubdirRel)
+		pItems, pSlugs, err := loadFSItems(projectDir, homeDir)
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range pItems {
+			it.isProject = true
+			items = append(items, it)
+		}
+		for s := range pSlugs {
+			seenSlugs[s] = true
+		}
+	}
+
+	// 2. Global: skipear los slugs ya cubiertos por project.
 	dir, err := PipelinesDir(homeDir)
 	if err != nil {
 		return nil, err
 	}
-	fsItems, fsSlugs, err := loadFSItems(dir, homeDir)
+	gItems, gSlugs, err := loadFSItems(dir, homeDir)
 	if err != nil {
 		return nil, err
 	}
+	for _, it := range gItems {
+		if seenSlugs[it.slug] {
+			continue
+		}
+		items = append(items, it)
+	}
+	for s := range gSlugs {
+		seenSlugs[s] = true
+	}
+
+	// 3. Builtins: skipear los slugs ya cubiertos por project/global.
 	builtins, err := Builtins()
 	if err != nil {
 		// El binario tiene un builtin invalido — abortamos el load para que
 		// el caller surface el error en vez de ocultarlo.
 		return nil, err
 	}
-	items := fsItems
 	for _, b := range builtins {
-		if fsSlugs[b.Slug] {
-			// Override del FS gana: el builtin queda hidden.
+		if seenSlugs[b.Slug] {
 			continue
 		}
 		items = append(items, builtinToListItem(b))
 	}
+
 	sort.SliceStable(items, func(i, j int) bool {
 		return items[i].when.After(items[j].when)
 	})
 	return items, nil
+}
+
+// pipelinesSubdirRel es el subdir relativo donde viven los YAML de
+// pipelines bajo project root o home. Duplicado de
+// `internal/pipelines/paths.go` para no introducir un ciclo de imports
+// wizard → pipelines → wizard.
+const pipelinesSubdirRel = ".che/pipelines"
+
+// findProjectRoot busca el ancestro mas cercano del cwd dado que tenga un
+// directorio `.che/pipelines/`. Devuelve el cwd "efectivo" para scope
+// project — empezando por el cwd mismo y subiendo. Si ninguno tiene
+// `.che/pipelines/`, devuelve "" — el lister va a omitir el scope project.
+//
+// Misma semantica que `pipelines.FindProjectRoot` salvo el caso "no
+// encontrado": aca devolvemos "" para que el lister no pague el costo de
+// listar un dir que sabemos vacio. cwd="" devuelve "".
+func findProjectRoot(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	dir := cwd
+	for {
+		candidate := filepath.Join(dir, pipelinesSubdirRel)
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
 }
 
 // loadFSItems lee los pipelines del FS. Devuelve los items + el set de
@@ -334,17 +411,21 @@ func copyBuiltinToFS(homeDir, slug string, source []byte) (string, error) {
 	return path, nil
 }
 
-// RunList levanta el lister "My pipelines" usando $HOME real.
+// RunList levanta el lister "My pipelines" usando $HOME real y el cwd del
+// proceso. El cwd se resuelve UNA sola vez al startup via os.Getwd() y se
+// pasa por walk-up a findProjectRoot — analogo al dash.
 func RunList() (ListAction, string, bool, error) {
-	return runListWithHome("")
+	cwd, _ := os.Getwd() // si falla, cwd="" → scope project deshabilitado.
+	return runListWithHome("", findProjectRoot(cwd))
 }
 
-// runListWithHome es el entrypoint testeable: permite forzar HomeDir desde
-// los tests sin tocar $HOME del proceso. La carga de items la dispara Init()
-// async para que el primer frame ya muestre "Cargando..." en vez de bloquear
-// el render mientras se leen los manifests.
-func runListWithHome(home string) (ListAction, string, bool, error) {
-	m := listModel{homeDir: home, loading: true}
+// runListWithHome es el entrypoint testeable: permite forzar HomeDir y
+// projectRoot desde los tests sin tocar $HOME ni el cwd del proceso. La
+// carga de items la dispara Init() async para que el primer frame ya
+// muestre "Cargando..." en vez de bloquear el render mientras se leen los
+// manifests.
+func runListWithHome(home, projectRoot string) (ListAction, string, bool, error) {
+	m := listModel{homeDir: home, projectRoot: projectRoot, loading: true}
 	final, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
 	if err != nil {
 		return ListActionNone, "", false, err
@@ -361,7 +442,7 @@ func runListWithHome(home string) (ListAction, string, bool, error) {
 
 func (m listModel) Init() tea.Cmd {
 	if m.loading {
-		return loadListItemsCmd(m.homeDir)
+		return loadListItemsCmd(m.homeDir, m.projectRoot)
 	}
 	return nil
 }
@@ -385,7 +466,7 @@ func (m listModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Refresh tras editor: el archivo pudo haber cambiado nombre,
 		// status, etc. Si la lectura falla mantenemos el estado anterior y
 		// el toast cuenta el porque.
-		items, err := loadListItems(m.homeDir)
+		items, err := loadListItems(m.homeDir, m.projectRoot)
 		if err != nil {
 			m.toast = "no se pudo refrescar la lista: " + err.Error()
 			m.toastOK = false
@@ -645,7 +726,7 @@ func (m listModel) applyDelete() (tea.Model, tea.Cmd) {
 		m.toastOK = false
 		return m, nil
 	}
-	items, err := loadListItems(m.homeDir)
+	items, err := loadListItems(m.homeDir, m.projectRoot)
 	if err != nil {
 		m.toast = "borrado, pero no pude refrescar: " + err.Error()
 		m.toastOK = false
@@ -673,6 +754,10 @@ var (
 	// chipDefaultStyle marca builtin pipelines (cyan dracula). Va junto al
 	// chip [ready] para distinguir lo embedded de lo creado por el usuario.
 	chipDefaultStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#8BE9FD")).Bold(true)
+	// chipProjectStyle marca pipelines de scope project (magenta dracula).
+	// Va junto al chip principal [ready]/[draft] para distinguirlo del
+	// global (sin chip).
+	chipProjectStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF79C6")).Bold(true)
 	// chipFailStyle / chipWarnStyle / chipInfoStyle son los chips del
 	// "last run" por status (H10). Rojo para failed, amarillo para
 	// cancelled, gris para interrupted/never. Done reusa chipReadyStyle
@@ -762,6 +847,11 @@ func renderListRow(it listItem) string {
 		// chip [default] reemplaza el "X ago" de when para no mentir con un
 		// timestamp ficticio (when=zero en builtins).
 		chip = chipDefaultStyle.Render("[default]") + "  " + chipReadyStyle.Render("[ready]")
+	} else if it.isProject {
+		// Project scope: prefijamos el chip [project] al [ready]/[draft]
+		// para que el ojo distinga rapidamente entre global y project. Los
+		// globals quedan sin chip de scope (caso "normal").
+		chip = chipProjectStyle.Render("[project]") + "  " + chip
 	}
 
 	when := relTime(it.when)
