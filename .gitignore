@@ -1,6 +1,7 @@
 bin/
 .bin/
 dist/
+.che/
 .claude/
 .omx/
 .worktrees/
