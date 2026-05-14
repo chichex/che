@@ -7,6 +7,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/chichex/che/internal/runnermodels"
 	"github.com/chichex/che/internal/skills"
 )
 
@@ -56,8 +57,11 @@ func (m model) enterStepCreate(idx int) (model, tea.Cmd) {
 		nameInput:    newSingleLine("ej: collect-signals"),
 		contentInput: newMultiLine("ej: extrae las metricas anomalas del payload"),
 		cli:          defaultCLI,
-		kind:         KindPrompt,
-		input:        InputText,
+		// model: default segun el CLI elegido (opencode → ""). Si el
+		// usuario cambia el CLI, afterCLIChange resemilla este campo.
+		model: runnermodels.DefaultModel(defaultCLI),
+		kind:  KindPrompt,
+		input: InputText,
 
 		// Bloque validator (B2): off por default. Los defaults del flow
 		// doc — mismo CLI que el step, kind=prompt, max_loops=3,
@@ -66,6 +70,7 @@ func (m model) enterStepCreate(idx int) (model, tea.Cmd) {
 		// del step (un prompt/skill distinto).
 		validatorOn:     false,
 		valCLI:          defaultCLI,
+		valModel:        runnermodels.DefaultModel(defaultCLI),
 		valKind:         KindPrompt,
 		valContentInput: newMultiLine("ej: verifica que el output respete el formato pedido"),
 		valMaxLoops:     3,
@@ -144,16 +149,31 @@ func (m model) enterStepEdit(idx int) (model, tea.Cmd) {
 	valContent := ""
 	valMaxLoops := 3
 	valOnMaxLoops := OnMaxLoopsFail
+	valModel := runnermodels.DefaultModel(valCLI)
 	if st.Validator != nil {
 		valCLI = st.Validator.CLI
 		valKind = st.Validator.Kind
 		valContent = st.Validator.Content
+		valModel = st.Validator.Model
+		if valModel == "" {
+			valModel = runnermodels.DefaultModel(valCLI)
+		}
 		if st.MaxLoops > 0 {
 			valMaxLoops = st.MaxLoops
 		}
 		if st.OnMaxLoops != "" {
 			valOnMaxLoops = st.OnMaxLoops
 		}
+	}
+
+	// Modelo del step: el YAML puede traer vacio (default del CLI) o un
+	// alias/nombre completo. Si esta vacio cargamos el default del CLI
+	// para que la pill correspondiente aparezca seleccionada y que
+	// guardar sin tocar nada conserve el comportamiento previo (no
+	// escribimos `model:` en buildStep si no difiere del default).
+	stepModel := st.Model
+	if stepModel == "" {
+		stepModel = runnermodels.DefaultModel(st.CLI)
 	}
 
 	valContentInput := newMultiLine("ej: verifica que el output respete el formato pedido")
@@ -177,11 +197,13 @@ func (m model) enterStepEdit(idx int) (model, tea.Cmd) {
 		nameInput:       nameInput,
 		contentInput:    contentInput,
 		cli:             st.CLI,
+		model:           stepModel,
 		kind:            st.Kind,
 		input:           st.Input,
 		skillCursor:     skillCursor,
 		validatorOn:     validatorOn,
 		valCLI:          valCLI,
+		valModel:        valModel,
 		valKind:         valKind,
 		valContentInput: valContentInput,
 		valSkillCursor:  valSkillCursor,
@@ -249,6 +271,8 @@ func (m model) updateStep(key tea.KeyMsg) (model, tea.Cmd) {
 		return m.stepHandleNameKey(key)
 	case StepFocusCLI:
 		return m.stepHandleCLIKey(key)
+	case StepFocusModel:
+		return m.stepHandleModelKey(key)
 	case StepFocusKind:
 		return m.stepHandleKindKey(key)
 	case StepFocusContent:
@@ -259,6 +283,8 @@ func (m model) updateStep(key tea.KeyMsg) (model, tea.Cmd) {
 		return m.stepHandleValToggleKey(key)
 	case StepFocusValCLI:
 		return m.stepHandleValCLIKey(key)
+	case StepFocusValModel:
+		return m.stepHandleValModelKey(key)
 	case StepFocusValKind:
 		return m.stepHandleValKindKey(key)
 	case StepFocusValContent:
@@ -316,15 +342,76 @@ func (m model) stepHandleCLIKey(key tea.KeyMsg) (model, tea.Cmd) {
 func (m *model) afterCLIChange() {
 	m.stepEdit.skillCursor = 0
 	m.stepEdit.errMsg = ""
+	// Resemilla model al default del CLI nuevo — el alias del CLI viejo
+	// (ej. "opus" para claude) muy probablemente no es valido para el CLI
+	// nuevo (codex/gemini). Es mejor caer al default que dejar al usuario
+	// con un modelo invalido y un mensaje del preflight despues.
+	m.stepEdit.model = runnermodels.DefaultModel(m.stepEdit.cli)
 	if m.stepEdit.kind == KindSkill && !m.cliHasSkills(m.stepEdit.cli) {
 		m.stepEdit.kind = KindPrompt
 	}
 	if !m.stepEdit.validatorOn {
 		m.stepEdit.valCLI = m.stepEdit.cli
+		m.stepEdit.valModel = runnermodels.DefaultModel(m.stepEdit.valCLI)
 		if m.stepEdit.valKind == KindSkill && !m.cliHasSkills(m.stepEdit.valCLI) {
 			m.stepEdit.valKind = KindPrompt
 		}
 	}
+}
+
+// stepHandleModelKey cyclea entre los modelos validos para el CLI actual.
+// Si el CLI no soporta override (opencode o uno desconocido), la tecla es
+// no-op: la pill se renderiza "(no aplica)" y el campo permanece fijo en
+// "" (que es lo que termina yendo al YAML como omitido).
+func (m model) stepHandleModelKey(key tea.KeyMsg) (model, tea.Cmd) {
+	opts := runnermodels.ModelsForCLI(m.stepEdit.cli)
+	if len(opts) == 0 {
+		return m, nil
+	}
+	switch key.String() {
+	case "left", "h":
+		m.stepEdit.model = stepNeighbor(opts, m.stepEdit.model, -1)
+		m.stepEdit.errMsg = ""
+		return m, nil
+	case "right", "l":
+		m.stepEdit.model = stepNeighbor(opts, m.stepEdit.model, +1)
+		m.stepEdit.errMsg = ""
+		return m, nil
+	}
+	if key.String() >= "1" && key.String() <= "9" {
+		idx := int(key.String()[0] - '1')
+		if idx >= 0 && idx < len(opts) {
+			m.stepEdit.model = opts[idx]
+			m.stepEdit.errMsg = ""
+		}
+	}
+	return m, nil
+}
+
+// stepHandleValModelKey: equivalente para el bloque validator.
+func (m model) stepHandleValModelKey(key tea.KeyMsg) (model, tea.Cmd) {
+	opts := runnermodels.ModelsForCLI(m.stepEdit.valCLI)
+	if len(opts) == 0 {
+		return m, nil
+	}
+	switch key.String() {
+	case "left", "h":
+		m.stepEdit.valModel = stepNeighbor(opts, m.stepEdit.valModel, -1)
+		m.stepEdit.errMsg = ""
+		return m, nil
+	case "right", "l":
+		m.stepEdit.valModel = stepNeighbor(opts, m.stepEdit.valModel, +1)
+		m.stepEdit.errMsg = ""
+		return m, nil
+	}
+	if key.String() >= "1" && key.String() <= "9" {
+		idx := int(key.String()[0] - '1')
+		if idx >= 0 && idx < len(opts) {
+			m.stepEdit.valModel = opts[idx]
+			m.stepEdit.errMsg = ""
+		}
+	}
+	return m, nil
 }
 
 func (m model) stepHandleKindKey(key tea.KeyMsg) (model, tea.Cmd) {
@@ -493,6 +580,7 @@ func (m model) stepHandleValCLIKey(key tea.KeyMsg) (model, tea.Cmd) {
 func (m *model) afterValCLIChange() {
 	m.stepEdit.valSkillCursor = 0
 	m.stepEdit.errMsg = ""
+	m.stepEdit.valModel = runnermodels.DefaultModel(m.stepEdit.valCLI)
 	if m.stepEdit.valKind == KindSkill && !m.cliHasSkills(m.stepEdit.valCLI) {
 		m.stepEdit.valKind = KindPrompt
 	}
@@ -847,6 +935,14 @@ func (m model) buildStep() (Step, error) {
 		Input:   in,
 	}
 
+	// model: solo lo escribimos al YAML si difiere del default del CLI.
+	// Mantener el YAML minimo es consistente con otros campos opcionales
+	// (validator, max_loops, on_max_loops). El runner cae al mismo default
+	// cuando el campo esta vacio, asi que el comportamiento no cambia.
+	if chosen := m.stepEdit.model; chosen != "" && chosen != runnermodels.DefaultModel(cli) {
+		step.Model = chosen
+	}
+
 	if m.stepEdit.validatorOn {
 		v, maxLoops, onMaxLoops, err := m.buildValidator()
 		if err != nil {
@@ -904,7 +1000,13 @@ func (m model) buildValidator() (*Validator, int, string, error) {
 		return nil, 0, "", fmt.Errorf("validator: on_max_loops invalido: %s", onMax)
 	}
 
-	return &Validator{CLI: cli, Kind: kind, Content: content}, maxLoops, onMax, nil
+	v := &Validator{CLI: cli, Kind: kind, Content: content}
+	// Misma regla que buildStep: model: se persiste solo si difiere del
+	// default del CLI del validator.
+	if chosen := m.stepEdit.valModel; chosen != "" && chosen != runnermodels.DefaultModel(cli) {
+		v.Model = chosen
+	}
+	return v, maxLoops, onMax, nil
 }
 
 func contains(haystack []string, needle string) bool {
@@ -978,6 +1080,7 @@ func (m *model) activeFocusOrder() []StepFieldFocus {
 	base := []StepFieldFocus{
 		StepFocusName,
 		StepFocusCLI,
+		StepFocusModel,
 		StepFocusKind,
 		StepFocusContent,
 		StepFocusInput,
@@ -986,6 +1089,7 @@ func (m *model) activeFocusOrder() []StepFieldFocus {
 	if m.stepEdit.validatorOn {
 		base = append(base,
 			StepFocusValCLI,
+			StepFocusValModel,
 			StepFocusValKind,
 			StepFocusValContent,
 			StepFocusValMaxLoops,
@@ -1137,6 +1241,20 @@ func (m model) viewStep() string {
 	}
 	b.WriteString("\n")
 	b.WriteString(renderCLIPills(m, m.stepEdit.focus == StepFocusCLI))
+	b.WriteString("\n")
+
+	// model pills (opcional segun CLI). opencode y CLIs desconocidos no
+	// aceptan override — la fila igual aparece para que el layout no salte.
+	b.WriteString(labelStyle.Render("Modelo"))
+	if m.stepEdit.focus == StepFocusModel {
+		if runnermodels.SupportsModelOverride(m.stepEdit.cli) {
+			b.WriteString(dimStyle.Render("  ← foco · ←/→ cambiar · 1-9 jump"))
+		} else {
+			b.WriteString(dimStyle.Render("  ← foco · " + m.stepEdit.cli + " no soporta elegir modelo desde el YAML"))
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(renderModelPills(m.stepEdit.cli, m.stepEdit.model, m.stepEdit.focus == StepFocusModel))
 	b.WriteString("\n")
 
 	// kind toggle. Si el CLI elegido no tiene skills, ocultamos la pill
@@ -1440,6 +1558,19 @@ func renderValidatorBlock(m model) string {
 	b.WriteString(renderValCLIPills(m))
 	b.WriteString("\n")
 
+	// Modelo del validator (mismo contrato que el del step).
+	b.WriteString(labelStyle.Render("Modelo"))
+	if m.stepEdit.focus == StepFocusValModel {
+		if runnermodels.SupportsModelOverride(m.stepEdit.valCLI) {
+			b.WriteString(dimStyle.Render("  ← foco · ←/→ cambiar · 1-9 jump"))
+		} else {
+			b.WriteString(dimStyle.Render("  ← foco · " + m.stepEdit.valCLI + " no soporta elegir modelo desde el YAML"))
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(renderModelPills(m.stepEdit.valCLI, m.stepEdit.valModel, m.stepEdit.focus == StepFocusValModel))
+	b.WriteString("\n")
+
 	// Kind toggle (solo prompt si el CLI no tiene skills).
 	hasSkills := m.cliHasSkills(m.stepEdit.valCLI)
 	b.WriteString(labelStyle.Render("Kind"))
@@ -1549,6 +1680,33 @@ func renderValContent(m model) string {
 		style = style.Width(inner)
 	}
 	return label + "\n" + style.Render(body)
+}
+
+// renderModelPills renderiza la fila de modelos para el CLI dado. Sirve
+// tanto al step principal como al validator — el caller pasa cli + el
+// modelo seleccionado actual + si la fila esta focuseada.
+//
+// Si el CLI no esta en el whitelist (opencode o un CLI custom), en lugar
+// de pills mostramos un texto dimmed "(no aplica — <cli> usa la config
+// del propio CLI)". El cursor puede aterrizar en la fila igual; ←/→ son
+// no-op para que el usuario entienda que es un campo informativo.
+func renderModelPills(cli, selected string, focused bool) string {
+	opts := runnermodels.ModelsForCLI(cli)
+	if len(opts) == 0 {
+		return "  " + dimStyle.Render("(no aplica — "+cli+" usa la config del propio CLI)")
+	}
+	var parts []string
+	for _, m := range opts {
+		switch {
+		case m == selected && focused:
+			parts = append(parts, selectedItem.Render("["+m+"]"))
+		case m == selected:
+			parts = append(parts, selectedOff.Render("["+m+"]"))
+		default:
+			parts = append(parts, dimStyle.Render(" "+m+" "))
+		}
+	}
+	return "  " + strings.Join(parts, "  ")
 }
 
 func renderMaxLoopsPills(m model) string {

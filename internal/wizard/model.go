@@ -150,6 +150,11 @@ type StepFieldFocus int
 const (
 	StepFocusName StepFieldFocus = iota
 	StepFocusCLI
+	// StepFocusModel: pill row con los modelos validos para el CLI elegido.
+	// Solo se navega/renderiza si el CLI soporta override (claude/codex/
+	// gemini); opencode lo muestra dim con "(no aplica)" pero la fila igual
+	// existe en el orden visible para mantener layout estable.
+	StepFocusModel
 	StepFocusKind
 	StepFocusContent
 	StepFocusInput
@@ -158,6 +163,7 @@ const (
 	StepFocusValToggle
 	// Bloque validator (visible solo si validatorOn=true).
 	StepFocusValCLI
+	StepFocusValModel
 	StepFocusValKind
 	StepFocusValContent
 	StepFocusValMaxLoops
@@ -263,6 +269,7 @@ type stepEditState struct {
 
 	// selecciones discretas
 	cli   string // claude | codex | gemini | opencode
+	model string // alias o nombre completo del modelo de IA — vacio = default por CLI
 	kind  string // prompt | skill
 	input string // text | pr | issue | file | url | none | previous_output
 
@@ -278,6 +285,7 @@ type stepEditState struct {
 	// perder lo tipeado).
 	validatorOn     bool
 	valCLI          string
+	valModel        string // mismo contrato que `model`; vacio = default del valCLI
 	valKind         string
 	valContentInput textInput // multiline cuando kind=prompt; ignorado cuando kind=skill
 	valSkillCursor  int
