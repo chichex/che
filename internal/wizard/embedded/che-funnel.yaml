@@ -606,17 +606,24 @@ steps:
   # ───────────────────────────────────────────────────────────────────────────
   # Input: OUTPUT del step execute (PRs validados).
   # Acción: marcar PR ready, esperar CI, fix loop si conflict/CI rojo (≤3),
-  #         mergear, borrar branch, cerrar issues asociados, postear
-  #         comment template de scoring 1-10 (NO gating; el humano lo
-  #         llena después), aplicar che:closing → che:closed.
+  #         validar que el PR está listo (CI verde, sin conflictos), aplicar
+  #         label `validated` al PR, y postear siempre el comment de scoring
+  #         extendido con Validation status (passed|failed).
+  #
+  # El merge queda como decisión humana. El step NO mergea, NO borra branch
+  # ni worktree (el cleanup es responsabilidad del humano), y NO cierra el
+  # issue — el `Closes #N` del body del PR se ejecutará cuando el humano
+  # mergee. El worktree .worktrees/issue-<N> queda en pie; limpiarlo
+  # manualmente con `git worktree remove --force .worktrees/issue-<N>`.
   - name: close
     cli: claude
     kind: prompt
     input: previous_output
     content: |
-      Sos un ingeniero senior cerrando PRs. Tu objetivo es dejarlos
-      mergeados y limpios; el scoring humano lo hace el usuario después
-      via comment template.
+      Sos un ingeniero senior validando PRs antes del merge humano. Tu
+      objetivo es confirmar que el PR está limpio (CI verde, sin
+      conflictos), aplicar el label `validated`, y postear un comment de
+      scoring con el resultado. El merge lo decide el humano.
 
       INPUT — el bloque OUTPUT del step execute contiene una lista `prs:`
       con número, branch e issue asociado. Procesá cada PR:
@@ -629,11 +636,7 @@ steps:
          Si isDraft=true, marcalo ready:
              gh pr ready <PR#>
 
-      2. Aplicá transición al issue asociado:
-             issue=$(gh pr view <PR#> --json closingIssuesReferences -q '.closingIssuesReferences[0].number')
-             gh issue edit "$issue" --add-label che:closing --remove-label che:executed
-
-      3. Fix loop (≤3 intentos): si mergeable=CONFLICTING o el rollup tiene
+      2. Fix loop (≤3 intentos): si mergeable=CONFLICTING o el rollup tiene
          checks failing, invocá el fix:
 
              cd .worktrees/issue-<issue>      # reusá worktree existente
@@ -649,39 +652,29 @@ steps:
          Después del push, esperá CI:
              gh pr checks <PR#> --watch
 
-         Si después de 3 intentos sigue rojo o conflictivo, NO mergees.
-         Posteá comment explicando qué bloquea y dejá el PR en
-         che:closing — el humano decide.
+         Si después de 3 intentos sigue rojo o conflictivo, marcá
+         VALIDATION_STATUS=failed y pasá al paso 4 directamente (sin
+         aplicar label `validated`).
 
-      4. Mergear con merge commit (NO squash, preservamos historia):
-             gh pr merge <PR#> --merge --delete-branch
+      3. Si el fix loop terminó con CI verde y mergeable OK (VALIDATION_STATUS=passed):
 
-         `--delete-branch` borra branch remota y local. Después borrá el
-         worktree:
-             git worktree remove --force .worktrees/issue-<issue> 2>/dev/null || true
+         a. Creá el label `validated` si no existe:
+                gh label create validated --color 0075ca --force
 
-      5. Cerrar issue(s) asociado(s) — el `Closes #N` del body del PR ya
-         los cierra al mergear, pero aplicamos la transición de label:
+         b. Quitá labels validated:* residuales y aplicá `validated`:
+                gh pr edit <PR#> \
+                  --remove-label validated:changes-requested \
+                  --remove-label validated:needs-human || true
+                gh pr edit <PR#> --add-label validated
 
-             gh issue edit "$issue" --add-label che:closed --remove-label che:closing
+      4. Posteá siempre el comment de scoring template (incluso si
+         VALIDATION_STATUS=failed):
 
-         Quitá labels bloqueantes residuales:
-
-             gh issue edit "$issue" \
-               --remove-label plan-validated:changes-requested \
-               --remove-label plan-validated:needs-human || true
-             gh pr edit <PR#> \
-               --remove-label validated:changes-requested \
-               --remove-label validated:needs-human || true
-
-      6. Postear comment de scoring template en el PR (sin gate):
-
-             gh pr comment <PR#> --body-file <scoring-template.md>
-
-         Template:
-
+             gh pr comment <PR#> --body "$(cat <<'SCORING'
              <!-- claude-cli: flow=close iter=1 agent=claude role=scoring-template -->
              ## Scoring del cierre
+
+             **Validation status:** passed|failed   ← reemplazá con el valor real
 
              Para que el humano puntúe del 1 al 10 cuando tenga 5 minutos.
 
@@ -695,24 +688,38 @@ steps:
              _El embudo no usa este score como gate; vive como historia
              del PR. Si querés tracking, usá `gh pr list --json comments`
              y filtrá por este header._
+             SCORING
+             )"
+
+         Sustituí `passed|failed` por el valor real de VALIDATION_STATUS
+         antes de postear.
+
+         Si VALIDATION_STATUS=failed, incluí también en el body del
+         comment una sección `**Blocker:**` con una línea explicando qué
+         impidió que el CI quedara verde (ej: "CI rojo tras 3 intentos —
+         ver run <URL>").
 
       Reglas duras:
-      - Si CI nunca pasa después de 3 intentos, NO mergees. Dejá el PR
-        en che:closing y el issue también, postea comment explicando.
-      - No cambies la base del PR ni abras PRs nuevos.
+      - NO mergees. El merge es siempre decisión humana.
       - No force-push.
+      - No cambies la base del PR ni abras PRs nuevos.
+      - No borrés branch ni worktree (el worktree .worktrees/issue-<N>
+        queda en pie; el humano lo limpia cuando quiera).
+      - No cambiés labels del issue asociado.
+      - Si CI no pasa después de 3 intentos: posteá el comment con
+        status=failed y NO aplicás label `validated`.
 
       Al final devolvé el resumen:
 
           OUTPUT:
-          closed:
+          validated:
             - issue: <N>
               pr: <PR#>
-              merged: <bool>
-              reason_if_not_merged: <opcional>
+              validated: <bool>
+              reason_if_not_validated: <opcional>
             - ...
 
-      PRs a cerrar:
+      PRs a validar:
       <<<
       {{INPUT}}
       >>>
