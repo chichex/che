@@ -82,13 +82,26 @@ jobs:
       # el checkout por defecto traería la rama default, y el prompt de abajo
       # asume que el código del PR está en el working directory.
       #
-      # Sin `fetch-depth: 0`: el review saca el diff por API (`gh pr diff`) y no
-      # tiene git en el allowlist, así que la historia completa era overhead puro
-      # (12s de checkout en dale-que-sale). El ejemplo oficial del action también
-      # usa profundidad 1.
+      # El diff se lee por API (`gh pr diff`), pero GitHub la corta en 20.000
+      # líneas (HTTP 406 `too_large`): en un PR grande el review se quedaba sin
+      # diff y terminaba en verde sin publicar nada (pramaestudio/brik#101).
+      # Por eso también se trae la base y el review puede caer a `git diff`
+      # local. `fetch-depth: 0` hace falta para el merge-base del `...`.
       - uses: actions/checkout@v4
         with:
           ref: refs/pull/${{ inputs.pr }}/head
+          fetch-depth: 0
+
+      - name: Traer la rama base del PR
+        id: base
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+        run: |
+          base=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json baseRefName -q .baseRefName)
+          git fetch --no-tags origin "+refs/heads/$base:refs/remotes/origin/$base"
+          echo "ref=origin/$base" >> "$GITHUB_OUTPUT"
+          echo "inicio=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - uses: anthropics/claude-code-action@v1
         with:
@@ -127,7 +140,7 @@ jobs:
           claude_args: |
             --model ${{ inputs.model }}
             --effort ${{ inputs.effort }}
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ inputs.pr }}/comments*),Bash(gh api /repos/${{ github.repository }}/pulls/${{ inputs.pr }}/comments*),Bash(gh api \"repos/${{ github.repository }}/pulls/${{ inputs.pr }}/comments*),Bash(gh api \"/repos/${{ github.repository }}/pulls/${{ inputs.pr }}/comments*),Bash(gh api --paginate repos/${{ github.repository }}/pulls/${{ inputs.pr }}/comments*),Bash(gh api --paginate \"repos/${{ github.repository }}/pulls/${{ inputs.pr }}/comments*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ inputs.pr }}/comments*),Bash(gh api /repos/${{ github.repository }}/pulls/${{ inputs.pr }}/comments*),Bash(gh api \"repos/${{ github.repository }}/pulls/${{ inputs.pr }}/comments*),Bash(gh api \"/repos/${{ github.repository }}/pulls/${{ inputs.pr }}/comments*),Bash(gh api --paginate repos/${{ github.repository }}/pulls/${{ inputs.pr }}/comments*),Bash(gh api --paginate \"repos/${{ github.repository }}/pulls/${{ inputs.pr }}/comments*),Bash(git diff:*),Bash(git log:*),Bash(git show:*)"
             --append-system-prompt "Hechos ya establecidos de este proyecto. No los reportes como hallazgos: (1) El review se dispara a mano con workflow_dispatch desde el repo base, así que corre con los secrets del repo aunque el PR venga de un fork; ignorá cualquier limitación de secrets o tokens en PRs de fork. (2) El CI corre en runners efímeros hosteados por GitHub (ubuntu-latest): máquina limpia por job. (3) claude-code-action propaga GITHUB_TOKEN al entorno de los comandos gh: está verificado en producción, no lo reportes como riesgo ni como dependencia frágil. (4) Cada review re-analiza el diff completo; la acumulación de comentarios entre disparos es una limitación conocida y asumida del diseño."
 
           prompt: |
@@ -161,6 +174,19 @@ jobs:
             evaluó y volver a traerlo es ruido. Si un hallazgo previo sigue
             vigente y sin responder, tampoco lo dupliques.
 
+            Para leer el diff usá `gh pr diff ${{ inputs.pr }} --repo ${{ github.repository }}`.
+            Si falla con HTTP 406 / `too_large` (más de 20.000 líneas), NO
+            abandones: el repo local tiene la base, usá git:
+            - `git diff --stat ${{ steps.base.outputs.ref }}...HEAD` para el mapa del PR;
+            - `git diff ${{ steps.base.outputs.ref }}...HEAD -- <rutas>` por archivo o
+              carpeta, salteando fixtures y archivos generados enormes (JSON de
+              datos, `openapi.json`, `schema.ts`, lockfiles) salvo que el
+              hallazgo dependa de ellos;
+            - `git log` / `git show` si necesitás contexto de un commit.
+            Si aun así no pudiste ver el diff, publicá igual el comentario de
+            resumen diciendo qué falló: terminar sin publicar nada es el peor
+            resultado posible.
+
             Después revisá el diff. Reportá TODO lo NUEVO que encuentres —bugs,
             problemas de correctitud y oportunidades de simplificación—,
             incluyendo hallazgos de baja severidad o sobre los que no estés
@@ -177,3 +203,23 @@ jobs:
 
             Solo publicá comentarios de GitHub — no entregues el review como
             texto de respuesta, porque se pierde.
+
+      # Red de seguridad: si el review terminó sin publicar nada (ni resumen ni
+      # inline), el job falla y deja un aviso en el PR en vez de quedar verde
+      # en silencio. Corre también si el paso anterior falló.
+      - name: Verificar que el review publicó algo
+        if: always() && steps.base.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ inputs.pr }}
+          INICIO: ${{ steps.base.outputs.inicio }}
+        run: |
+          contar() { gh api --paginate "$1" -q "[.[] | select(.user.login == \"github-actions[bot]\" and .created_at >= \"$INICIO\")] | length" | awk '{s+=$1} END {print s+0}'; }
+          generales=$(contar "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100")
+          inline=$(contar "repos/$GITHUB_REPOSITORY/pulls/$PR/comments?per_page=100")
+          echo "Publicados en esta corrida: $generales generales, $inline inline"
+          if [ "$generales" -eq 0 ] && [ "$inline" -eq 0 ]; then
+            gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "⚠️ El review de Claude terminó sin publicar ningún comentario (run $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID). No lo tomes como \"sin hallazgos\": revisá el log."
+            echo "::error::El review no publicó ningún comentario"
+            exit 1
+          fi
